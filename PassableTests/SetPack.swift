@@ -1,22 +1,37 @@
 import XCTest
 @testable import Passable
 
-/// Not a unit test: packs the songs in $PASSABLE_PACK (one path per line,
-/// kept in that order) with their cached analyses into the `.passable` file
-/// at $PASSABLE_PACK_OUT. Skipped unless both are set.
+/// Not a unit test: loads the songs in $PASSABLE_PACK (one path per line),
+/// lets Passable order them as the Set tab does, and writes the set, songs and analyses
+/// included, to the `.passable` file at $PASSABLE_PACK_OUT. Skipped unless
+/// both paths are set.
+@MainActor
 final class SetPack: XCTestCase {
-    func testPack() throws {
+    func testPack() async throws {
         let env = ProcessInfo.processInfo.environment
         guard let listFile = env["PASSABLE_PACK"], let out = env["PASSABLE_PACK_OUT"],
               let list = try? String(contentsOfFile: listFile, encoding: .utf8) else {
             throw XCTSkip("set PASSABLE_PACK and PASSABLE_PACK_OUT")
         }
-        let songs = list.split(separator: "\n").map(String.init).filter { !$0.isEmpty && !$0.hasPrefix("#") }.map { path in
-            let url = URL(fileURLWithPath: path)
-            return (url: url, analysis: (try? StemCache.directory(for: url)).flatMap(StemCache.loadAnalysis))
+        let urls = list.split(separator: "\n").map(String.init).filter { !$0.isEmpty && !$0.hasPrefix("#") }
+            .map { URL(fileURLWithPath: $0) }
+        let set = SetSession(persists: false)
+        set.add(urls)
+        let deadline = Date().addingTimeInterval(3600)
+        while !set.isReady {
+            if Date() > deadline { XCTFail("timeout"); return }
+            if let failed = set.items.first(where: { if case .failed = $0.status { return true } else { return false } }) {
+                XCTFail("\(failed.title): \(failed.status)"); return
+            }
+            try await Task.sleep(nanoseconds: 200_000_000)
         }
-        for song in songs where song.analysis == nil { print("PACK no analysis: \(song.url.lastPathComponent)") }
-        try PassableFile.write(songs: songs, transitions: [], masterVolume: 0.85, to: URL(fileURLWithPath: out)) { _ in }
+        // Songs added to a set are ordered as soon as the last one is ready.
+        for (i, item) in set.items.enumerated() {
+            let a = item.analysis!
+            print(String(format: "PACK %2d  %6.2f BPM  %@  %@", i + 1, a.grid.bpm, a.key.camelotCode, item.title))
+        }
+        try PassableFile.write(songs: set.items.map { ($0.url, $0.analysis) }, transitions: [], masterVolume: 0.85,
+                               to: URL(fileURLWithPath: out)) { _ in }
         print("PACK wrote \(out)")
     }
 }

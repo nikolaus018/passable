@@ -58,18 +58,37 @@ enum MusicTools {
 
     /// Downloads the song's audio as YouTube serves it (AAC in M4A), without
     /// re-encoding: YouTube audio is lossy, so WAV would only make it eight
-    /// times bigger, never better. Only when no M4A stream exists is the best
-    /// stream converted. Returns the file's URL in the library folder.
+    /// times bigger, never better. YouTube sometimes refuses its M4A stream
+    /// (HTTP 403); after a retry, the best other stream (Opus) is converted
+    /// to 256 kbps AAC, which is transparent. Returns the file's URL in the
+    /// library folder.
     static func download(_ result: MusicSearchResult, folder: URL = libraryFolder) throws -> URL {
+        let attempts: [[String]] = [
+            ["-f", "bestaudio[ext=m4a]", "-x", "--audio-format", "m4a"],
+            ["-f", "bestaudio[ext=m4a]", "-x", "--audio-format", "m4a"],
+            ["-f", "bestaudio/best", "-x", "--audio-format", "m4a", "--audio-quality", "256K"],
+        ]
+        var lastError: Error?
+        for format in attempts {
+            do {
+                return try download(result, format: format, folder: folder)
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError!
+    }
+
+    private static func download(_ result: MusicSearchResult, format: [String], folder: URL) throws -> URL {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let ffmpeg = try executable("ffmpeg")
         // Stage downloads outside the library: nothing should ever load a partial file.
         let staging = folder.appendingPathComponent(".downloads/\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: staging) }
-        _ = try run(["--no-playlist", "--no-progress", "-f", "bestaudio[ext=m4a]/bestaudio/best", "-x", "--audio-format", "m4a",
-                     "--ffmpeg-location", ffmpeg.path, "-P", staging.path,
-                     "-o", "%(title).150B [%(id)s].%(ext)s", "--", "https://www.youtube.com/watch?v=\(result.id)"])
+        _ = try run(["--no-playlist", "--no-progress"] + format + [
+            "--ffmpeg-location", ffmpeg.path, "-P", staging.path,
+            "-o", "%(title).150B [%(id)s].%(ext)s", "--", "https://www.youtube.com/watch?v=\(result.id)"])
         let files = try FileManager.default.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil)
         guard let audio = files.first(where: { $0.pathExtension.lowercased() == "m4a" }) else {
             throw PassableError.message("The download did not produce an audio file.")
