@@ -621,8 +621,8 @@ final class SetSession: ObservableObject {
     }
 
     var suggestedTransitionName: String {
-        guard let mix, let t = mix.transitions.first(where: { $0.from == focused }) else { return "Transition.wav" }
+        guard let mix, let t = mix.transitions.first(where: { $0.from == focused }) else { return "Transition.m4a" }
         let name = { (i: Int) in self.items.indices.contains(i) ? self.items[i].title : "\(i + 1)" }
-        return "\(name(t.from)) → \(name(t.to)).wav"
+        return "\(name(t.from)) → \(name(t.to)).m4a"
     }
 }

@@ -20,7 +20,7 @@ enum TransitionPreset: String, CaseIterable, Codable, Identifiable {
     var summary: String {
         switch self {
         case .stemSwap:
-            return "B's drums and melody build in with their low end killed; kick and bass change hands on one downbeat (on B's drop if B is still building); A's vocal echoes out as B's takes over."
+            return "B's drums and melody build in with their low end killed; kick and bass change hands on one downbeat (on B's drop if B is still building); A's vocal echoes out as B's vocal or low end takes over."
         case .dropSwap:
             return "B's drums build filtered, then everything swaps at once on the drop while A's melody and vocal echo away."
         case .longBlend:
@@ -113,9 +113,11 @@ struct TransitionBuilder {
             // Hard bass swap on the same downbeat.
             automate(.a, .bass, .volume, [(sw, 1, .hold), (sw + 0.001, 0, .linear)])
             automate(.b, .bass, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
-            // A vocal echoes out just before the swap.
-            automate(.a, .vocals, .delay, [(2 * q - 1, 0, .linear), (2 * q - 0.25, 0.8, .hold), (2 * q + 1, 0, .linear)])
-            automate(.a, .vocals, .volume, [(2 * q - 1, 1, .logarithmic), (2 * q, 0, .linear)])
+            // A's vocal echoes out as B's arrives or B takes the low end,
+            // whichever comes first: pulled any earlier, it leaves a hole.
+            let out = min(v, sw)
+            automate(.a, .vocals, .delay, [(out - 1, 0, .linear), (out - 0.25, 0.8, .hold), (out + 1, 0, .linear)])
+            automate(.a, .vocals, .volume, [(out - 1, 1, .logarithmic), (out, 0, .linear)])
             if keysClash {
                 // Clashing melodies never overlap: A's washes out into a
                 // reverb tail as B's lands on the swap.

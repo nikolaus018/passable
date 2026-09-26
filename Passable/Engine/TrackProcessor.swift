@@ -57,9 +57,10 @@ final class TrackProcessor: @unchecked Sendable {
                 }
                 let stems = try StemCache.loadStems(from: directory)
                 var analysis: TrackAnalysis
-                if let cached = StemCache.loadAnalysis(from: directory), cached.version == TrackAnalysis.currentVersion {
+                if let cached = StemCache.loadAnalysis(from: directory), cached.version == TrackAnalysis.currentVersion,
+                   (60...200).contains(cached.grid.bpm) {
                     analysis = cached
-                    if analysis.structure == nil {
+                    if analysis.structure?.stemLevel == nil {
                         analysis.structure = TrackStructure.measure(stems: stems, grid: analysis.grid)
                         StemCache.saveAnalysis(analysis, to: directory)
                     }

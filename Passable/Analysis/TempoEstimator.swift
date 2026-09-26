@@ -59,7 +59,20 @@ enum TempoEstimator {
         // lands on kicks and snares every time; a wrong-metre grid only
         // coincides with them every third or fourth beat, so its onsets
         // average clearly lower.
+        //
+        // Off-beat hats can hide the difference, though: a four-on-the-floor
+        // track read at 2:3 (Missing's 123 BPM as 82) puts every other beat
+        // on a hat and scores almost as well. Its kicks give it away — on
+        // the true grid every beat has one — so a clearly better kick fit
+        // settles a close call.
+        let lowOnset = detrended(lowFlux, window: Int(fps / 2))
+        func kickScore(_ p: Double) -> Double {
+            let (lp, lph) = combSearch(lowOnset, periods: stride(from: p - 0.004, through: p + 0.004, by: 0.002),
+                                       phaseStep: 0.1, phaseRange: nil)
+            return combScore(lowOnset, period: lp, phase: lph)
+        }
         let score = combScore(onset, period: period, phase: phase)
+        let kicks = kickScore(period)
         var bestAlternative: (period: Double, phase: Double, score: Double)?
         for ratio in [4.0 / 3, 3.0 / 4, 3.0 / 2, 2.0 / 3] {
             let candidate = period * ratio
@@ -67,7 +80,8 @@ enum TempoEstimator {
             guard bpm >= minBPM / 2, bpm <= maxBPM else { continue }
             let (p, ph) = refine(onset, around: candidate)
             let sc = combScore(onset, period: p, phase: ph)
-            if sc > 1.25 * score, sc > (bestAlternative?.score ?? 0) { bestAlternative = (p, ph, sc) }
+            let better = sc > 1.25 * score || (sc > score && kickScore(p) > 1.4 * kicks)
+            if better, sc > (bestAlternative?.score ?? 0) { bestAlternative = (p, ph, sc) }
         }
         if let alt = bestAlternative { (period, phase) = (alt.period, alt.phase) }
         // Keep the result in range; slow candidates get doubled below.
@@ -91,12 +105,11 @@ enum TempoEstimator {
         // Off-beat hats and shakers are broadband, so in overall flux they
         // can out-score the kick and pull the grid half a beat late. Beats
         // are where the low end hits.
-        let low = detrended(lowFlux, window: Int(fps / 2))
-        if combScore(low, period: period, phase: phase + period / 2) > combScore(low, period: period, phase: phase) {
+        if combScore(lowOnset, period: period, phase: phase + period / 2) > combScore(lowOnset, period: period, phase: phase) {
             phase += period / 2
         }
 
-        let beatPhase = downbeatPhase(period: period, phase: phase, lowFlux: low,
+        let beatPhase = downbeatPhase(period: period, phase: phase, lowFlux: lowOnset,
                                       harmony: harmony, layers: layers, sampleRate: sampleRate)
         var first = (phase + Double(beatPhase) * period) / fps
         // Put the grid where the kicks actually peak. Every track is then

@@ -37,14 +37,15 @@ final class PlaybackEngine {
 }
 
 enum Exporter {
-    /// Renders `range` (master frames) of the mix to a 24-bit WAV, plus
+    /// Renders `range` (master frames) of the mix to an audio file (see
+    /// `AudioWriter` for the formats), plus
     /// `tail` extra seconds so reverb and echo ring out instead of being cut.
     static func render(snapshot: MixSnapshot, range: Range<Int>, tail: Double, to url: URL,
                        progress: (Double) -> Void) throws {
         let renderer = MixRenderer(snapshot: snapshot)
         renderer.setPositionImmediately(range.lowerBound)
         let block = 4096
-        let writer = try WAVWriter(url: url, blockSize: block)
+        let writer = try AudioWriter(url: url, blockSize: block)
         var left = [Float](repeating: 0, count: block)
         var right = [Float](repeating: 0, count: block)
         let total = range.count + Int(tail * AudioIO.sampleRate)

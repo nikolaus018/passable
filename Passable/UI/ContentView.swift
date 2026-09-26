@@ -126,8 +126,8 @@ struct DeckCard: View {
                     Stat(label: "Trim", value: String(format: "%+.1f dB", session.trimDB(side)))
                     Spacer(minLength: 0)
                     Menu {
-                        Button("Halve BPM") { session.adjustGrid(side, .halve) }
-                        Button("Double BPM") { session.adjustGrid(side, .double) }
+                        Button("Halve BPM") { session.adjustGrid(side, .halve) }.disabled(a.grid.bpm / 2 < 60)
+                        Button("Double BPM") { session.adjustGrid(side, .double) }.disabled(a.grid.bpm * 2 > 200)
                         Divider()
                         Button("Downbeat One Beat Later") { session.adjustGrid(side, .shiftBeats(1)) }
                         Button("Downbeat One Beat Earlier") { session.adjustGrid(side, .shiftBeats(-1)) }

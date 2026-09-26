@@ -57,6 +57,54 @@ final class SetLab: XCTestCase {
             return out
         }
 
+        /// Where both decks' drums play, how far apart their hits land (ms,
+        /// per two-bar window; full-band onsets, since the kicks never
+        /// overlap): anything past ~10 ms is heard as a flam.
+        func kickOffsets(_ t: SetMix.Transition, from: Double, bars: Int) -> [Double] {
+            func mono(_ track: Int) -> [Float] {
+                let renderer = MixRenderer(snapshot: set.makeSnapshot { i, s in i == track && s == .drums })
+                renderer.setPositionImmediately(Int(from * sr))
+                let n = Int(Double(bars) * t.barSeconds * sr)
+                var l = [Float](repeating: 0, count: n), r = l
+                renderer.render(left: &l, right: &r, count: n)
+                return zip(l, r).map { ($0 + $1) / 2 }
+            }
+            let a = TempoEstimator.onsetEnvelopes(mono(t.from), sampleRate: sr).all
+            let b = TempoEstimator.onsetEnvelopes(mono(t.to), sampleRate: sr).all
+            let fps = sr / Double(TempoEstimator.hop)
+            let window = Int(2 * t.barSeconds * fps)
+            var out: [Double] = []
+            var w = 0
+            while w + window <= min(a.count, b.count) {
+                let ra = Array(a[w..<(w + window)]), rb = Array(b[w..<(w + window)])
+                let ea = ra.reduce(0, +), eb = rb.reduce(0, +)
+                // Both kicks really there, not one side's bleed.
+                if ea > 0, eb > 0, min(ea, eb) / max(ea, eb) > 0.2 {
+                    var best = (lag: 0, score: -Float.infinity)
+                    for lag in -8...8 {
+                        var dot: Float = 0
+                        for i in 8..<(window - 8) { dot += ra[i] * rb[i + lag] }
+                        if dot > best.score { best = (lag, dot) }
+                    }
+                    // Sub-frame peak by parabola.
+                    func at(_ lag: Int) -> Float {
+                        var dot: Float = 0
+                        for i in 8..<(window - 8) { dot += ra[i] * rb[i + lag] }
+                        return dot
+                    }
+                    var lag = Double(best.lag)
+                    if abs(best.lag) < 8 {
+                        let y0 = at(best.lag - 1), y1 = best.score, y2 = at(best.lag + 1)
+                        let d = y0 - 2 * y1 + y2
+                        if d < 0 { lag += Double(0.5 * (y0 - y2) / d) }
+                    }
+                    out.append(lag / fps * 1000)
+                }
+                w += window
+            }
+            return out
+        }
+
         print("\n==== TRANSITIONS ====")
         var worst: [String] = []
         for t in mix.transitions {
@@ -77,11 +125,18 @@ final class SetLab: XCTestCase {
             let bump = middle.isEmpty ? 0 : middle.max()! - max(before, after)
             let lowx2 = (0..<all.count).filter { lowA[$0] > -38 && lowB[$0] > -38 && abs(lowA[$0] - lowB[$0]) < 10 }.count
             let vocx2 = (0..<all.count).filter { vocA[$0] > -40 && vocB[$0] > -40 && abs(vocA[$0] - vocB[$0]) < 12 }.count
-            let line = String(format: "%2d→%2d at %@  %@  level %.1f → %.1f dB (%+.1f)  dip %.1f  bump %.1f  lowx2 %d  vocx2 %d",
+            // Echo Out has no overlap to flam in.
+            let flams = t.edit.preset == .echoOut ? [] : kickOffsets(t, from: from, bars: bars)
+            // Typical, not worst: in some windows the two patterns simply
+            // differ and correlate anywhere.
+            let flam = flams.isEmpty ? 0 : flams.map(abs).sorted()[flams.count / 2]
+            let line = String(format: "%2d→%2d at %@  %@  level %.1f → %.1f dB (%+.1f)  dip %.1f  bump %.1f  lowx2 %d  vocx2 %d  flam %.0f ms [%@] nudge %+.0f ms",
                               t.from + 1, t.to + 1, Theme.time(t.start), t.plan.preset.displayName, before, after,
-                              after - before, dip, bump, lowx2, vocx2)
+                              after - before, dip, bump, lowx2, vocx2, flam,
+                              flams.map { String(format: "%.0f", $0) }.joined(separator: " "), t.nudge * 1000)
             print(line)
-            if abs(after - before) > 3 || dip > 4 || lowx2 > 2 || vocx2 > 1 {
+            // A lift is how a set builds; a drop is what empties a floor.
+            if after - before < -3 || after - before > 6 || dip > 4 || lowx2 > 2 || vocx2 > 1 || flam > 10 {
                 worst.append(line)
                 let a = levels(from: from, seconds: Double(bars) * bar, step: bar) { i, _ in i == t.from }
                 let b = levels(from: from, seconds: Double(bars) * bar, step: bar) { i, _ in i == t.to }

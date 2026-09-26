@@ -34,6 +34,10 @@ final class RealTrackProbe: XCTestCase {
                     }
                     func med(_ x: [Double]) -> Double { x.isEmpty ? .nan : x.sorted()[x.count / 2] * 1000 }
                     print(String(format: "  GRID kick offset early %.1f ms, late %.1f ms (n=%d/%d)", med(early), med(late), early.count, late.count))
+                    if ProcessInfo.processInfo.environment["PASSABLE_PROBE_FRESH"] != nil {
+                        let fresh = TrackAnalyzer.analyze(stems: loaded.stems)
+                        print(String(format: "  FRESH %6.2f BPM  first %.3f  (cached %.2f)", fresh.grid.bpm, fresh.grid.firstDownbeat, a.grid.bpm))
+                    }
                     box.items.append(((path as NSString).lastPathComponent.prefix(28).description, a))
                     if let st = a.structure {
                         print("  STRUCT drums from bar \(st.firstActiveBar(.drums).map { $0 + 1 } ?? -1), vocals bars \(st.firstActiveBar(.vocals).map { $0 + 1 } ?? -1)–\(st.lastActiveBarEnd(.vocals) ?? -1) of \(a.grid.barCount(duration: a.duration))")

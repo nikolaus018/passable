@@ -464,7 +464,7 @@ final class Session: ObservableObject {
 
     private func place(a: TrackAnalysis, b: TrackAnalysis) {
         let result = AutoPlacement.place(a: a, b: b, bars: transitionBars, preset: preset,
-                                         trimA: Float(trimDB(.a)), trimB: Float(trimDB(.b)))
+                                         trimA: Float(trimDB(.a)), trimB: Float(trimDB(.b)), keysClash: keysIncompatible)
         vocalHandoff = result.vocalHandoff
         lowSwap = result.lowSwap
         isPlacing = true
@@ -612,8 +612,11 @@ final class Session: ObservableObject {
         guard var loaded = deck(side).loaded else { return }
         var grid = loaded.analysis.grid
         switch edit {
-        case .halve: grid.bpm /= 2
-        case .double: grid.bpm *= 2
+        // Nothing plays slower than 60 or faster than 200: past that a second
+        // click would only break the grid (Beauty And A Beat once reached
+        // 512 BPM that way).
+        case .halve: guard grid.bpm / 2 >= 60 else { return }; grid.bpm /= 2
+        case .double: guard grid.bpm * 2 <= 200 else { return }; grid.bpm *= 2
         case .shiftBeats(let k): grid.firstDownbeat += Double(k) * grid.beatSeconds
         case .nudge(let ms): grid.firstDownbeat += ms / 1000
         }
@@ -811,6 +814,6 @@ final class Session: ObservableObject {
     var suggestedExportName: String {
         let a = deckA.url?.deletingPathExtension().lastPathComponent ?? "A"
         let b = deckB.url?.deletingPathExtension().lastPathComponent ?? "B"
-        return "\(a) → \(b).wav"
+        return "\(a) → \(b).m4a"
     }
 }

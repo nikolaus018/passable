@@ -109,22 +109,35 @@ enum AudioIO {
     }
 }
 
-/// Streams stereo float blocks into a 24-bit PCM WAV.
-final class WAVWriter {
+/// Writes a render as `.m4a` (AAC, 256 kbps) or, for any other extension,
+/// a 24-bit WAV. The songs come in as YouTube AAC, so a WAV of the mix is
+/// ten times the size and no better to the ear; it stays available for
+/// editing in other software.
+final class AudioWriter {
     private let file: AVAudioFile
     private let buffer: AVAudioPCMBuffer
 
     init(url: URL, blockSize: Int) throws {
         try? FileManager.default.removeItem(at: url)
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: AudioIO.sampleRate,
-            AVNumberOfChannelsKey: 2,
-            AVLinearPCMBitDepthKey: 24,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: false,
-        ]
+        let settings: [String: Any]
+        if url.pathExtension.lowercased() == "m4a" {
+            settings = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: AudioIO.sampleRate,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 256_000,
+            ]
+        } else {
+            settings = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: AudioIO.sampleRate,
+                AVNumberOfChannelsKey: 2,
+                AVLinearPCMBitDepthKey: 24,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+            ]
+        }
         file = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
         buffer = AVAudioPCMBuffer(pcmFormat: AudioIO.stereoFormat, frameCapacity: AVAudioFrameCount(blockSize))!
     }

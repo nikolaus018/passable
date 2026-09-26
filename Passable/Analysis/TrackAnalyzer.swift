@@ -10,7 +10,7 @@ struct TrackAnalysis: Codable, Equatable {
     /// Analyses older than `currentVersion` are redone on load.
     var version: Int?
 
-    static let currentVersion = 3
+    static let currentVersion = 4
 }
 
 enum TrackAnalyzer {

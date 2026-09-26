@@ -73,9 +73,9 @@ enum OpenPanel {
     }
 
     @MainActor
-    static func save(name: String, type: UTType = .wav, _ handler: (URL) -> Void) {
+    static func save(name: String, types: [UTType] = [.mpeg4Audio, .wav], _ handler: (URL) -> Void) {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [type]
+        panel.allowedContentTypes = types
         panel.nameFieldStringValue = name
         panel.canCreateDirectories = true
         if panel.runModal() == .OK, let url = panel.url { handler(url) }

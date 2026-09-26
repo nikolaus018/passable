@@ -56,7 +56,7 @@ struct SetView: View {
             }
             Menu {
                 Button("Export Set…") {
-                    OpenPanel.save(name: set.suggestedSetName, type: .passableSet) { set.exportSet(to: $0) }
+                    OpenPanel.save(name: set.suggestedSetName, types: [.passableSet]) { set.exportSet(to: $0) }
                 }
                 .disabled(set.items.isEmpty)
                 Button("Open Set…") { OpenPanel.chooseSet { set.openSet($0) } }
@@ -269,7 +269,7 @@ struct SetTransportBar: View {
             } else {
                 Menu {
                     Button("Whole Set…") {
-                        OpenPanel.save(name: "Passable Set.wav") { set.export(.set, to: $0) }
+                        OpenPanel.save(name: "Passable Set.m4a") { set.export(.set, to: $0) }
                     }
                     Button("This Transition (±8 bars)…") {
                         OpenPanel.save(name: set.suggestedTransitionName) { set.export(.focusedTransition, to: $0) }

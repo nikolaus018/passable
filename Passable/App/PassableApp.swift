@@ -27,7 +27,7 @@ struct PassableApp: App {
                     .keyboardShortcut("o", modifiers: [.command, .shift])
                     .disabled(set.exportProgress != nil)
                 Button("Export Set…") {
-                    OpenPanel.save(name: set.suggestedSetName, type: .passableSet) { set.exportSet(to: $0) }
+                    OpenPanel.save(name: set.suggestedSetName, types: [.passableSet]) { set.exportSet(to: $0) }
                 }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
                 .disabled(set.items.isEmpty || set.exportProgress != nil)

@@ -19,8 +19,9 @@ enum MixMath {
         return a / (b * tempoMultiplier(a: a, b: b))
     }
 
-    /// Beyond this, stretching B is audible: Echo Out, no overlap.
-    static let maxStretch = 0.08
+    /// Beyond this, stretching B is audible (and it is as far as a DJ's
+    /// key-locked pitch fader is usually pushed): Echo Out, no overlap.
+    static let maxStretch = 0.06
 
     static func recommendedPreset(rate: Double) -> TransitionPreset {
         abs(rate - 1) > maxStretch ? .echoOut : .stemSwap
@@ -61,11 +62,12 @@ struct PairPlan: Equatable {
         let rate = MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)
         let preset = MixMath.recommendedPreset(rate: rate)
         let bars = preset.defaultBars
+        let keysClash = MixMath.keysClash(a.key, b.key)
         let placement = AutoPlacement.place(a: a, b: b, bars: bars, preset: preset,
                                             trimA: Float(MixMath.trimDB(a)), trimB: Float(MixMath.trimDB(b)),
-                                            entryRange: entryRange)
+                                            entryRange: entryRange, keysClash: keysClash)
         return PairPlan(preset: preset, bars: bars, rate: preset == .echoOut ? 1 : rate,
-                        placement: placement, keysClash: MixMath.keysClash(a.key, b.key))
+                        placement: placement, keysClash: keysClash)
     }
 
     /// Lower is better. What a DJ weighs when picking the next record:
@@ -77,7 +79,7 @@ struct PairPlan: Equatable {
         var cost: Double
         switch stretch {
         case ..<3: cost = 0.05 * stretch
-        case ..<8: cost = 0.15 + 0.14 * (stretch - 3)
+        case ..<6: cost = 0.15 + 0.14 * (stretch - 3)
         default: cost = 1.5 + 0.05 * stretch // Echo Out: fine once, not all night
         }
         if keysClash { cost += 0.8 }
@@ -241,6 +243,8 @@ struct SetMix: @unchecked Sendable {
         /// Bars of A the transition may start on: not before A is back at its
         /// own tempo.
         let entryRange: ClosedRange<Int>
+        /// Seconds B was moved to lock its hits onto A's.
+        var nudge: Double = 0
     }
 
     var tracks: [Track]
@@ -270,6 +274,97 @@ struct SetMix: @unchecked Sendable {
         let first = schedule.first?.seconds ?? 0.35
         return MixSnapshot(lanes: lanes, length: Int(length * sr), delaySeconds: first, masterGain: masterGain,
                            delaySchedule: schedule)
+    }
+}
+
+/// Locks B's hits onto A's, the way a DJ nudges the platter until the two
+/// grooves sit as one. Both beat grids put the beat where the kick peaks,
+/// but kicks differ (a clicky one peaks early, a boomy 808 late), and what
+/// overlaps in a stem swap is A's whole kit against B's hats and snares: a
+/// constant 10–20 ms between them is heard as a smeared, flamming groove.
+enum BeatAlign {
+    /// A third of a sixteenth at 128 BPM: far enough to fix a grid that
+    /// sits off a track's audible hits (Missing's is 37 ms out), not so far
+    /// that it could lock onto the next subdivision.
+    static let maxNudge = 0.04
+
+    /// Seconds to delay B by (negative: earlier) so its drum hits land on
+    /// A's, measured over the overlap `from…to` (master seconds).
+    /// - Parameters:
+    ///   - a, b: the drums as they play (A at its own tempo there, B
+    ///     stretched to it), output frame 0 at master `aOffset`/`bOffset`.
+    static func nudge(a: StemAudio, aOffset: Double, b: StemAudio, bOffset: Double,
+                      from: Double, to: Double) -> Double {
+        let sr = AudioIO.sampleRate, hop = Double(TempoEstimator.hop)
+        let pad = 2 * maxNudge
+        let bFrom = from - bOffset - pad
+        guard let ea = onsets(a, from: from - aOffset, to: to - aOffset),
+              let eb = onsets(b, from: bFrom, to: to - bOffset + pad) else { return 0 }
+        func score(_ lag: Double, _ frames: Range<Int>) -> Double {
+            var sum = 0.0
+            for i in frames where ea[i] > 0 {
+                let master = from + Double(i) * hop / sr
+                let j = (master - lag - bOffset - bFrom) * sr / hop
+                let k = Int(j)
+                guard k >= 0, k + 1 < eb.count else { continue }
+                let f = j - Double(k)
+                sum += Double(ea[i]) * (Double(eb[k]) * (1 - f) + Double(eb[k + 1]) * f)
+            }
+            return sum
+        }
+        // The best lag of every two bars on its own. A real offset shows up
+        // the same in most of them; two different patterns give scattered
+        // lags, and then there is nothing to nudge. Each half of the blend
+        // votes on its own: before the swap it's A's kit under B's tops,
+        // after it the other way round, and grooves can sit differently.
+        let window = max(1, Int((to - from) / 8 * sr / hop))
+        func lags(_ frames: Range<Int>) -> [Double] {
+            var out: [Double] = []
+            for w in stride(from: frames.lowerBound, to: frames.upperBound - window + 1, by: window) {
+                let f = w..<(w + window)
+                guard ea[f].reduce(0, +) > 0 else { continue }
+                let zero = score(0, f)
+                let best = stride(from: -maxNudge, through: maxNudge, by: 0.001).map { ($0, score($0, f)) }
+                    .max { $0.1 < $1.1 }!
+                if best.1 > 0 { out.append(best.1 > 1.02 * zero ? best.0 : 0) }
+            }
+            return out
+        }
+        func consensus(_ lags: [Double]) -> Double? {
+            guard lags.count >= 2 else { return nil }
+            let median = lags.sorted()[lags.count / 2]
+            let agreeing = lags.filter { abs($0 - median) <= 0.004 }.count
+            return 4 * agreeing >= 3 * lags.count ? median : nil
+        }
+        let half = ea.count / 2
+        let votes = [consensus(lags(0..<half)), consensus(lags(half..<ea.count))].compactMap { $0 }
+        guard !votes.isEmpty else { return 0 }
+        let nudge = votes.reduce(0, +) / Double(votes.count)
+        return abs(nudge) >= 0.003 ? nudge : 0
+    }
+
+    /// Onset strength above 150 Hz (the hats, snares and the kick's click,
+    /// which is where a flam is heard; the kick's body is never doubled),
+    /// local mean removed, every 10 ms of a stretch of the stem, or nil if
+    /// it's all but silent.
+    private static func onsets(_ stem: StemAudio, from: Double, to: Double) -> [Float]? {
+        let sr = AudioIO.sampleRate
+        // Frame 0 is `from` even where that's before the file starts.
+        let start = Int(from * sr), end = min(stem.count, Int(to * sr))
+        guard end - max(0, start) > Int(sr) else { return nil }
+        var mono = [Float](repeating: 0, count: end - start)
+        for i in max(0, -start)..<mono.count {
+            mono[i] = 0.5 * (stem.left.pointer[start + i] + stem.right.pointer[start + i])
+        }
+        let envelopes = TempoEstimator.onsetEnvelopes(mono, sampleRate: sr)
+        let flux = zip(envelopes.all, envelopes.low).map { $0 - $1 }
+        guard flux.contains(where: { $0 > 0 }) else { return nil }
+        let w = 25
+        return flux.indices.map { i in
+            let lo = max(0, i - w), hi = min(flux.count, i + w + 1)
+            let mean = flux[lo..<hi].reduce(0, +) / Float(hi - lo)
+            return max(0, flux[i] - mean)
+        }
     }
 }
 
@@ -349,7 +444,15 @@ enum SetBuilder {
                 matched = try await match(b, plan: matchPlan, processor: processor)
             }
 
-            var incoming = SetMix.Track(url: tracks[k].url, loaded: b, map: map, matched: matched, offset: offset,
+            // Measured on the audio that plays: B's stretched drums against
+            // A's. The glide may start a few ms off after the nudge; nobody
+            // hears that, while re-stretching would cost a second render.
+            var nudge = 0.0
+            if span > 0, let drumsA = a.stems[.drums], let drumsB = matched.stems[.drums] {
+                nudge = BeatAlign.nudge(a: drumsA, aOffset: a.offset, b: drumsB, bOffset: offset,
+                                        from: start, to: end)
+            }
+            var incoming = SetMix.Track(url: tracks[k].url, loaded: b, map: map, matched: matched, offset: offset + nudge,
                                         envelopes: [:])
             for lane in edit.lanes {
                 let shifted = lane.envelopes.map { shift($0, by: delta) }
@@ -359,11 +462,11 @@ enum SetBuilder {
                     incoming.envelopes[lane.stem] = shifted
                 }
             }
-            let settled = map.hasGlide ? offset + map.rampEnd / sr : end
+            let settled = map.hasGlide ? offset + nudge + map.rampEnd / sr : end
             planned.append(incoming)
             transitions.append(.init(from: k - 1, to: k, plan: plan, edit: edit, isEdited: isEdited, start: start,
                                      end: end, settled: settled, barSeconds: ga.barSeconds, delta: delta,
-                                     entryRange: entryRange))
+                                     entryRange: entryRange, nudge: nudge))
             settledBar = edit.cueBar + span + glideBars
             soloBars = minimumSoloBars
         }
