@@ -20,7 +20,11 @@ struct SetView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .dropDestination(for: URL.self) { urls, _ in
-            set.add(urls)
+            if let file = urls.first(where: { $0.pathExtension.lowercased() == "passable" }) {
+                set.openSet(file)
+            } else {
+                set.add(urls)
+            }
             return true
         } isTargeted: { isDropTarget = $0 }
         .overlay {
@@ -55,6 +59,19 @@ struct SetView: View {
             Button { showSearch = true } label: {
                 Label("Find Online…", systemImage: "magnifyingglass")
             }
+            Menu {
+                Button("Export Set…") {
+                    OpenPanel.save(name: set.suggestedSetName, type: .passableSet) { set.exportSet(to: $0) }
+                }
+                .disabled(set.items.isEmpty)
+                Button("Open Set…") { OpenPanel.chooseSet { set.openSet($0) } }
+            } label: {
+                Label("Set File", systemImage: "shippingbox")
+            }
+            .menuStyle(.borderedButton)
+            .fixedSize()
+            .disabled(set.exportProgress != nil)
+            .help("Save the set with its songs as one .passable file, or open one")
             Button { set.autoOrder() } label: {
                 Label("Auto-Order", systemImage: "wand.and.stars")
             }
@@ -239,7 +256,7 @@ struct SetTransportBar: View {
 
             if let p = set.exportProgress {
                 ProgressView(value: p).frame(width: 110)
-                Text("Rendering…").font(.caption).foregroundStyle(.secondary)
+                Text(set.exportLabel).font(.caption).foregroundStyle(.secondary)
             } else {
                 Menu {
                     Button("Whole Set…") {

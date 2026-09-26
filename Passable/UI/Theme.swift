@@ -63,9 +63,19 @@ enum OpenPanel {
     }
 
     @MainActor
-    static func save(name: String, _ handler: (URL) -> Void) {
+    static func chooseSet(_ handler: (URL) -> Void) {
+        let panel = NSOpenPanel()
+        panel.prompt = "Open Set"
+        panel.allowedContentTypes = [.passableSet]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url { handler(url) }
+    }
+
+    @MainActor
+    static func save(name: String, type: UTType = .wav, _ handler: (URL) -> Void) {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.wav]
+        panel.allowedContentTypes = [type]
         panel.nameFieldStringValue = name
         panel.canCreateDirectories = true
         if panel.runModal() == .OK, let url = panel.url { handler(url) }

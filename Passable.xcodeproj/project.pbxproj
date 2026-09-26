@@ -22,10 +22,12 @@
 		37165790AA6BA6DA44CBE3F3 /* TrackAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2347CEEF14E7346534DC915 /* TrackAnalyzer.swift */; };
 		3A5B5668F93D8E6C008559EB /* HTDemucs.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 64A942CAB48C8DD5ED1A7DAE /* HTDemucs.mlpackage */; };
 		3EF733298906CFA3A55D16F0 /* Automation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5898144D4E96717801EEC24B /* Automation.swift */; };
+		45170D78F28BA245E6F372E7 /* SetPack.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E1B704DA053ABB65522FC89 /* SetPack.swift */; };
 		4665C589CC9DED8EB3AFD45E /* SetPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D8665AF29BB0D1C52DA8B0B /* SetPlanner.swift */; };
 		47D6C330665303CF2A8FA78B /* PassableApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE6C44F5546EC863B0C936DF /* PassableApp.swift */; };
 		4C63F614F9CEAE87D30892BD /* TransitionPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E1FA045141AEACB4C04FDF3 /* TransitionPanel.swift */; };
 		5A6238B318AA288716F24F77 /* LibraryFetch.swift in Sources */ = {isa = PBXBuildFile; fileRef = E437400E644FE3BB9ABE4583 /* LibraryFetch.swift */; };
+		5E0484FA52AD89AFD03BE96C /* PassableFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFA185FD99CE45F4F53A78AA /* PassableFile.swift */; };
 		6A87BFA23CB053EBC96C6F40 /* RealTrackProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 683C023C0AB1CCF3B368AA0D /* RealTrackProbe.swift */; };
 		7BC1E725829A8BFA8D01C4F8 /* SearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7DA88A707CD72420E5A9DB5 /* SearchSheet.swift */; };
 		85BAC09155E2470EB2093ECB /* SetEditingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E892F9005FB98FACDDF2B72 /* SetEditingTests.swift */; };
@@ -43,6 +45,7 @@
 		D2E15B7C73274E5227720F2A /* TransitionLab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D0E76ECD3BE8D66CBAC9876 /* TransitionLab.swift */; };
 		E193BE23C5AF96BBC1E331E6 /* TempoEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1E4B99E816199B410C51BC /* TempoEstimator.swift */; };
 		E4664D5B533004F97739EC41 /* TimeStretcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24A5EFD8292D713991BF390F /* TimeStretcher.swift */; };
+		E5D0D6C73A4657C63AAB32A7 /* PassableFileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBE8701944F6FE295DC98B92 /* PassableFileTests.swift */; };
 		E6261CA89FD2926F41C8F839 /* SetLab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7079AC37C3DD4C737C158B2C /* SetLab.swift */; };
 		EAA394F310B918302B0286D3 /* PlaybackEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 583096834C2E781135EA896D /* PlaybackEngine.swift */; };
 		EC64473EB1B541F0A3AF3DFA /* Biquad.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A3F1C6209FE99261C4C268 /* Biquad.swift */; };
@@ -86,10 +89,12 @@
 		7079AC37C3DD4C737C158B2C /* SetLab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetLab.swift; sourceTree = "<group>"; };
 		73DCC498B319117423186FE0 /* TimelineArea.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineArea.swift; sourceTree = "<group>"; };
 		7D1E4B99E816199B410C51BC /* TempoEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TempoEstimator.swift; sourceTree = "<group>"; };
+		89FBE76BD00B59CFC56A844E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		8D473E11FD02BC9A9CE22BEC /* MusicSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicSearch.swift; sourceTree = "<group>"; };
 		8E503B0A96E3D4D392019409 /* AudioIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioIO.swift; sourceTree = "<group>"; };
 		8FB901899286FC7C54821A07 /* Passable.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Passable.entitlements; sourceTree = "<group>"; };
 		977700D9FDD4CAB06C13E6D9 /* StemSeparator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StemSeparator.swift; sourceTree = "<group>"; };
+		9E1B704DA053ABB65522FC89 /* SetPack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetPack.swift; sourceTree = "<group>"; };
 		B00E4246EF6CEFCC25E06269 /* Passable.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Passable.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B69520316B09120BB126F804 /* MixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MixTests.swift; sourceTree = "<group>"; };
 		B6D912C254309936498F0062 /* TrackStructure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackStructure.swift; sourceTree = "<group>"; };
@@ -98,17 +103,20 @@
 		BAFAFB3D6E02981D209981A4 /* Effects.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Effects.swift; sourceTree = "<group>"; };
 		C2347CEEF14E7346534DC915 /* TrackAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackAnalyzer.swift; sourceTree = "<group>"; };
 		D3A3F1C6209FE99261C4C268 /* Biquad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Biquad.swift; sourceTree = "<group>"; };
+		DBE8701944F6FE295DC98B92 /* PassableFileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassableFileTests.swift; sourceTree = "<group>"; };
 		E437400E644FE3BB9ABE4583 /* LibraryFetch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryFetch.swift; sourceTree = "<group>"; };
 		E7DA88A707CD72420E5A9DB5 /* SearchSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchSheet.swift; sourceTree = "<group>"; };
 		E90F393D5126D1D1B90167C8 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		EAE2D93E072FDE7F8EEC047F /* SetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetView.swift; sourceTree = "<group>"; };
 		FE6C44F5546EC863B0C936DF /* PassableApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassableApp.swift; sourceTree = "<group>"; };
+		FFA185FD99CE45F4F53A78AA /* PassableFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassableFile.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
 		13506D3C22A383D2EB9C0146 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				89FBE76BD00B59CFC56A844E /* Info.plist */,
 				8FB901899286FC7C54821A07 /* Passable.entitlements */,
 				FE6C44F5546EC863B0C936DF /* PassableApp.swift */,
 			);
@@ -204,6 +212,7 @@
 			isa = PBXGroup;
 			children = (
 				5898144D4E96717801EEC24B /* Automation.swift */,
+				FFA185FD99CE45F4F53A78AA /* PassableFile.swift */,
 				5BF5B26B95B55994D8BDFD67 /* Session.swift */,
 				207AD4A7DAD98931C0D36418 /* SetSession.swift */,
 				4A65494D08EBA4673B965AC1 /* TransitionPreset.swift */,
@@ -237,10 +246,12 @@
 				6D383015C45F285B6995AFF4 /* EndToEndTests.swift */,
 				E437400E644FE3BB9ABE4583 /* LibraryFetch.swift */,
 				B69520316B09120BB126F804 /* MixTests.swift */,
+				DBE8701944F6FE295DC98B92 /* PassableFileTests.swift */,
 				683C023C0AB1CCF3B368AA0D /* RealTrackProbe.swift */,
 				5BD3C5673D80CB6C6602ED07 /* SeparationTests.swift */,
 				4E892F9005FB98FACDDF2B72 /* SetEditingTests.swift */,
 				7079AC37C3DD4C737C158B2C /* SetLab.swift */,
+				9E1B704DA053ABB65522FC89 /* SetPack.swift */,
 				1D0E76ECD3BE8D66CBAC9876 /* TransitionLab.swift */,
 			);
 			path = PassableTests;
@@ -337,10 +348,12 @@
 				0B304481FCF7C128FDE18908 /* EndToEndTests.swift in Sources */,
 				5A6238B318AA288716F24F77 /* LibraryFetch.swift in Sources */,
 				2462BF7F99A015EBCE55C3CC /* MixTests.swift in Sources */,
+				E5D0D6C73A4657C63AAB32A7 /* PassableFileTests.swift in Sources */,
 				6A87BFA23CB053EBC96C6F40 /* RealTrackProbe.swift in Sources */,
 				AE9EA7FFF2681EACB38A9E04 /* SeparationTests.swift in Sources */,
 				85BAC09155E2470EB2093ECB /* SetEditingTests.swift in Sources */,
 				E6261CA89FD2926F41C8F839 /* SetLab.swift in Sources */,
+				45170D78F28BA245E6F372E7 /* SetPack.swift in Sources */,
 				D2E15B7C73274E5227720F2A /* TransitionLab.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -362,6 +375,7 @@
 				183D43BDE2FC084100B75AAA /* MixRenderer.swift in Sources */,
 				169F97F9E7B84D19A05973BD /* MusicSearch.swift in Sources */,
 				47D6C330665303CF2A8FA78B /* PassableApp.swift in Sources */,
+				5E0484FA52AD89AFD03BE96C /* PassableFile.swift in Sources */,
 				EAA394F310B918302B0286D3 /* PlaybackEngine.swift in Sources */,
 				7BC1E725829A8BFA8D01C4F8 /* SearchSheet.swift in Sources */,
 				FDC3967A0E6E0DDAA722D50C /* Session.swift in Sources */,
@@ -403,6 +417,7 @@
 				COREML_CODEGEN_LANGUAGE = None;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Passable/App/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Passable;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -426,6 +441,7 @@
 				COREML_CODEGEN_LANGUAGE = None;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Passable/App/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Passable;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";

@@ -29,6 +29,8 @@ final class SetSession: ObservableObject {
     @Published private(set) var mix: SetMix?
     @Published private(set) var buildStatus: String?
     @Published private(set) var exportProgress: Double?
+    /// What the export or open in progress is doing, for its progress bar.
+    @Published private(set) var exportLabel = "Rendering…"
     @Published var alert: String?
     @Published var masterVolume: Double = 0.85 { didSet { refreshSnapshot() } }
     /// The transition shown in the editor (index of its outgoing song).
@@ -420,6 +422,7 @@ final class SetSession: ObservableObject {
             frames = Int(max(0, t.start - 8 * t.barSeconds) * sr)..<Int(min(length, t.settled + 8 * t.barSeconds) * sr)
         }
         let snapshot = makeSnapshot()
+        exportLabel = "Rendering…"
         exportProgress = 0
         exportTask = Task.detached(priority: .userInitiated) { [weak self] in
             let result = Result {
@@ -436,8 +439,93 @@ final class SetSession: ObservableObject {
         exportProgress = nil
         switch result {
         case .success: NSWorkspace.shared.activateFileViewerSelecting([url])
-        case .failure(let error): alert = "Render failed: \(error.localizedDescription)"
+        case .failure(let error): alert = "Couldn't save \(url.lastPathComponent): \(error.localizedDescription)"
         }
+    }
+
+    // MARK: - Set files
+
+    /// Packs the set, songs included, into one `.passable` file.
+    func exportSet(to url: URL) {
+        guard exportTask == nil, !items.isEmpty else { return }
+        let songs = items.map { (url: $0.url, analysis: $0.analysis) }
+        let index = Dictionary(items.enumerated().map { ($1.url, $0) }, uniquingKeysWith: { a, _ in a })
+        // Every hand edit between songs of this set, not just neighbours:
+        // they come back if the order is changed later.
+        let transitions = edits.compactMap { key, edit in
+            index[key.from].flatMap { from in index[key.to].map { PassableFile.Transition(from: from, to: $0, edit: edit) } }
+        }.sorted { ($0.from, $0.to) < ($1.from, $1.to) }
+        let volume = masterVolume
+        exportLabel = "Exporting…"
+        exportProgress = 0
+        exportTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let result = Result {
+                try PassableFile.write(songs: songs, transitions: transitions, masterVolume: volume, to: url) { p in
+                    Task { @MainActor in self?.exportProgress = p }
+                }
+            }
+            await self?.finishExport(result, url: url)
+        }
+    }
+
+    var suggestedSetName: String {
+        let date = Date().formatted(.dateTime.year().month(.twoDigits).day(.twoDigits))
+        return "Passable Set \(date).passable"
+    }
+
+    /// Opens a `.passable` file in place of the current set, unpacking its
+    /// songs into the library folder.
+    func openSet(_ url: URL) {
+        guard exportTask == nil else { return }
+        if !items.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "Replace the current set?"
+            alert.informativeText = "\(url.deletingPathExtension().lastPathComponent) replaces the \(items.count) songs in your set. Export the current set first to keep it."
+            alert.addButton(withTitle: "Replace")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        pause()
+        exportLabel = "Opening…"
+        exportProgress = 0
+        let folder = MusicTools.libraryFolder
+        exportTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let result = Result {
+                try PassableFile.read(url, into: folder) { p in
+                    Task { @MainActor in self?.exportProgress = p }
+                }
+            }
+            await self?.finishOpen(result)
+        }
+    }
+
+    private func finishOpen(_ result: Result<PassableFile.Opened, Error>) {
+        exportTask = nil
+        exportProgress = nil
+        switch result {
+        case .success(let opened):
+            replaceSet(with: opened)
+        case .failure(let error):
+            alert = "Couldn't open the set: \(error.localizedDescription)"
+        }
+    }
+
+    /// The songs in the file's order (not re-ordered), its hand edits and
+    /// volume; everything else is planned again from the analyses.
+    private func replaceSet(with opened: PassableFile.Opened) {
+        buildTask?.cancel()
+        focus(nil, reopen: true)
+        var merged = edits
+        for t in opened.manifest.transitions where opened.urls.indices.contains(t.from) && opened.urls.indices.contains(t.to) {
+            merged[PairKey(from: opened.urls[t.from], to: opened.urls[t.to])] = t.edit
+        }
+        edits = merged
+        masterVolume = opened.manifest.masterVolume
+        items = opened.urls.map { Item(url: $0) }
+        needsOrdering = false
+        tab = .set
+        for item in items { load(item.id) }
+        invalidate()
     }
 
     var suggestedTransitionName: String {

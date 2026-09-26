@@ -22,6 +22,21 @@ targets:
       INFOPLIST_KEY_NSHumanReadableCopyright: ""
       ENABLE_PREVIEWS: YES
       COREML_CODEGEN_LANGUAGE: None
+    info:
+      path: Passable/App/Info.plist
+      properties:
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Passable Set
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Owner
+            LSItemContentTypes: [com.nikolausmarek.passable.set]
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.nikolausmarek.passable.set
+            UTTypeDescription: Passable Set
+            UTTypeConformsTo: [public.data, public.content]
+            UTTypeTagSpecification:
+              public.filename-extension: [passable]
+              public.mime-type: [application/x-passable]
     entitlements:
       path: Passable/App/Passable.entitlements
       properties:

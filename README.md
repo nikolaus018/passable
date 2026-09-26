@@ -22,6 +22,12 @@ Any change goes straight into the set and unticks **Automatic**. Tick it again t
 
 One transport serves both tabs: **Space** plays or pauses, **Return** cues the open transition, and **Render** writes the whole set, or just this transition, as a 24-bit, 44.1 kHz WAV. The set and your edits are remembered between launches.
 
+## Set files (.passable)
+
+**Set File → Export Set…** (⇧⌘E) saves the set as one `.passable` file with every song inside it, so it opens on any Mac. **Open Set…** (⇧⌘O), dragging the file onto the set, or double-clicking it in Finder brings it back: songs unpack into `~/Music/Passable` (a copy that's already there is reused), in the saved order, with your hand-shaped transitions and each song's analysis, so beat grids are exactly as they were. Stems are separated again on a new Mac.
+
+The format is a small chunked container: magic `PASSABLE\r\n\x1A\n`, a version, then chunks (`MNFT` JSON manifest, one `AUDI` per song, `END `). PCM songs are stored as Apple Lossless: bit-identical, about half the size. The full layout is documented in `Passable/Model/PassableFile.swift`.
+
 ## Build
 
 ```sh
@@ -54,4 +60,5 @@ Measurement harnesses (skipped unless their variable is set; `xcodebuild` only p
 
 - `TEST_RUNNER_PASSABLE_SET=list.txt xcodebuild test -scheme Passable -only-testing:PassableTests/SetLab` builds a set from the songs, prints the order, measures every transition (level change, dips, doubled low end, clashing vocals) and renders `~/Music/Passable/Lab/Set.wav`.
 - `TEST_RUNNER_PASSABLE_LAB=list.txt … -only-testing:PassableTests/TransitionLab` does the same for consecutive pairs through the editor's pipeline.
+- `TEST_RUNNER_PASSABLE_PACK=list.txt TEST_RUNNER_PASSABLE_PACK_OUT=set.passable … -only-testing:PassableTests/SetPack` packs the songs, in the listed order, into a `.passable` file.
 - `TEST_RUNNER_PASSABLE_PROBE=list.txt … -only-testing:PassableTests/RealTrackProbe` prints analysis and placement.
