@@ -433,21 +433,26 @@ enum VocalPhrasing {
     /// A beat with no more than breath and bleed in it.
     private static func quiet(_ db: Float, _ reference: Float) -> Bool { db < reference - 16 }
 
-    /// Master time to let a vocal in at, from `earliest` on: at once if it's
-    /// silent there, else on the second beat of its next pause (two quiet
-    /// beats), so the next line plays whole. nil: it sings on for `within`
-    /// seconds, and letting it in anyway is the lesser evil.
+    /// Master time to let a vocal in at, as close to `target` as it allows
+    /// (no earlier than `earliest`, no later than `latest`): at the second
+    /// beat of a pause (two quiet beats), so its next line plays whole and
+    /// starts exactly as in the song. nil: it sings straight through, and
+    /// the caller eases it in instead.
     /// - Parameter offset: master time of the stem's output frame 0.
-    static func lineStart(_ stem: StemAudio, offset: Double, reference: Float, earliest: Double, beat: Double,
-                          within: Double) -> Double? {
-        var t = earliest
-        var previousQuiet = quiet(level(stem, at: t - beat - offset, beat: beat), reference)
-        if previousQuiet && quiet(level(stem, at: t - offset, beat: beat), reference) { return t }
-        while t < earliest + within {
-            let q = quiet(level(stem, at: t - offset, beat: beat), reference)
-            if q && previousQuiet { return t }
-            previousQuiet = q
-            t += beat
+    static func lineStart(_ stem: StemAudio, offset: Double, reference: Float, target: Double, earliest: Double,
+                          latest: Double, beat: Double) -> Double? {
+        func pause(_ t: Double) -> Bool {
+            quiet(level(stem, at: t - beat - offset, beat: beat), reference)
+                && quiet(level(stem, at: t - offset, beat: beat), reference)
+        }
+        // Outwards from the target, beat by beat, later first on a tie: a
+        // late entry only delays B's vocal, an early one overlaps A's echo.
+        var step = 0
+        while target - Double(step) * beat >= earliest || target + Double(step) * beat <= latest {
+            let later = target + Double(step) * beat, earlier = target - Double(step) * beat
+            if later <= latest, pause(later) { return later }
+            if step > 0, earlier >= earliest, pause(earlier) { return earlier }
+            step += 1
         }
         return nil
     }
@@ -566,7 +571,8 @@ enum SetBuilder {
                 let sw = min(n, max(n / 2, Double(plan.placement.lowSwap ?? edit.bars / 2)))
                 if let ref = VocalPhrasing.reference(b.analysis.structure),
                    let t = VocalPhrasing.lineStart(vocalsB, offset: offset + nudge, reference: ref,
-                                                   earliest: start + v * bar, beat: beat, within: 4 * bar) {
+                                                   target: start + v * bar, earliest: start + n / 2 * bar,
+                                                   latest: start + (v + 4) * bar, beat: beat) {
                     vocalIn = (t - start) / bar
                 }
                 let target = min(vocalIn ?? v, min(v, sw))
