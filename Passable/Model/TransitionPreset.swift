@@ -165,10 +165,16 @@ struct TransitionBuilder {
                 // A's beat carries the build and cuts on B's drop.
                 automate(.a, .drums, .volume, [(4 * q, 1, .hold), (4 * q + 0.001, 0, .linear)])
             }
-            // B vocal lands on the new phrase (or takes over at the swap),
-            // faded in over a beat: silent there if it's between lines,
-            // and never a hard cut-in if it isn't.
-            automate(.b, .vocals, .volume, [(vin - 0.25, 0, .exponential), (vin, 1, .linear)])
+            if vocalIn != nil {
+                // Let in on the breath before its next line: the line then
+                // starts exactly as it does in the song.
+                automate(.b, .vocals, .volume, [(vin - 0.25, 0, .exponential), (vin, 1, .linear)])
+            } else {
+                // No pause to use: the voice would jump in mid-sentence, so
+                // it rises over a bar instead, opening up from a filter.
+                automate(.b, .vocals, .volume, [(vin, 0, .exponential), (vin + 1, 1, .linear)])
+                automate(.b, .vocals, .filter, [(vin, 0.68, .sCurve), (vin + 1, 0.5, .linear)])
+            }
 
         case .dropSwap:
             let h = n / 2
