@@ -22,7 +22,12 @@ struct Deck {
     var status: Status = .empty
     var loaded: TrackProcessor.Loaded?
 
-    var title: String { url?.deletingPathExtension().lastPathComponent ?? "No track loaded" }
+    var title: String {
+        guard var t = url?.deletingPathExtension().lastPathComponent else { return "No track loaded" }
+        // Downloads carry the video id: "Title [dQw4w9WgXcQ]".
+        if let r = t.range(of: " [", options: .backwards), t.hasSuffix("]") { t = String(t[..<r.lowerBound]) }
+        return t
+    }
     var analysis: TrackAnalysis? { loaded?.analysis }
 }
 
@@ -38,28 +43,44 @@ final class Transport: ObservableObject {
 final class Session: ObservableObject {
     @Published private(set) var deckA = Deck()
     @Published private(set) var deckB = Deck()
-    @Published var lanes: [Lane] = Lane.allLanes() { didSet { rebuildSnapshot() } }
+    @Published var lanes: [Lane] = Lane.allLanes() {
+        didSet {
+            rebuildSnapshot()
+            host?.editorMonitorChanged()
+            editChanged()
+        }
+    }
 
     /// A's bar on which B's cue bar lands.
     @Published var entryBar = 0 {
         didSet {
             guard entryBar != oldValue else { return }
-            if !isRestoring && !isPlacing { pushUndo(Arrangement(lanes: lanes, entryBar: oldValue, cueBar: cueBar)) }
+            if !isRestoring && !isPlacing {
+                pushUndo(Arrangement(lanes: lanes, entryBar: oldValue, cueBar: cueBar, preset: preset, bars: transitionBars))
+            }
             alignmentChanged(from: oldValue)
+            editChanged()
         }
     }
     /// B's bar (usually its first downbeat) that lines up with `entryBar`.
     @Published var cueBar = 0 {
         didSet {
             guard cueBar != oldValue else { return }
-            if !isRestoring && !isPlacing { pushUndo(Arrangement(lanes: lanes, entryBar: entryBar, cueBar: oldValue)) }
+            if !isRestoring && !isPlacing {
+                pushUndo(Arrangement(lanes: lanes, entryBar: entryBar, cueBar: oldValue, preset: preset, bars: transitionBars))
+            }
             alignmentChanged(from: nil)
+            editChanged()
         }
     }
     @Published var semitones = 0
     @Published var autoKey = true
-    @Published var preset: TransitionPreset = .stemSwap
-    @Published var transitionBars = TransitionPreset.stemSwap.defaultBars
+    @Published var preset: TransitionPreset = .stemSwap {
+        didSet { if preset != oldValue { scheduleRematch(); editChanged() } }
+    }
+    @Published var transitionBars = TransitionPreset.stemSwap.defaultBars {
+        didSet { if transitionBars != oldValue { scheduleRematch(); editChanged() } }
+    }
     @Published var masterVolume: Double = 0.85 { didSet { rebuildSnapshot() } }
 
     @Published private(set) var matched: TrackProcessor.Matched?
@@ -72,6 +93,8 @@ final class Session: ObservableObject {
     private let processor = TrackProcessor()
     private var loadTickets: [DeckSide: TrackProcessor.Ticket] = [:]
     private var matchTicket: TrackProcessor.Ticket?
+    private var pendingPlan: TrackProcessor.MatchPlan?
+    private var rematchTask: Task<Void, Never>?
     private var exportTask: Task<Void, Never>?
     private var clock: Timer?
 
@@ -82,6 +105,124 @@ final class Session: ObservableObject {
     }
 
     func deck(_ side: DeckSide) -> Deck { side == .a ? deckA : deckB }
+
+    // MARK: - Editing a set's transition
+
+    /// The set whose transition this editor shows. Edits go back to it, and
+    /// its player plays: the editor's timeline is A's own clock, the set's
+    /// is `hostOffset` ahead of it.
+    weak var host: SetSession?
+    var hostOffset = 0.0
+    /// Changes whenever a different transition is opened.
+    @Published private(set) var pairID = UUID()
+    /// "3 → 4": which transition of the set this is.
+    @Published private(set) var transitionTitle: String?
+    /// Bars of A the set lets the transition start on.
+    @Published var entryRange: ClosedRange<Int>?
+    /// Shaped by hand, rather than the automatic plan.
+    @Published private(set) var isEdited = false
+    private var isOpening = false
+    /// What was last opened or sent to the host: only a real change (not a
+    /// mute, solo or which parameter a lane shows) counts as an edit.
+    private var baseline: TransitionEdit?
+
+    var hasPair: Bool { deckA.loaded != nil && deckB.loaded != nil }
+
+    var currentEdit: TransitionEdit {
+        TransitionEdit(entryBar: entryBar, cueBar: cueBar, preset: preset, bars: transitionBars,
+                       semitones: semitones, lanes: lanes)
+    }
+
+    /// Shows one transition of a set, exactly as the set plays it.
+    func open(title: String, a: Deck, b: Deck, edit: TransitionEdit, isEdited: Bool, matched: TrackProcessor.Matched?,
+              placement: AutoPlacement.Result, entryRange: ClosedRange<Int>, offset: Double) {
+        isOpening = true
+        isRestoring = true
+        defer { isOpening = false; isRestoring = false }
+        for ticket in loadTickets.values { ticket.cancel() }
+        rematchTask?.cancel()
+        matchTicket?.cancel()
+        matchTicket = nil
+        pendingPlan = nil
+        matchStatus = nil
+        deckA = a
+        deckB = b
+        // In a set, songs aren't key-shifted unless you do it by hand: the
+        // order already puts compatible keys side by side.
+        autoKey = edit.semitones == 0
+        keyClash = nil
+        semitones = edit.semitones
+        preset = edit.preset
+        transitionBars = edit.bars
+        cueBar = edit.cueBar
+        entryBar = edit.entryBar
+        vocalHandoff = placement.vocalHandoff
+        lowSwap = placement.lowSwap
+        placementNote = isEdited || placement.reason.isEmpty ? nil : placement.reason
+        self.matched = matched
+        lanes = edit.lanes
+        self.entryRange = entryRange
+        self.isEdited = isEdited
+        hostOffset = offset
+        transitionTitle = title
+        undoStack.removeAll()
+        redoStack.removeAll()
+        updateUndoState()
+        baseline = currentEdit
+        pairID = UUID()
+        rebuildSnapshot()
+        syncTransport()
+    }
+
+    func close() {
+        isOpening = true
+        defer { isOpening = false }
+        deckA = Deck()
+        deckB = Deck()
+        matched = nil
+        transitionTitle = nil
+        pairID = UUID()
+    }
+
+    private func editChanged() {
+        guard let host, !isOpening, !isRestoring, hasPair else { return }
+        let edit = currentEdit
+        if let baseline, Self.sameContent(baseline, edit) { return }
+        baseline = edit
+        isEdited = true
+        placementNote = nil
+        host.editorChanged(edit)
+    }
+
+    private static func sameContent(_ a: TransitionEdit, _ b: TransitionEdit) -> Bool {
+        a.entryBar == b.entryBar && a.cueBar == b.cueBar && a.preset == b.preset && a.bars == b.bars
+            && a.semitones == b.semitones && a.lanes.map(\.envelopes) == b.lanes.map(\.envelopes)
+    }
+
+    /// Keeps the transition exactly as it is, as a hand edit: later changes
+    /// elsewhere in the set no longer re-plan it.
+    func keepAsEdited() {
+        guard let host, hasPair, !isEdited else { return }
+        isEdited = true
+        placementNote = nil
+        baseline = currentEdit
+        host.editorChanged(currentEdit)
+    }
+
+    /// Mute and solo, for the set's player.
+    func isAudible(_ side: DeckSide, _ stem: StemKind) -> Bool {
+        let anySolo = lanes.contains(where: \.isSoloed)
+        guard let lane = lanes.first(where: { $0.side == side && $0.stem == stem }) else { return true }
+        return !lane.isMuted && (!anySolo || lane.isSoloed)
+    }
+
+    /// Mirrors the set's playhead on the editor's clock.
+    func syncTransport() {
+        guard let host else { return }
+        let seconds = host.transport.seconds - hostOffset
+        if abs(transport.seconds - seconds) > 1e-4 { transport.seconds = seconds }
+        if transport.isPlaying != host.transport.isPlaying { transport.isPlaying = host.transport.isPlaying }
+    }
 
     private func setDeck(_ side: DeckSide, _ update: (inout Deck) -> Void) {
         if side == .a { update(&deckA) } else { update(&deckB) }
@@ -95,6 +236,8 @@ final class Session: ObservableObject {
         let ticket = TrackProcessor.Ticket()
         loadTickets[side] = ticket
         matchTicket?.cancel()
+        matchTicket = nil
+        pendingPlan = nil
         matched = nil
         setDeck(side) { $0 = Deck(url: url, status: .decoding) }
         rebuildSnapshot()
@@ -135,6 +278,7 @@ final class Session: ObservableObject {
         if loadedSide == .b || deckB.loaded == nil { cueBar = 0 }
         if let a = deckA.analysis, let b = deckB.analysis {
             if autoKey { semitones = autoShift(a: a, b: b) }
+            preset = recommendedPreset
             transitionBars = preset.defaultBars
             place(a: a, b: b)
             rematch()
@@ -147,23 +291,32 @@ final class Session: ObservableObject {
     /// B's tempo relative to A, folded by an octave when the two were
     /// detected at half/double time of each other.
     var tempoMultiplier: Double {
-        guard let a = deckA.analysis?.grid.bpm, let b = deckB.analysis?.grid.bpm, a > 0, b > 0 else { return 1 }
-        return [0.5, 1, 2].min { abs(log2(a / (b * $0))) < abs(log2(a / (b * $1))) }!
+        guard let a = deckA.analysis?.grid.bpm, let b = deckB.analysis?.grid.bpm else { return 1 }
+        return MixMath.tempoMultiplier(a: a, b: b)
     }
 
-    /// Playback rate applied to B.
+    /// B's rate relative to its own tempo while it plays under A.
     var rate: Double {
-        guard let a = deckA.analysis?.grid.bpm, let b = deckB.analysis?.grid.bpm, a > 0, b > 0 else { return 1 }
-        return a / (b * tempoMultiplier)
+        guard let a = deckA.analysis?.grid.bpm, let b = deckB.analysis?.grid.bpm else { return 1 }
+        return MixMath.rate(a: a, b: b)
     }
 
-    /// B's grid as heard after matching, on B's own clock.
+    /// The rate B is actually matched at. Echo Out never overlaps the two
+    /// tracks, so B keeps its own tempo and only its downbeat is lined up.
+    var matchRate: Double { preset == .echoOut ? 1 : rate }
+
+    /// B's grid as heard while matched, on B's own clock. Bars stay B's own
+    /// bars (the ones its structure and cue bar are counted in), even when
+    /// it runs half- or double-time against A.
     var matchedGridB: BeatGrid? {
-        guard let g = deckB.analysis?.grid else { return nil }
-        return BeatGrid(bpm: g.bpm * tempoMultiplier, firstDownbeat: g.firstDownbeat).scaled(by: rate)
+        deckB.analysis?.grid.scaled(by: matchRate)
     }
+
+    var glideBars: Int { MixMath.glideBars(rate: matchRate) }
 
     var masterGrid: BeatGrid? { deckA.analysis?.grid }
+
+    func trimDB(_ side: DeckSide) -> Double { MixMath.trimDB(deck(side).analysis) }
 
     var keyAfterShift: MusicalKey? { deckB.analysis?.key.transposed(by: semitones) }
 
@@ -179,32 +332,75 @@ final class Session: ObservableObject {
         return 0
     }
 
+    /// B's key (after the shift) doesn't sit with A's.
+    var keysIncompatible: Bool {
+        guard let a = deckA.analysis?.key, let b = keyAfterShift else { return false }
+        return b.harmonicShift(toMatch: a, limit: 0) == nil
+    }
+
+    var recommendedPreset: TransitionPreset { MixMath.recommendedPreset(rate: rate) }
+
     func setSemitones(_ value: Int, auto: Bool = false) {
         autoKey = auto
         if !auto { keyClash = nil }
-        let value = auto ? (deckB.analysis.flatMap { b in deckA.analysis.map { autoShift(a: $0, b: b) } } ?? 0) : value
+        let automatic = host != nil ? 0 : (deckB.analysis.flatMap { b in deckA.analysis.map { autoShift(a: $0, b: b) } } ?? 0)
+        let value = auto ? automatic : value
         guard value != semitones || matched == nil else { return }
         semitones = max(-6, min(6, value))
         rematch()
+        editChanged()
+    }
+
+    /// What B should be rendered as for the current arrangement: matched to
+    /// A until the transition is over, then back to its own tempo.
+    private var desiredPlan: TrackProcessor.MatchPlan? {
+        guard deckA.loaded != nil, deckB.loaded != nil, let g = masterGrid else { return nil }
+        let sr = AudioIO.sampleRate
+        let map = TimeMap.glide(rate: matchRate, rampStart: (transitionEnd - offsetB) * sr,
+                                rampLength: Double(glideBars) * g.barSeconds * sr)
+        return .init(map: map, semitones: semitones)
+    }
+
+    /// Moving the transition moves where B's glide starts, so B is
+    /// re-rendered, once the edits settle.
+    private func scheduleRematch() {
+        guard deckB.loaded != nil, deckA.loaded != nil else { return }
+        rematchTask?.cancel()
+        rematchTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            self?.rematch()
+        }
     }
 
     private func rematch() {
-        guard let b = deckB.loaded, deckA.loaded != nil else { return }
+        rematchTask?.cancel()
+        guard let b = deckB.loaded, let plan = desiredPlan else { return }
+        if pendingPlan?.isSame(as: plan) == true || (pendingPlan == nil && matched?.plan.isSame(as: plan) == true) { return }
         matchTicket?.cancel()
         let ticket = TrackProcessor.Ticket()
         matchTicket = ticket
-        matched = nil
+        pendingPlan = plan
+        // When only the glide moved, the old rendition is identical up to
+        // where it glided: keep playing it until the new one is ready.
+        if let old = matched, old.plan.map.rate != plan.map.rate || old.plan.semitones != plan.semitones {
+            matched = nil
+        }
         matchStatus = "Matching tempo & key…"
         rebuildSnapshot()
-        processor.match(b, rate: rate, semitones: semitones, ticket: ticket) { [weak self] result in
+        processor.match(b, plan: plan, ticket: ticket) { [weak self] result in
             Task { @MainActor in
                 guard let self, self.matchTicket === ticket else { return }
                 self.matchStatus = nil
+                self.matchTicket = nil
+                self.pendingPlan = nil
                 switch result {
                 case .success(let m):
                     self.matched = m
-                    if self.lanes.allSatisfy({ $0.envelopes.allSatisfy(\.isEmpty) }) { self.writePreset() }
+                    if self.host == nil, self.lanes.allSatisfy({ $0.envelopes.allSatisfy(\.isEmpty) }) { self.writePreset() }
                     self.rebuildSnapshot()
+                    // The arrangement may have moved on while this rendered.
+                    if let plan = self.desiredPlan, !plan.isSame(as: m.plan) { self.scheduleRematch() }
                 case .failure(let error):
                     if !(error is CancellationError) { self.alert = error.localizedDescription }
                 }
@@ -260,17 +456,22 @@ final class Session: ObservableObject {
             }
         }
         rebuildSnapshot()
+        scheduleRematch()
     }
 
     /// Bars after B's entry where its vocal comes in (from auto placement).
     private var vocalHandoff: Int?
+    /// Bars after B's entry where the low end changes hands (auto placement).
+    private var lowSwap: Int?
 
     /// Why the automatic placement chose what it did, shown in the panel.
     @Published private(set) var placementNote: String?
 
     private func place(a: TrackAnalysis, b: TrackAnalysis) {
-        let result = AutoPlacement.place(a: a, b: b, bars: transitionBars, preset: preset)
+        let result = AutoPlacement.place(a: a, b: b, bars: transitionBars, preset: preset,
+                                         trimA: Float(trimDB(.a)), trimB: Float(trimDB(.b)))
         vocalHandoff = result.vocalHandoff
+        lowSwap = result.lowSwap
         isPlacing = true
         defer { isPlacing = false }
         cueBar = result.cueBar
@@ -281,10 +482,27 @@ final class Session: ObservableObject {
     /// Re-pick the entry and cue bars for the current preset and length,
     /// then write the preset there.
     func autoArrange() {
+        if let host { return host.revertToAuto() }
         guard let a = deckA.analysis, let b = deckB.analysis else { return }
         checkpoint()
         resetAutomation()
         place(a: a, b: b)
+        writePreset()
+    }
+
+    /// Picking a preset or a length rewrites the automation with it.
+    func choosePreset(_ p: TransitionPreset) {
+        guard p != preset else { return }
+        checkpoint()
+        preset = p
+        transitionBars = p.defaultBars
+        writePreset()
+    }
+
+    func chooseBars(_ bars: Int) {
+        guard bars != transitionBars else { return }
+        checkpoint()
+        transitionBars = bars
         writePreset()
     }
 
@@ -296,7 +514,9 @@ final class Session: ObservableObject {
     private func writePreset() {
         guard let g = masterGrid else { return }
         lanes = TransitionBuilder.build(preset, lanes: lanes, start: g.downbeat(entryBar),
-                                        barSeconds: g.barSeconds, bars: transitionBars, vocalBar: vocalHandoff)
+                                        barSeconds: g.barSeconds, bars: transitionBars, vocalBar: vocalHandoff,
+                                        keysClash: keysIncompatible,
+                                        lowSwap: lowSwap.flatMap { $0 <= transitionBars ? $0 : nil })
     }
 
     func clearAutomation() {
@@ -326,6 +546,8 @@ final class Session: ObservableObject {
         var lanes: [Lane]
         var entryBar: Int
         var cueBar: Int
+        var preset: TransitionPreset
+        var bars: Int
     }
 
     private var undoStack: [Arrangement] = []
@@ -335,7 +557,9 @@ final class Session: ObservableObject {
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
 
-    private var currentArrangement: Arrangement { Arrangement(lanes: lanes, entryBar: entryBar, cueBar: cueBar) }
+    private var currentArrangement: Arrangement {
+        Arrangement(lanes: lanes, entryBar: entryBar, cueBar: cueBar, preset: preset, bars: transitionBars)
+    }
 
     /// Records the arrangement as it is now, before an edit.
     func checkpoint() { pushUndo(currentArrangement) }
@@ -361,12 +585,15 @@ final class Session: ObservableObject {
 
     private func restore(_ state: Arrangement) {
         isRestoring = true
+        preset = state.preset
+        transitionBars = state.bars
         entryBar = state.entryBar
         cueBar = state.cueBar
         lanes = state.lanes
         isRestoring = false
         rebuildSnapshot()
         updateUndoState()
+        editChanged()
     }
 
     private func updateUndoState() {
@@ -401,11 +628,72 @@ final class Session: ObservableObject {
         loaded.analysis.structure = TrackStructure.measure(stems: loaded.stems, grid: grid)
         StemCache.saveAnalysis(loaded.analysis, to: loaded.directory)
         setDeck(side) { $0.loaded = loaded }
+        if let host, let url = deck(side).url { return host.gridChanged(url, loaded) }
         decksChanged(loadedSide: side)
     }
 
-    /// Snaps to the master grid's beats (or finer when zoomed in).
+    /// Beat grid of whatever leads at each moment: A's, until B starts
+    /// gliding back to its own tempo; B's own from there on.
+    struct GridLine {
+        var time: Double
+        var bar: Int
+        /// 0 on the downbeat.
+        var beat: Int
+    }
+
+    /// Where B's grid takes over, with what's needed to place its beats.
+    private var gridB: (from: Double, grid: BeatGrid, map: TimeMap, offset: Double)? {
+        guard let m = matched, m.plan.map.hasGlide, let g = deckB.analysis?.grid else { return nil }
+        return (offsetB + m.plan.map.rampStart / AudioIO.sampleRate, g, m.plan.map, offsetB)
+    }
+
+    /// Master-timeline span over which B glides back to its own tempo.
+    var glideRange: ClosedRange<Double>? {
+        guard let b = gridB else { return nil }
+        return b.from...(b.offset + b.map.rampEnd / AudioIO.sampleRate)
+    }
+
+    func gridLines(from t0: Double, to t1: Double, barStep: Int, beats: Bool) -> [GridLine] {
+        guard let a = masterGrid else { return [] }
+        let sr = AudioIO.sampleRate
+        var lines: [GridLine] = []
+        func add(_ time: Double, _ index: Int) {
+            let bar = Int((Double(index) / 4).rounded(.down)), beat = index - 4 * bar
+            guard beats || beat == 0, beat != 0 || bar % barStep == 0 else { return }
+            lines.append(GridLine(time: time, bar: bar, beat: beat))
+        }
+        let b = gridB
+        let aEnd = min(t1, b?.from ?? t1)
+        if t0 < aEnd {
+            var i = Int(((t0 - a.firstDownbeat) / a.beatSeconds).rounded(.down)) - 4
+            while a.beat(i) <= aEnd {
+                if a.beat(i) >= t0 - a.barSeconds && a.beat(i) < aEnd { add(a.beat(i), i) }
+                i += 1
+            }
+        }
+        if let b, t1 > b.from {
+            let from = max(t0, b.from)
+            let sourceSeconds = { (t: Double) in b.map.source((t - b.offset) * sr) / sr }
+            var i = Int(((sourceSeconds(from) - b.grid.firstDownbeat) / b.grid.beatSeconds).rounded(.down))
+            while true {
+                let t = b.offset + b.map.output(b.grid.beat(i) * sr) / sr
+                if t > t1 + b.grid.barSeconds { break }
+                if t >= from { add(t, i) }
+                i += 1
+            }
+        }
+        return lines
+    }
+
+    /// Snaps to the beats of the grid in force there (or finer when zoomed in).
     func snap(_ seconds: Double, division: Double) -> Double {
+        let sr = AudioIO.sampleRate
+        if let b = gridB, seconds >= b.from {
+            let step = b.grid.beatSeconds / division
+            let x = b.map.source((seconds - b.offset) * sr) / sr
+            let snapped = b.grid.firstDownbeat + ((x - b.grid.firstDownbeat) / step).rounded() * step
+            return b.offset + b.map.output(snapped * sr) / sr
+        }
         guard let g = masterGrid else { return seconds }
         let step = g.beatSeconds / division
         return g.firstDownbeat + ((seconds - g.firstDownbeat) / step).rounded() * step
@@ -413,7 +701,9 @@ final class Session: ObservableObject {
 
     // MARK: - Rendering
 
-    private func makeSnapshot() -> MixSnapshot {
+    /// - Parameter including: lanes to render (the rest are silent), for
+    ///   measuring one side or stem of the mix on its own.
+    func makeSnapshot(including: (Lane) -> Bool = { _ in true }) -> MixSnapshot {
         let anySolo = lanes.contains(where: \.isSoloed)
         let sr = AudioIO.sampleRate
         let data = lanes.map { lane -> MixSnapshot.LaneData in
@@ -422,7 +712,8 @@ final class Session: ObservableObject {
                 audio: audio,
                 offset: Int((laneOffset(lane) * sr).rounded()),
                 envelopes: lane.envelopes,
-                audible: !lane.isMuted && (!anySolo || lane.isSoloed))
+                audible: !lane.isMuted && (!anySolo || lane.isSoloed) && including(lane),
+                trim: Float(pow(10, trimDB(lane.side) / 20)))
         }
         // Dotted-eighth echo: syncopated against the grid, so repeats sit
         // between the kicks instead of on top of them.
@@ -438,10 +729,12 @@ final class Session: ObservableObject {
     // MARK: - Transport
 
     func togglePlay() {
+        if let host { return host.togglePlay() }
         transport.isPlaying ? pause() : play()
     }
 
     func play() {
+        if let host { return host.play() }
         guard deckA.loaded != nil || matched != nil else { return }
         if transport.seconds >= lengthSeconds { seek(to: 0) }
         do {
@@ -453,11 +746,16 @@ final class Session: ObservableObject {
     }
 
     func pause() {
+        if let host { return host.pause() }
         playback.pause()
         transport.isPlaying = false
     }
 
     func seek(to seconds: Double) {
+        if let host {
+            host.seek(to: seconds + hostOffset)
+            return syncTransport()
+        }
         let s = max(0, min(seconds, lengthSeconds))
         playback.renderer.seek(to: Int(s * AudioIO.sampleRate))
         transport.seconds = s
@@ -470,6 +768,7 @@ final class Session: ObservableObject {
     }
 
     private func tick() {
+        if host != nil { return syncTransport() }
         guard transport.isPlaying else { return }
         let s = Double(playback.renderer.currentFrame) / AudioIO.sampleRate
         transport.seconds = s

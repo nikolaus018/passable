@@ -1,11 +1,15 @@
 import SwiftUI
 
 /// Find a track online (yt-dlp) or pick one already downloaded to
-/// ~/Music/Passable, and load it onto a deck.
+/// ~/Music/Passable, and hand it to a deck or a set.
 struct SearchSheet: View {
-    @EnvironmentObject private var session: Session
     @Environment(\.dismiss) private var dismiss
-    let side: DeckSide
+    let title: String
+    let pickLabel: String
+    /// Stay open after a pick, for adding several songs to a set.
+    var keepOpen = false
+    let onPick: @MainActor (URL) -> Void
+    @State private var picked: Set<URL> = []
 
     @State private var query = ""
     @State private var results: [MusicSearchResult] = []
@@ -17,7 +21,7 @@ struct SearchSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Load Track \(side.rawValue)").font(.title3.bold())
+                Text(title).font(.title3.bold())
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
@@ -50,7 +54,7 @@ struct SearchSheet: View {
                                 if downloadingID == result.id {
                                     ProgressView().controlSize(.small)
                                 } else {
-                                    Button("Download & Load") { download(result) }
+                                    Button("Download & \(pickLabel)") { download(result) }
                                         .disabled(downloadingID != nil)
                                 }
                             }
@@ -65,9 +69,10 @@ struct SearchSheet: View {
                         HStack {
                             Text(url.deletingPathExtension().lastPathComponent).lineLimit(1)
                             Spacer()
-                            Button("Load as \(side.rawValue)") {
-                                session.load(url, into: side)
-                                dismiss()
+                            if picked.contains(url) {
+                                Label("Added", systemImage: "checkmark").foregroundStyle(.secondary)
+                            } else {
+                                Button(pickLabel) { pick(url) }
                             }
                         }
                     }
@@ -77,6 +82,12 @@ struct SearchSheet: View {
         }
         .padding(16)
         .frame(width: 620, height: 520)
+    }
+
+    private func pick(_ url: URL) {
+        onPick(url)
+        picked.insert(url)
+        if !keepOpen { dismiss() }
     }
 
     private func search() {
@@ -110,8 +121,8 @@ struct SearchSheet: View {
                 switch outcome {
                 case .success(let url):
                     library = MusicTools.libraryFiles()
-                    session.load(url, into: side)
-                    dismiss()
+                    pick(url)
+                    if keepOpen { message = "Added \(url.deletingPathExtension().lastPathComponent)." }
                 case .failure(let error):
                     message = error.localizedDescription
                 }

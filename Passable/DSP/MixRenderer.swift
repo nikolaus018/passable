@@ -13,6 +13,8 @@ final class MixSnapshot: @unchecked Sendable {
         let offset: Int
         let envelopes: [Envelope]
         let audible: Bool
+        /// Static gain in front of the fader: the deck's level match.
+        var trim: Float = 1
     }
 
     let lanes: [LaneData]
@@ -20,12 +22,17 @@ final class MixSnapshot: @unchecked Sendable {
     let length: Int
     let delaySeconds: Double
     let masterGain: Float
+    /// Echo time changes over a set, since each transition echoes in its own
+    /// tempo: (master frame from which it applies, seconds), ascending.
+    let delaySchedule: [(from: Int, seconds: Double)]
 
-    init(lanes: [LaneData], length: Int, delaySeconds: Double, masterGain: Float) {
+    init(lanes: [LaneData], length: Int, delaySeconds: Double, masterGain: Float,
+         delaySchedule: [(from: Int, seconds: Double)] = []) {
         self.lanes = lanes
         self.length = length
         self.delaySeconds = delaySeconds
         self.masterGain = masterGain
+        self.delaySchedule = delaySchedule
     }
 
     static let empty = MixSnapshot(lanes: [], length: 0, delaySeconds: 0.35, masterGain: 1)
@@ -74,7 +81,7 @@ final class MixRenderer: @unchecked Sendable {
         retired.reserveCapacity(256)
         // Sized for the eight lanes up front so the first real snapshot
         // doesn't allocate on the render thread.
-        lanes = Array(repeating: LaneDSP(), count: max(8, snapshot.lanes.count))
+        lanes = Array(repeating: LaneDSP(), count: max(128, snapshot.lanes.count))
         prepare(for: snapshot)
     }
 
@@ -142,7 +149,7 @@ final class MixRenderer: @unchecked Sendable {
         if lanes.count < snapshot.lanes.count {
             lanes = Array(repeating: LaneDSP(), count: snapshot.lanes.count)
         }
-        if snapshot.delaySeconds != delaySeconds {
+        if snapshot.delaySchedule.isEmpty && snapshot.delaySeconds != delaySeconds {
             delaySeconds = snapshot.delaySeconds
             delay.setTime(seconds: delaySeconds, sampleRate: sampleRate)
         }
@@ -158,6 +165,14 @@ final class MixRenderer: @unchecked Sendable {
 
     private func renderBlock(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, count n: Int) {
         let snap = snapshot
+        if !snap.delaySchedule.isEmpty {
+            var seconds = snap.delaySchedule[0].seconds
+            for entry in snap.delaySchedule where entry.from <= position { seconds = entry.seconds }
+            if seconds != delaySeconds {
+                delaySeconds = seconds
+                delay.setTime(seconds: seconds, sampleRate: sampleRate)
+            }
+        }
         let t0 = Double(position) / sampleRate
         let t1 = Double(position + n) / sampleRate
         let tm = (t0 + t1) / 2
@@ -198,8 +213,8 @@ final class MixRenderer: @unchecked Sendable {
                 lanes[i].high.process(ll, lr, count: n)
 
                 // Fader, ramped across the block so fades are sample-smooth.
-                var g0 = LaneParameter.gain(value(lane.envelopes, .volume, t0))
-                var step = (LaneParameter.gain(value(lane.envelopes, .volume, t1)) - g0) / Float(n)
+                var g0 = LaneParameter.gain(value(lane.envelopes, .volume, t0)) * lane.trim
+                var step = (LaneParameter.gain(value(lane.envelopes, .volume, t1)) * lane.trim - g0) / Float(n)
                 guard g0 > 0 || step != 0 else { continue }
                 vDSP_vrampmul2(ll, lr, 1, &g0, &step, ll, lr, 1, vDSP_Length(n))
 

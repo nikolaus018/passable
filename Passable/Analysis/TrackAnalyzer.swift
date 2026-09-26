@@ -7,6 +7,10 @@ struct TrackAnalysis: Codable, Equatable {
     /// Optional so analyses cached before it existed still decode; the
     /// loader fills it in.
     var structure: TrackStructure?
+    /// Analyses older than `currentVersion` are redone on load.
+    var version: Int?
+
+    static let currentVersion = 3
 }
 
 enum TrackAnalyzer {
@@ -21,10 +25,12 @@ enum TrackAnalyzer {
         // A drumless track (ambient, a cappella intro) has no rhythm stem to
         // speak of; fall back to the harmonic content.
         let rhythm = rms(drums) > 1e-3 ? drums : sum(of: Array(stems.values))
-        let grid = TempoEstimator.estimate(rhythm: rhythm, harmony: harmony, sampleRate: sr)
+        let layers = [StemKind.drums, .bass, .other].compactMap { stems[$0]?.copyStereo().mono() }
+        let grid = TempoEstimator.estimate(rhythm: rhythm, harmony: harmony, layers: layers, sampleRate: sr)
         let key = KeyDetector.detect(samples: harmony, sampleRate: sr)
         return TrackAnalysis(grid: grid, key: key, duration: duration,
-                             structure: TrackStructure.measure(stems: stems, grid: grid))
+                             structure: TrackStructure.measure(stems: stems, grid: grid),
+                             version: TrackAnalysis.currentVersion)
     }
 
     private static func sum(of stems: [StemAudio]) -> [Float] {

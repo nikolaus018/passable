@@ -17,6 +17,27 @@ enum Theme {
     }
 }
 
+/// Keeps the window inside the screen's visible area (clear of the menu
+/// bar and the Dock) when it opens, so the transport is never hidden.
+struct WindowFitter: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            guard let window = view.window, let screen = window.screen ?? NSScreen.main else { return }
+            let visible = screen.visibleFrame
+            var frame = window.frame
+            frame.size.width = min(frame.width, visible.width)
+            frame.size.height = min(frame.height, visible.height)
+            frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+            frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+            if frame != window.frame { window.setFrame(frame, display: true) }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
 enum OpenPanel {
     @MainActor
     static func choose(_ handler: (URL) -> Void) {
@@ -25,6 +46,15 @@ enum OpenPanel {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         if panel.runModal() == .OK, let url = panel.url { handler(url) }
+    }
+
+    @MainActor
+    static func chooseMany(_ handler: ([URL]) -> Void) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, !panel.urls.isEmpty { handler(panel.urls) }
     }
 
     @MainActor

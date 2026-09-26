@@ -42,7 +42,10 @@ enum TempoEstimator {
     private static let minBPM = 70.0
     private static let maxBPM = 180.0
 
-    static func estimate(rhythm: [Float], harmony: [Float]?, sampleRate: Double) -> BeatGrid {
+    /// - Parameter layers: mono stems (drums, bass, melody) whose entries and
+    ///   exits mark bar starts; see `downbeatPhase`.
+    static func estimate(rhythm: [Float], harmony: [Float]?, layers: [[Float]] = [],
+                         sampleRate: Double) -> BeatGrid {
         let fps = sampleRate / Double(hop)
         let (flux, lowFlux) = onsetEnvelopes(rhythm, sampleRate: sampleRate)
         guard flux.count > Int(fps * 4) else { return BeatGrid(bpm: 120, firstDownbeat: 0) }
@@ -94,8 +97,13 @@ enum TempoEstimator {
         }
 
         let beatPhase = downbeatPhase(period: period, phase: phase, lowFlux: low,
-                                      harmony: harmony, sampleRate: sampleRate)
+                                      harmony: harmony, layers: layers, sampleRate: sampleRate)
         var first = (phase + Double(beatPhase) * period) / fps
+        // Put the grid where the kicks actually peak. Every track is then
+        // placed by the same yardstick, so two layered tracks line up kick
+        // on kick instead of being off by whatever each one's broadband
+        // onsets happened to bias its grid.
+        first += kickOffset(lowFlux, bpm: 60 * fps / period, first: first, fps: fps)
         let bar = 4 * period / fps
         while first >= bar { first -= bar }
         while first < 0 { first += bar }
@@ -232,10 +240,36 @@ enum TempoEstimator {
         }
     }
 
+    /// Median distance from the grid's beats to the low-band onset peaks
+    /// near them (sub-frame, by parabolic interpolation).
+    private static func kickOffset(_ low: [Float], bpm: Double, first: Double, fps: Double) -> Double {
+        guard low.count > 2, let peak = low.max(), peak > 0 else { return 0 }
+        let beat = 60 / bpm
+        var offsets: [Double] = []
+        for i in 1..<(low.count - 1) where low[i] > 0.3 * peak && low[i] >= low[i - 1] && low[i] > low[i + 1] {
+            let a = low[i - 1], b = low[i], c = low[i + 1]
+            let denom = a - 2 * b + c
+            let shift = denom != 0 ? Double(0.5 * (a - c) / denom) : 0
+            let t = (Double(i) + max(-0.5, min(0.5, shift))) / fps
+            let d = t - (first + ((t - first) / beat).rounded() * beat)
+            if abs(d) < 0.04 { offsets.append(d) }
+        }
+        guard offsets.count >= 16 else { return 0 }
+        return offsets.sorted()[offsets.count / 2]
+    }
+
     // MARK: - Downbeat
 
+    /// Which beat (of four, from the first) is the downbeat.
+    ///
+    /// Three cues vote: where harmony changes, where the low end hits
+    /// hardest, and — strongest by far in produced music — where parts come
+    /// and go. Drums dropping out, the bass arriving, a new synth: arrangement
+    /// changes land on the one. Chord changes alone are ambiguous in music
+    /// that changes chord every two bars or rides one chord, and in rap the
+    /// kick hits beats 1 and 3 equally.
     private static func downbeatPhase(period: Double, phase: Double, lowFlux: [Float], harmony: [Float]?,
-                                      sampleRate: Double) -> Int {
+                                      layers: [[Float]], sampleRate: Double) -> Int {
         let fps = sampleRate / Double(hop)
         var beatFrames: [Double] = []
         var t = phase
@@ -259,8 +293,47 @@ enum TempoEstimator {
             scores[i % 4] += changeNorm[i] + 0.5 * kickNorm[i]
             counts[i % 4] += 1
         }
-        let averages = (0..<4).map { scores[$0] / max(1, counts[$0]) }
-        return averages.indices.max(by: { averages[$0] < averages[$1] }) ?? 0
+        var votes = (0..<4).map { Double(scores[$0] / max(1, counts[$0])) }
+        let total = votes.reduce(0, +)
+        if total > 0 { votes = votes.map { $0 / total } }
+
+        let entries = entryVotes(layers, beatSeconds: beatFrames.map { $0 / fps }, sampleRate: sampleRate)
+        if let entries { for p in 0..<4 { votes[p] += 2 * entries[p] } }
+        return votes.indices.max(by: { votes[$0] < votes[$1] }) ?? 0
+    }
+
+    /// Share of arrangement changes on each beat phase, or nil when a track
+    /// has too few to go on. A change is a stem's level jumping by more than
+    /// 6 dB from one beat to the next and staying there for the next bar.
+    private static func entryVotes(_ layers: [[Float]], beatSeconds: [Double], sampleRate: Double) -> [Double]? {
+        guard !layers.isEmpty, beatSeconds.count > 16 else { return nil }
+        let levels = layers.map { x in
+            beatSeconds.indices.map { i -> Float in
+                let a = Int(beatSeconds[i] * sampleRate)
+                let b = i + 1 < beatSeconds.count ? Int(beatSeconds[i + 1] * sampleRate) : a + Int(sampleRate / 2)
+                let lo = max(0, a), hi = min(x.count, b)
+                guard hi > lo else { return -90 }
+                var ms: Float = 0
+                vDSP_measqv(x.withUnsafeBufferPointer { $0.baseAddress! + lo }, 1, &ms, vDSP_Length(hi - lo))
+                return 10 * log10(ms + 1e-9)
+            }
+        }
+        var votes = [Double](repeating: 0, count: 4)
+        let n = beatSeconds.count
+        for i in 4..<(n - 4) {
+            for level in levels {
+                let step = level[i] - level[i - 1]
+                let after = level[i..<(i + 4)].reduce(0, +) / 4, before = level[(i - 4)..<i].reduce(0, +) / 4
+                let persist = after - before
+                if abs(step) > 6 && abs(persist) > 6 && (step > 0) == (persist > 0) {
+                    votes[i % 4] += Double(min(abs(step), abs(persist)))
+                }
+            }
+        }
+        let total = votes.reduce(0, +)
+        // A handful of changes is enough; fewer than ~6 strong ones is noise.
+        guard total > 60 else { return nil }
+        return votes.map { $0 / total }
     }
 
     private static func beatChroma(_ samples: [Float], beatSeconds: [Double], sampleRate: Double) -> [[Float]] {

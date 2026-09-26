@@ -1,31 +1,75 @@
 import SwiftUI
 
+/// Two tabs over one set: the song list, and the transition being played
+/// (or picked with Edit) for shaping by hand. One transport serves both.
 struct ContentView: View {
-    @EnvironmentObject private var session: Session
-    @State private var searchTarget: DeckSide?
+    @EnvironmentObject private var set: SetSession
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 12) {
-                DeckCard(side: .a, onSearch: { searchTarget = .a })
-                TransitionPanel()
-                    .frame(width: 360)
-                DeckCard(side: .b, onSearch: { searchTarget = .b })
+            Picker("", selection: $set.tab) {
+                ForEach(SetSession.Tab.allCases) { tab in
+                    if tab == .transition, let title = set.editor.transitionTitle {
+                        Text("Transition \(title)").tag(tab)
+                    } else {
+                        Text(tab.rawValue).tag(tab)
+                    }
+                }
             }
-            .padding(12)
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 320)
+            .padding(.top, 8)
+            switch set.tab {
+            case .set:
+                SetView()
+            case .transition:
+                TransitionEditor()
+                    .environmentObject(set.editor)
+                    .environmentObject(set.editor.transport)
+            }
             Divider()
-            TimelineArea()
-            Divider()
-            TransportBar()
+            SetTransportBar()
         }
+        .environmentObject(set.transport)
         .background(Color(nsColor: .windowBackgroundColor))
-        .sheet(item: $searchTarget) { side in
-            SearchSheet(side: side)
-        }
-        .alert("Passable", isPresented: Binding(get: { session.alert != nil }, set: { if !$0 { session.alert = nil } })) {
+        .alert("Passable", isPresented: Binding(get: { set.alert != nil || set.editor.alert != nil },
+                                                set: { if !$0 { set.alert = nil; set.editor.alert = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(session.alert ?? "")
+            Text(set.alert ?? set.editor.alert ?? "")
+        }
+    }
+}
+
+/// The two songs of one transition of the set, shaped by hand.
+struct TransitionEditor: View {
+    @EnvironmentObject private var session: Session
+    @EnvironmentObject private var set: SetSession
+
+    var body: some View {
+        if session.hasPair {
+            VStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 12) {
+                    DeckCard(side: .a)
+                    TransitionPanel()
+                        .frame(width: 380)
+                    DeckCard(side: .b)
+                }
+                .padding(12)
+                Divider()
+                TimelineArea()
+            }
+        } else {
+            VStack(spacing: 8) {
+                Image(systemName: "slider.horizontal.below.square.and.square.filled")
+                    .font(.system(size: 34)).foregroundStyle(.secondary)
+                Text("Transition Editor").font(.headline)
+                Text(set.items.count < 2 ? "Add at least two songs. The transition being played shows up here; press Edit on any transition to shape it by hand."
+                                         : (set.buildStatus ?? "Press Edit on a transition to shape it by hand."))
+                    .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
@@ -33,8 +77,6 @@ struct ContentView: View {
 struct DeckCard: View {
     @EnvironmentObject private var session: Session
     let side: DeckSide
-    let onSearch: () -> Void
-    @State private var isDropTarget = false
 
     private var deck: Deck { session.deck(side) }
 
@@ -46,31 +88,18 @@ struct DeckCard: View {
                     .foregroundStyle(.white)
                     .frame(width: 34, height: 34)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Theme.color(side)))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(deck.title)
-                        .font(.headline)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    statusLine
-                }
+                Text(deck.title)
+                    .font(.headline)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
                 Spacer(minLength: 0)
             }
             if let a = deck.analysis {
                 HStack(spacing: 14) {
                     Stat(label: "BPM", value: String(format: "%.2f", a.grid.bpm))
                     Stat(label: "Key", value: "\(a.key.camelotCode) · \(a.key.displayName)")
-                    Stat(label: "Length", value: Theme.time(a.duration))
-                }
-            }
-            HStack {
-                Button { OpenPanel.choose { session.load($0, into: side) } } label: {
-                    Label("Open File…", systemImage: "folder")
-                }
-                Button(action: onSearch) {
-                    Label("Find Online…", systemImage: "magnifyingglass")
-                }
-                Spacer()
-                if deck.analysis != nil {
+                    Stat(label: "Trim", value: String(format: "%+.1f dB", session.trimDB(side)))
+                    Spacer(minLength: 0)
                     Menu {
                         Button("Halve BPM") { session.adjustGrid(side, .halve) }
                         Button("Double BPM") { session.adjustGrid(side, .double) }
@@ -84,60 +113,15 @@ struct DeckCard: View {
                         Label("Grid", systemImage: "metronome")
                     }
                     .fixedSize()
-                    .help("Fix the beat grid if detection got it wrong")
+                    .controlSize(.small)
+                    .help("Fix the beat grid if detection got this song wrong (re-plans its transitions)")
                 }
             }
-            .controlSize(.small)
         }
         .padding(12)
-        .frame(maxWidth: .infinity, minHeight: 130, alignment: .topLeading)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Theme.color(side).opacity(isDropTarget ? 0.18 : 0.07))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Theme.color(side).opacity(isDropTarget ? 0.9 : 0.25), lineWidth: isDropTarget ? 2 : 1)
-        )
-        .dropDestination(for: URL.self) { urls, _ in
-            guard let url = urls.first else { return false }
-            session.load(url, into: side)
-            return true
-        } isTargeted: { isDropTarget = $0 }
-    }
-
-    @ViewBuilder private var statusLine: some View {
-        switch deck.status {
-        case .empty:
-            Text("Drop a WAV here, open a file, or search online")
-                .font(.caption).foregroundStyle(.secondary)
-        case .decoding:
-            ProgressLine(text: "Decoding…", value: nil)
-        case .separating(let p):
-            ProgressLine(text: "Separating stems \(Int(p * 100))%", value: p)
-        case .analyzing:
-            ProgressLine(text: "Finding beat grid & key…", value: nil)
-        case .ready:
-            Text("4 stems ready").font(.caption).foregroundStyle(.secondary)
-        case .failed(let message):
-            Text(message).font(.caption).foregroundStyle(.red).lineLimit(2)
-        }
-    }
-}
-
-private struct ProgressLine: View {
-    let text: String
-    let value: Double?
-
-    var body: some View {
-        HStack(spacing: 6) {
-            if let value {
-                ProgressView(value: value).frame(width: 90)
-            } else {
-                ProgressView().controlSize(.mini)
-            }
-            Text(text).font(.caption).foregroundStyle(.secondary)
-        }
+        .frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.color(side).opacity(0.07)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.color(side).opacity(0.25), lineWidth: 1))
     }
 }
 

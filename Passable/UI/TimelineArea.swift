@@ -43,7 +43,7 @@ struct TimelineArea: View {
 
     var body: some View {
         GeometryReader { outer in
-            let laneHeight = max(44, (outer.size.height - Theme.rulerHeight - 40) / CGFloat(session.lanes.count))
+            let laneHeight = max(28, (outer.size.height - Theme.rulerHeight - 34) / CGFloat(session.lanes.count))
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
                     VStack(spacing: 0) {
@@ -71,14 +71,19 @@ struct TimelineArea: View {
                     }
                 }
                 Divider()
-                OverviewBar(viewport: viewport).frame(height: 40)
+                OverviewBar(viewport: viewport).frame(height: 34)
             }
         }
-        .onAppear(perform: installMonitor)
+        .onAppear {
+            installMonitor()
+            // The tab may have changed transitions while hidden.
+            DispatchQueue.main.async { frameTransition() }
+        }
         .onDisappear { if let monitor { NSEvent.removeMonitor(monitor) } }
         .onReceive(session.transport.$seconds, perform: follow)
         .onChange(of: session.matched != nil) { _, ready in if ready { frameTransition() } }
         .onChange(of: session.entryBar) { _, _ in frameTransition() }
+        .onChange(of: session.pairID) { _, _ in frameTransition() }
     }
 
     private var zoomControls: some View {
@@ -154,27 +159,28 @@ struct LaneHeader: View {
     var body: some View {
         HStack(spacing: 6) {
             Rectangle().fill(Theme.color(lane.side)).frame(width: 4)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(lane.title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                HStack(spacing: 4) {
-                    toggle("M", on: lane.isMuted, tint: .orange) { session.updateLane(lane.id) { $0.isMuted.toggle() } }
-                    toggle("S", on: lane.isSoloed, tint: .yellow) { session.updateLane(lane.id) { $0.isSoloed.toggle() } }
+            Text(lane.title).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 3) {
+                    toggle("M", on: lane.isMuted, tint: .orange) { session.updateLane(lane.id, undoable: false) { $0.isMuted.toggle() } }
+                        .help("Mute")
+                    toggle("S", on: lane.isSoloed, tint: .yellow) { session.updateLane(lane.id, undoable: false) { $0.isSoloed.toggle() } }
+                        .help("Solo")
                     Menu {
                         ForEach(LaneParameter.allCases) { p in
                             Button {
-                                session.updateLane(lane.id) { $0.visibleParameter = p }
+                                session.updateLane(lane.id, undoable: false) { $0.visibleParameter = p }
                             } label: {
                                 Text(p.displayName + (lane[p].isEmpty ? "" : "  •"))
                             }
                         }
                     } label: {
-                        Text(lane.visibleParameter.displayName).font(.system(size: 10))
+                        Text(lane.visibleParameter.shortName).font(.system(size: 10, weight: .medium))
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
-                }
+                    .help("Which parameter this lane shows and edits: \(lane.visibleParameter.displayName)")
             }
-            Spacer(minLength: 0)
         }
         .padding(.trailing, 6)
         .frame(maxHeight: .infinity)
@@ -197,37 +203,33 @@ struct LaneHeader: View {
 // MARK: - Grid drawing shared by ruler and lanes
 
 @MainActor
-private func drawGrid(_ context: GraphicsContext, size: CGSize, viewport: TimelineViewport, grid: BeatGrid?, labels: Bool) {
-    guard let g = grid else { return }
+private func drawGrid(_ context: GraphicsContext, size: CGSize, viewport: TimelineViewport, session: Session, labels: Bool) {
+    guard let g = session.masterGrid else { return }
     let beatPx = g.beatSeconds * viewport.pixelsPerSecond
     let barPx = beatPx * 4
     // Thin out bar lines when zoomed far out.
     let barStep = barPx >= 18 ? 1 : barPx >= 5 ? 4 : 16
-    let firstBar = Int(((viewport.start - g.firstDownbeat) / g.barSeconds).rounded(.down)) - 1
-    let lastBar = Int(((viewport.seconds(size.width) - g.firstDownbeat) / g.barSeconds).rounded(.up)) + 1
-    var bar = firstBar - ((firstBar % barStep) + barStep) % barStep
-    while bar <= lastBar {
-        let x = viewport.x(g.downbeat(bar))
-        let phrase = bar % 16 == 0
-        let strong = bar % 4 == 0
+    let lines = session.gridLines(from: viewport.start, to: viewport.seconds(size.width),
+                                  barStep: barStep, beats: beatPx >= 14)
+    for line in lines {
+        let x = viewport.x(line.time)
+        if line.beat != 0 {
+            var p = Path()
+            p.move(to: CGPoint(x: x, y: labels ? size.height * 0.6 : 0))
+            p.addLine(to: CGPoint(x: x, y: size.height))
+            context.stroke(p, with: .color(.primary.opacity(0.05)), lineWidth: 0.5)
+            continue
+        }
+        let phrase = line.bar % 16 == 0
+        let strong = line.bar % 4 == 0
         var path = Path()
         path.move(to: CGPoint(x: x, y: 0))
         path.addLine(to: CGPoint(x: x, y: size.height))
         context.stroke(path, with: .color(.primary.opacity(phrase ? 0.35 : strong ? 0.2 : 0.09)), lineWidth: phrase ? 1 : 0.5)
-        if labels && bar >= 0 && (barPx >= 26 || strong) {
-            context.draw(Text("\(bar + 1)").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary),
+        if labels && line.bar >= 0 && (barPx >= 26 || strong) {
+            context.draw(Text("\(line.bar + 1)").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary),
                          at: CGPoint(x: x + 3, y: 3), anchor: .topLeading)
         }
-        if beatPx >= 14 {
-            for beat in 1..<4 {
-                let bx = viewport.x(g.downbeat(bar) + Double(beat) * g.beatSeconds)
-                var p = Path()
-                p.move(to: CGPoint(x: bx, y: labels ? size.height * 0.6 : 0))
-                p.addLine(to: CGPoint(x: bx, y: size.height))
-                context.stroke(p, with: .color(.primary.opacity(0.05)), lineWidth: 0.5)
-            }
-        }
-        bar += barStep
     }
 }
 
@@ -246,8 +248,15 @@ struct RulerView: View {
                              with: .color(Theme.deckB.opacity(0.12)))
                 context.draw(Text("B in").font(.system(size: 9, weight: .bold)).foregroundColor(Theme.deckB),
                              at: CGPoint(x: x0 + 3, y: size.height - 3), anchor: .bottomLeading)
+                if let glide = session.glideRange {
+                    let g0 = viewport.x(glide.lowerBound), g1 = viewport.x(glide.upperBound)
+                    context.fill(Path(CGRect(x: g0, y: size.height - 3, width: max(2, g1 - g0), height: 3)),
+                                 with: .color(Theme.deckB.opacity(0.5)))
+                    context.draw(Text("B → own tempo").font(.system(size: 9, weight: .medium)).foregroundColor(Theme.deckB),
+                                 at: CGPoint(x: g0 + 3, y: size.height - 4), anchor: .bottomLeading)
+                }
             }
-            drawGrid(context, size: size, viewport: viewport, grid: session.masterGrid, labels: true)
+            drawGrid(context, size: size, viewport: viewport, session: session, labels: true)
         }
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 0).onChanged { value in
@@ -393,7 +402,7 @@ struct LaneCanvas: View {
             context.fill(Path(CGRect(x: min(x0, x1), y: 0, width: abs(x1 - x0), height: size.height)),
                          with: .color(Theme.deckB.opacity(0.05)))
         }
-        drawGrid(context, size: size, viewport: viewport, grid: session.masterGrid, labels: false)
+        drawGrid(context, size: size, viewport: viewport, session: session, labels: false)
 
         if let peaks = session.peaks(for: lane) {
             drawWaveform(context, size, peaks: peaks, offset: session.laneOffset(lane), color: color)

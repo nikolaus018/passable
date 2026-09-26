@@ -3,7 +3,7 @@ import Foundation
 /// Ready-made stem choreographies. Each writes automation relative to the
 /// moment B enters, measured in bars of the master (A) grid, so they land on
 /// phrase boundaries whatever the tempo.
-enum TransitionPreset: String, CaseIterable, Identifiable {
+enum TransitionPreset: String, CaseIterable, Codable, Identifiable {
     case stemSwap, dropSwap, longBlend, echoOut
 
     var id: String { rawValue }
@@ -20,7 +20,7 @@ enum TransitionPreset: String, CaseIterable, Identifiable {
     var summary: String {
         switch self {
         case .stemSwap:
-            return "B's drums build in under a high-pass, melody follows, basses swap hard on the half, A washes out, B's vocal arrives last."
+            return "B's drums and melody build in with their low end killed; kick and bass change hands on one downbeat (on B's drop if B is still building); A's vocal echoes out as B's takes over."
         case .dropSwap:
             return "B's drums build filtered, then everything swaps at once on the drop while A's melody and vocal echo away."
         case .longBlend:
@@ -47,19 +47,27 @@ struct TransitionBuilder {
     let bars: Int
     /// Bar (from B's entry) where B's vocal comes in; nil = end of the blend.
     let vocalBar: Int?
+    /// The keys don't fit: melodies are swapped, never layered.
+    let keysClash: Bool
+    /// Bar (from B's entry) where kick and bass change hands; nil = half-way.
+    let lowSwap: Int?
     private(set) var lanes: [Lane]
 
-    init(lanes: [Lane], start: Double, barSeconds: Double, bars: Int, vocalBar: Int? = nil) {
+    init(lanes: [Lane], start: Double, barSeconds: Double, bars: Int, vocalBar: Int? = nil, keysClash: Bool = false,
+         lowSwap: Int? = nil) {
+        self.lowSwap = lowSwap
         self.lanes = lanes
         self.start = start
         self.barSeconds = barSeconds
         self.bars = bars
         self.vocalBar = vocalBar
+        self.keysClash = keysClash
     }
 
     static func build(_ preset: TransitionPreset, lanes: [Lane], start: Double, barSeconds: Double, bars: Int,
-                      vocalBar: Int? = nil) -> [Lane] {
-        var builder = TransitionBuilder(lanes: lanes, start: start, barSeconds: barSeconds, bars: bars, vocalBar: vocalBar)
+                      vocalBar: Int? = nil, keysClash: Bool = false, lowSwap: Int? = nil) -> [Lane] {
+        var builder = TransitionBuilder(lanes: lanes, start: start, barSeconds: barSeconds, bars: bars,
+                                        vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap)
         builder.clearAll()
         builder.write(preset)
         return builder.lanes
@@ -87,24 +95,55 @@ struct TransitionBuilder {
         switch preset {
         case .stemSwap:
             let q = n / 4
-            // B drums build in, high-passed so they don't fight A's kick.
+            let sw = min(n, max(2 * q, Double(lowSwap ?? Int(2 * q))))
+            // The low end has one owner at a time: A's kick and bass until the
+            // half-way downbeat, B's from there. B's drums come in with their
+            // lows killed (hats, snares, percussion) and take the kick over in
+            // the same instant A's drums hand it off.
             automate(.b, .drums, .volume, [(0, 0, .exponential), (q, 1, .linear)])
-            automate(.b, .drums, .filter, [(0, 0.82, .sCurve), (2 * q, 0.5, .linear)])
-            // B melody follows.
-            automate(.b, .other, .volume, [(q, 0, .exponential), (2 * q, 1, .linear)])
-            // Hard bass swap on the half-way downbeat: two basses never overlap.
-            automate(.a, .bass, .volume, [(2 * q, 1, .hold), (2 * q + 0.001, 0, .linear)])
-            automate(.b, .bass, .volume, [(2 * q, 0, .hold), (2 * q + 0.001, 1, .linear)])
+            automate(.b, .drums, .filter, [(0, 0.74, .sCurve), (2 * q, 0.5, .linear)])
+            // Melody stems carry low end too (synth bass, 808s): B's stays
+            // killed, A's goes, on the same downbeat.
+            for stem in [StemKind.drums, .other] {
+                automate(.b, stem, .low, [(sw, 0, .hold), (sw + 0.001, 0.5, .linear)])
+                if sw < n {
+                    automate(.a, stem, .low, [(sw, 0.5, .hold), (sw + 0.001, 0, .linear)])
+                }
+            }
+            // Hard bass swap on the same downbeat.
+            automate(.a, .bass, .volume, [(sw, 1, .hold), (sw + 0.001, 0, .linear)])
+            automate(.b, .bass, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
             // A vocal echoes out just before the swap.
             automate(.a, .vocals, .delay, [(2 * q - 1, 0, .linear), (2 * q - 0.25, 0.8, .hold), (2 * q + 1, 0, .linear)])
             automate(.a, .vocals, .volume, [(2 * q - 1, 1, .logarithmic), (2 * q, 0, .linear)])
-            // A melody dissolves: low-pass sweep, then fade into a reverb wash.
-            automate(.a, .other, .filter, [(2 * q, 0.5, .sCurve), (4 * q, 0.14, .linear)])
-            automate(.a, .other, .reverb, [(3 * q, 0, .linear), (4 * q - 0.5, 0.7, .linear), (4 * q + 2, 0, .linear)])
-            automate(.a, .other, .volume, [(3 * q, 1, .logarithmic), (4 * q, 0, .linear)])
-            // A drums thin out and hand over.
-            automate(.a, .drums, .filter, [(3 * q, 0.5, .sCurve), (4 * q, 0.78, .linear)])
-            automate(.a, .drums, .volume, [(3 * q, 1, .logarithmic), (4 * q, 0, .linear)])
+            if keysClash {
+                // Clashing melodies never overlap: A's washes out into a
+                // reverb tail as B's lands on the swap.
+                automate(.a, .other, .reverb, [(2 * q - 1, 0, .linear), (2 * q, 0.8, .hold), (2 * q + 0.001, 0, .linear)])
+                automate(.a, .other, .volume, [(2 * q, 1, .hold), (2 * q + 0.001, 0, .linear)])
+                automate(.b, .other, .volume, [(2 * q, 0, .hold), (2 * q + 0.001, 1, .linear)])
+            } else if sw < n {
+                // B melody follows the drums; A's dissolves once B owns the
+                // low end: low-pass sweep, then a fade into a reverb wash.
+                automate(.b, .other, .volume, [(q, 0, .exponential), (2 * q, 1, .linear)])
+                automate(.a, .other, .filter, [(2 * q, 0.5, .sCurve), (4 * q, 0.14, .linear)])
+                automate(.a, .other, .reverb, [(3 * q, 0, .linear), (4 * q - 0.5, 0.7, .linear), (4 * q + 2, 0, .linear)])
+                automate(.a, .other, .volume, [(3 * q, 1, .logarithmic), (4 * q, 0, .linear)])
+            } else {
+                // B is still building: A keeps driving at full power and is
+                // thrown into a reverb tail on B's drop, never faded under it.
+                automate(.b, .other, .volume, [(q, 0, .exponential), (2 * q, 1, .linear)])
+                automate(.a, .other, .reverb, [(4 * q - 1, 0, .linear), (4 * q, 0.8, .hold), (4 * q + 0.001, 0, .linear)])
+                automate(.a, .other, .volume, [(4 * q, 1, .hold), (4 * q + 0.001, 0, .linear)])
+            }
+            if sw < n {
+                // A's tops thin out and hand over.
+                automate(.a, .drums, .filter, [(3 * q, 0.5, .sCurve), (4 * q, 0.78, .linear)])
+                automate(.a, .drums, .volume, [(3 * q, 1, .logarithmic), (4 * q, 0, .linear)])
+            } else {
+                // A's beat carries the build and cuts on B's drop.
+                automate(.a, .drums, .volume, [(4 * q, 1, .hold), (4 * q + 0.001, 0, .linear)])
+            }
             // B vocal lands on the new phrase (or takes over at the swap).
             automate(.b, .vocals, .volume, [(v, 0, .hold), (v + 0.001, 1, .linear)])
 
@@ -112,6 +151,8 @@ struct TransitionBuilder {
             let h = n / 2
             automate(.b, .drums, .volume, [(0, 0, .exponential), (h, 1, .linear)])
             automate(.b, .drums, .filter, [(0, 0.9, .exponential), (h - 0.001, 0.62, .hold), (h, 0.5, .linear)])
+            // No second kick before the drop.
+            automate(.b, .drums, .low, [(h, 0, .hold), (h + 0.001, 0.5, .linear)])
             for stem in [StemKind.bass, .other] {
                 automate(.b, stem, .volume, [(h, 0, .hold), (h + 0.001, 1, .linear)])
             }
@@ -134,11 +175,17 @@ struct TransitionBuilder {
             for stem in [StemKind.drums, .bass] {
                 automate(.b, stem, .volume, [(0, 0, .exponential), (q, 1, .linear)])
             }
-            automate(.b, .other, .volume, [(0, 0, .exponential), (2 * q, 1, .linear)])
-            automate(.b, .other, .filter, [(0, 0.16, .sCurve), (2 * q, 0.5, .linear)])
             automate(.a, .vocals, .volume, [(q, 1, .logarithmic), (2 * q, 0, .linear)])
-            automate(.a, .other, .filter, [(2 * q, 0.5, .sCurve), (4 * q, 0.76, .linear)])
-            automate(.a, .other, .volume, [(2 * q, 1, .logarithmic), (4 * q, 0, .linear)])
+            if keysClash {
+                automate(.a, .other, .reverb, [(2 * q - 1, 0, .linear), (2 * q, 0.8, .hold), (2 * q + 0.001, 0, .linear)])
+                automate(.a, .other, .volume, [(2 * q, 1, .hold), (2 * q + 0.001, 0, .linear)])
+                automate(.b, .other, .volume, [(2 * q, 0, .hold), (2 * q + 0.001, 1, .linear)])
+            } else {
+                automate(.b, .other, .volume, [(0, 0, .exponential), (2 * q, 1, .linear)])
+                automate(.b, .other, .filter, [(0, 0.16, .sCurve), (2 * q, 0.5, .linear)])
+                automate(.a, .other, .filter, [(2 * q, 0.5, .sCurve), (4 * q, 0.76, .linear)])
+                automate(.a, .other, .volume, [(2 * q, 1, .logarithmic), (4 * q, 0, .linear)])
+            }
             for stem in [StemKind.drums, .bass] {
                 automate(.a, stem, .volume, [(3 * q, 1, .sCurve), (4 * q, 0, .linear)])
             }

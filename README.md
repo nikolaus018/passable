@@ -1,13 +1,26 @@
 # Passable
 
-A native macOS app for building transitions between two tracks, stem by stem.
+A native macOS app that mixes songs like a DJ, stem by stem. Add songs to a set, and Passable puts them in the order that flows best, builds every transition and plays or renders one continuous mix. Any transition can be opened and shaped by hand.
 
-1. Load **Track A** and **Track B**: open a file, drag one onto a deck, or use **Find Online…**, which downloads a WAV to `~/Music/Passable` via `yt-dlp` and `ffmpeg`.
-2. Each track is split into **vocals, melody, drums and bass** by HTDemucs v4, running locally through Core ML. The app then finds its beat grid and key.
-3. B is time-stretched to A's tempo and pitch-shifted to a compatible key. Drums are only time-stretched, never pitch-shifted.
-4. The 8 stem lanes are automatable: **volume, DJ filter, 3-band EQ (with kill), reverb send, delay send**. The presets are Stem Swap, Drop Swap, Long Blend and Echo Out. Click a lane to add a point and drag to move it; points snap to the beat unless you hold ⌥. Right-click a point to change its curve or delete it. Scroll to pan, and pinch or ⌘-scroll to zoom.
-5. **Auto** picks where the transition goes from the stems. It keeps both sides on phrase boundaries with drums under the blend, times B's vocal to come in as A's is echoed out, and caps automatic key shifts at ±2 semitones (it flags clashes instead). **Undo/redo** covers all edits (⌘Z / ⇧⌘Z). If beat detection gets a track wrong, use the **Grid** menu on the deck to halve or double the BPM, shift the downbeat by a beat, or nudge the grid.
-6. **Render WAV** exports the full mix or just the transition as a 24-bit, 44.1 kHz file.
+## Set tab
+
+1. Add songs: drop files onto the window, **Add Songs…** (⌘O), or **Find Online…**, which downloads WAVs to `~/Music/Passable` via `yt-dlp` and `ffmpeg`. The sheet stays open, so you can add several.
+2. Each song is split into **vocals, melody, drums and bass** by HTDemucs v4, running locally through Core ML. Passable then finds its tempo, beat 1, key, and bar-by-bar structure and loudness.
+3. When all songs are ready, Passable orders them. It minimises tempo stretch, prefers compatible keys, keeps the energy building, and favours pairs whose sections line up. **Auto-Order** re-runs this; drag rows to override.
+4. Every transition is planned from the two songs alone:
+   - **Where:** B's next section (ideally its chorus or drop) lands as A leaves. Energy stays level, with no chorus into a quiet intro and no breakdown or fade-out inside the blend. Vocals hand over instead of clashing.
+   - **How:** exactly one kick and one bass line at a time. B enters with its low end killed, and the lows swap on one downbeat, as late as B's drop when B is still building. Clashing keys swap melodies instead of layering them. Tempos more than 8 % apart use Echo Out.
+   - **Levels:** every song's loud sections are matched (trim), so nothing jumps.
+   - **Tempo:** B is matched to A only while they overlap, then glides home and plays untouched. Stretching is sample-exact: a phase-locked vocoder for tonal stems, with the original drum hits copied onto their new positions.
+5. **Listen** plays from four bars before a transition. **Edit** opens it in the Transition tab.
+
+## Transition tab
+
+Shows the transition that's playing, or the one you picked with **Edit**: both songs' 8 stem lanes with **volume, DJ filter, 3-band EQ (with kill), reverb send and delay send** automation. Click a lane to add a point and drag to move it; points snap to the beat unless you hold ⌥. Right-click a point to change its curve or delete it. Scroll to pan; pinch or ⌘-scroll to zoom. You can also move where the transition sits, switch the preset or length, shift B's key, or fix a song's beat grid from its **Grid** menu.
+
+Any change goes straight into the set and unticks **Automatic**. Tick it again to return to the automatic transition. Undo and redo (⌘Z / ⇧⌘Z) cover your edits. Mute and solo apply to the set's playback.
+
+One transport serves both tabs: **Space** plays or pauses, **Return** cues the open transition, and **Render** writes the whole set, or just this transition, as a 24-bit, 44.1 kHz WAV. The set and your edits are remembered between launches.
 
 ## Build
 
@@ -32,11 +45,13 @@ The tests compare the result against PyTorch: stems match at over 110 dB SNR. Th
 |---|---|
 | `Passable/Separation` | Core ML HTDemucs, STFT, stem cache |
 | `Passable/Analysis` | beat grid (onset comb search + downbeat), key (Krumhansl chroma) |
-| `Passable/Audio` | decoding/resampling, mmap'd stems, AUTimePitch offline matching |
+| `Passable/Audio` | decoding/resampling, mmap'd stems, time map + sample-exact stretcher (phase vocoder, transient copy, sinc resampler) |
 | `Passable/DSP` | mixer, biquads, Freeverb, ping-pong delay, limiter: shared by preview and render |
 | `Passable/Model` | automation envelopes, presets, session |
 | `Passable/UI` | SwiftUI: decks, transition panel, timeline, search |
 
-To check analysis and placement on your own files, run `PASSABLE_PROBE=list.txt xcodebuild test -only-testing:PassableTests/RealTrackProbe`, where `list.txt` holds one path per line.
+Measurement harnesses (skipped unless their variable is set; `xcodebuild` only passes variables prefixed with `TEST_RUNNER_`), each taking a file with one path per line:
 
-Dev shortcut: `Passable.app/Contents/MacOS/Passable -PassableTrackA a.wav -PassableTrackB b.wav` preloads both decks.
+- `TEST_RUNNER_PASSABLE_SET=list.txt xcodebuild test -scheme Passable -only-testing:PassableTests/SetLab` builds a set from the songs, prints the order, measures every transition (level change, dips, doubled low end, clashing vocals) and renders `~/Music/Passable/Lab/Set.wav`.
+- `TEST_RUNNER_PASSABLE_LAB=list.txt … -only-testing:PassableTests/TransitionLab` does the same for consecutive pairs through the editor's pipeline.
+- `TEST_RUNNER_PASSABLE_PROBE=list.txt … -only-testing:PassableTests/RealTrackProbe` prints analysis and placement.

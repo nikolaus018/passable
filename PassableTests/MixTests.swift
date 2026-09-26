@@ -94,25 +94,73 @@ final class MixTests: XCTestCase {
         }
     }
 
-    func testTimeStretchKeepsLengthAndAlignment() throws {
+    /// Clicks every 0.5 s for `seconds`.
+    private func clickTrack(seconds: Int) -> StereoBuffer {
         let sr = 44_100
-        var input = StereoBuffer(count: sr * 4)
-        // Clicks every 0.5 s.
-        for k in 0..<8 {
+        var input = StereoBuffer(count: sr * seconds)
+        for k in 0..<(2 * seconds) {
             for i in 0..<64 {
                 let v = Float(sin(Double(i) / 64 * .pi))
                 input.left[k * sr / 2 + i] = v
                 input.right[k * sr / 2 + i] = v
             }
         }
-        let rate = 1.05
-        let out = try TimeStretcher.process(input, rate: rate, semitones: 0)
-        XCTAssertEqual(Double(out.count), Double(input.count) / rate, accuracy: 2)
-        // The 4th click should land at 1.5 s / rate.
-        let expected = Int(1.5 * Double(sr) / rate + 32 / rate)
-        let window = (expected - 2000)..<(expected + 2000)
-        let peak = window.max { abs(out.left[$0]) < abs(out.left[$1]) }!
-        XCTAssertEqual(Double(peak - expected) / Double(sr), 0, accuracy: 0.004)
+        return input
+    }
+
+    private func peak(in out: StereoBuffer, near expected: Double) -> Double {
+        let e = Int(expected)
+        let window = max(0, e - 2000)..<min(out.count, e + 2000)
+        return Double(window.max { abs(out.left[$0]) < abs(out.left[$1]) }!)
+    }
+
+    /// Every click must land exactly where the map says, from the first to
+    /// the last: the old AUTimePitch path drifted tens of ms over a track.
+    func testTimeStretchIsSampleExact() {
+        let input = clickTrack(seconds: 60)
+        for (rate, percussive) in [(1.05, true), (0.92, true), (1.05, false), (0.92, false)] {
+            let map = TimeMap.constant(rate)
+            let out = TimeStretcher.process(input, map: map, semitones: 0, percussive: percussive)
+            XCTAssertEqual(Double(out.count), Double(input.count) / rate, accuracy: 1)
+            for k in [1, 40, 118] {
+                let expected = map.output(Double(k * 22_050 + 32))
+                // Copied hits play at their own speed from the detected onset,
+                // so their peak may sit a few samples (well under 1 ms) off.
+                XCTAssertEqual(peak(in: out, near: expected), expected, accuracy: percussive ? 16 : 90,
+                               "rate \(rate) percussive \(percussive) click \(k)")
+            }
+        }
+    }
+
+    func testGlideReturnsToTheUntouchedSource() {
+        let sr = 44_100.0
+        let input = clickTrack(seconds: 40)
+        let map = TimeMap.glide(rate: 1.06, rampStart: 10 * sr, rampLength: 8 * sr)
+        XCTAssertEqual(map.source(map.output(123_456.7)), 123_456.7, accuracy: 1e-6)
+        XCTAssertEqual(map.slope(at: map.rampEnd + 1), 1)
+        let offset = try! XCTUnwrap(map.tailOffset)
+        let out = TimeStretcher.process(input, map: map, semitones: 0, percussive: true)
+        XCTAssertEqual(out.count, input.count - offset)
+        let tail = Int(map.rampEnd) + 4096
+        XCTAssertEqual((tail..<out.count).map { abs(out.left[$0] - input.left[$0 + offset]) }.max(), 0)
+        // Clicks inside the glide still land where the map puts them.
+        for k in stride(from: 20, to: 36, by: 3) {
+            let expected = map.output(Double(k * 22_050 + 32))
+            XCTAssertEqual(peak(in: out, near: expected), expected, accuracy: 16)
+        }
+    }
+
+    func testPitchShiftKeepsTimingAndChangesPitch() {
+        let sr = 44_100.0
+        let n = Int(sr * 6)
+        let tone = (0..<n).map { Float(0.5 * sin(2 * .pi * 440 * Double($0) / sr)) }
+        let out = TimeStretcher.process(StereoBuffer(left: tone, right: tone), map: .constant(1.04),
+                                        semitones: 2, percussive: false)
+        XCTAssertEqual(Double(out.count), Double(n) / 1.04, accuracy: 1)
+        var crossings = 0
+        for i in 44_101..<176_400 where (out.left[i - 1] < 0) != (out.left[i] < 0) { crossings += 1 }
+        let hz = Double(crossings) / 2 / (Double(176_400 - 44_101) / sr)
+        XCTAssertEqual(hz, 440 * pow(2, 2.0 / 12), accuracy: 1)
     }
 }
 

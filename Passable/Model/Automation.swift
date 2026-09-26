@@ -200,7 +200,7 @@ enum DeckSide: String, Codable, CaseIterable, Identifiable {
 }
 
 /// One of the eight stem channels on the timeline.
-struct Lane: Identifiable, Equatable {
+struct Lane: Identifiable, Equatable, Codable {
     let side: DeckSide
     let stem: StemKind
     var envelopes: [Envelope] = Array(repeating: Envelope(), count: LaneParameter.allCases.count)

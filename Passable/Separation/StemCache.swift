@@ -36,10 +36,12 @@ enum StemCache {
         return stems
     }
 
-    static func matchedDirectory(in directory: URL, rate: Double, semitones: Int) throws -> URL {
-        let dir = directory.appendingPathComponent(String(format: "matched-%.6f-%+d", rate, semitones), isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+    /// Tempo-matched stems from before matching was sample-exact.
+    static func removeLegacyMatches(in directory: URL) {
+        let items = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        for item in items where item.lastPathComponent.hasPrefix("matched-") {
+            try? FileManager.default.removeItem(at: item)
+        }
     }
 
     static func loadAnalysis(from directory: URL) -> TrackAnalysis? {

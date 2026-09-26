@@ -45,10 +45,13 @@ final class EndToEndTests: XCTestCase {
         XCTAssertEqual(session.rate, 124.0 / 118.0, accuracy: 0.002)
         XCTAssertEqual(session.semitones, -2, "B was written two semitones above A")
 
-        // Matched B should be (length / rate) long.
-        let bDuration = session.deckB.analysis!.duration
-        let matchedFrames = session.matched!.stems[.drums]!.count
-        XCTAssertEqual(Double(matchedFrames) / 44_100, bDuration / session.rate, accuracy: 0.05)
+        // Matched B is as long as its time map says: A's tempo through the
+        // blend, then its own.
+        let map = session.matched!.plan.map
+        let sourceFrames = session.deckB.loaded!.stems[.drums]!.count
+        XCTAssertEqual(session.matched!.stems[.drums]!.count, Int(map.output(Double(sourceFrames))), accuracy: 1)
+        XCTAssertEqual(map.rate, session.rate, accuracy: 1e-9)
+        XCTAssertEqual(map.rampStart / 44_100, session.transitionEnd - session.offsetB, accuracy: 0.001)
 
         // A preset was applied automatically.
         XCTAssertTrue(session.lanes.contains { !$0[.volume].isEmpty })
