@@ -233,19 +233,19 @@ struct SetTransportBar: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Button { set.togglePlay() } label: {
-                Image(systemName: transport.isPlaying ? "pause.fill" : "play.fill").frame(width: 22)
-            }
-            .keyboardShortcut(.space, modifiers: [])
-            .disabled(set.mix == nil)
-            .help("Play / Pause (Space)")
-
             Button { set.skipBack() } label: {
                 Image(systemName: "backward.end.fill")
             }
             .keyboardShortcut(.leftArrow, modifiers: [.command])
             .disabled(set.mix == nil)
             .help("Back to the start of this song's transition; twice for the one before (⌘← or ⏮)")
+
+            Button { set.togglePlay() } label: {
+                Image(systemName: transport.isPlaying ? "pause.fill" : "play.fill").frame(width: 22)
+            }
+            .keyboardShortcut(.space, modifiers: [])
+            .disabled(set.mix == nil)
+            .help("Play / Pause (Space)")
 
             Button { set.skipForward() } label: {
                 Image(systemName: "forward.end.fill")

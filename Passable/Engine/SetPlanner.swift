@@ -436,11 +436,7 @@ enum VocalPhrasing {
     }
 
     /// The level a vocal sings at: its loud bars (90th percentile).
-    static func reference(_ structure: TrackStructure?) -> Float? {
-        guard let levels = structure?.stemLevel?[StemKind.vocals.rawValue]?.filter({ $0 > -80 }).sorted(),
-              !levels.isEmpty else { return nil }
-        return levels[min(levels.count - 1, levels.count * 9 / 10)]
-    }
+    static func reference(_ structure: TrackStructure?) -> Float? { structure?.vocalReference }
 
     /// A beat with no more than breath and bleed in it.
     private static func quiet(_ db: Float, _ reference: Float) -> Bool { db < reference - 16 }

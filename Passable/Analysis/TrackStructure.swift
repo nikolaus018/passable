@@ -14,6 +14,9 @@ struct TrackStructure: Codable, Equatable {
     /// measured before they existed still decode; the loader re-measures.
     var stemLevel: [String: [Float]]?
     var stemLowLevel: [String: [Float]]?
+    /// The vocal's level per beat, in dB: where its lines start and stop,
+    /// which bars are too coarse for. Optional like the above.
+    var vocalBeatLevel: [Float]?
 
     /// How loud the track is when it's going: the level of its loud bars
     /// (80th percentile), which is what a DJ matches with the trim knob.
@@ -120,7 +123,55 @@ struct TrackStructure: Codable, Equatable {
             loudness.append(10 * log10(max((l + r) / 2, 1e-9)))
             bar += 1
         }
-        return TrackStructure(activity: activity, loudness: loudness, stemLevel: stemLevel, stemLowLevel: stemLowLevel)
+        var vocalBeats: [Float] = []
+        if let vocals = stems[.vocals] {
+            var i = 0
+            while true {
+                let start = Int(grid.beat(i) * sr), end = Int(grid.beat(i + 1) * sr)
+                guard end <= vocals.count else { break }
+                var l: Float = 0, r: Float = 0
+                vDSP_measqv(vocals.left.pointer + start, 1, &l, vDSP_Length(end - start))
+                vDSP_measqv(vocals.right.pointer + start, 1, &r, vDSP_Length(end - start))
+                vocalBeats.append(10 * log10(max((l + r) / 2, 1e-9)))
+                i += 1
+            }
+        }
+        return TrackStructure(activity: activity, loudness: loudness, stemLevel: stemLevel, stemLowLevel: stemLowLevel,
+                              vocalBeatLevel: vocalBeats)
+    }
+}
+
+extension TrackStructure {
+    /// The level the vocal sings at: its loud bars (90th percentile). nil
+    /// for an instrumental, whose vocal stem is only separation bleed: its
+    /// "lines" would be noise.
+    var vocalReference: Float? {
+        guard let levels = stemLevel?[StemKind.vocals.rawValue]?.filter({ $0 > -80 }).sorted(), !levels.isEmpty
+        else { return nil }
+        let reference = levels[min(levels.count - 1, levels.count * 9 / 10)]
+        return reference > -45 ? reference : nil
+    }
+
+    /// Per beat: no more of the vocal than breath and bleed. nil for
+    /// structures measured before per-beat levels existed.
+    var vocalQuietBeats: VocalPauses? {
+        guard let beats = vocalBeatLevel, let reference = vocalReference else { return nil }
+        return VocalPauses(quiet: beats.map { $0 < reference - 16 })
+    }
+}
+
+/// Where a vocal is silent, beat by beat: where its lines can be let in or
+/// taken out cleanly.
+struct VocalPauses {
+    let quiet: [Bool]
+
+    /// Beats outside the song count as quiet.
+    func isQuiet(_ i: Int) -> Bool { i < 0 || i >= quiet.count || quiet[i] }
+
+    /// Two quiet beats somewhere in `range`: a line can start (or has
+    /// ended) there without cutting one in two.
+    func hasPause(in range: ClosedRange<Int>) -> Bool {
+        range.contains { isQuiet($0 - 1) && isQuiet($0) }
     }
 }
 
@@ -318,6 +369,7 @@ enum AutoPlacement {
         struct ShapeKey: Hashable { let handoff: Int, lowSwap: Int }
         var shapes: [ShapeKey: TransitionShape] = [:]
         let powerA = AutoPlacement.powers(sa, trim: trimA), powerB = AutoPlacement.powers(sb, trim: trimB)
+        let pausesA = sa.vocalQuietBeats, pausesB = sb.vocalQuietBeats
 
         var best = (entry: entries.last ?? max(0, barsA - n), cue: cues.first ?? 0, handoff: vocalIn,
                     lowSwap: lowSwap(cue: cues.first ?? 0), score: -Float.infinity)
@@ -408,6 +460,11 @@ enum AutoPlacement {
                         s -= penalty * 24 / Float(bars.count)
                     }
                     guard !echo else {
+                        // B's beat drops with its vocal open: not in the
+                        // middle of a line. A's vocal should find a line end
+                        // in the bridge's last bars.
+                        if let pausesB, !(pausesB.isQuiet(4 * c - 1) || pausesB.isQuiet(4 * c)) { s -= 0.8 }
+                        if let pausesA, !pausesA.hasPause(in: (4 * (e - 3))...(4 * e)) { s -= 0.3 }
                         if s > best.score { best = (e, c, handoff, sw, s) }
                         continue
                     }
@@ -422,6 +479,13 @@ enum AutoPlacement {
                         min(s.meanActivity(.vocals, bars: (bar - 1)..<bar), s.meanActivity(.vocals, bars: bar..<(bar + 1)))
                     }
                     s -= 0.8 * through(sb, c + handoff) + 0.4 * through(sa, e + out)
+                    // To the beat: a clean line start for B's vocal where the
+                    // builder will look for one (half-way to four bars past
+                    // the handoff), a line end for A's near its exit.
+                    // Without one, B's voice has to fade in mid-sentence.
+                    let v = min(n, max(n / 2, handoff))
+                    if let pausesB, !pausesB.hasPause(in: (4 * (c + n / 2))...(4 * (c + v + 4))) { s -= 0.8 }
+                    if let pausesA, !pausesA.hasPause(in: (4 * (e + out - 4))...(4 * (e + out + 2))) { s -= 0.3 }
                     if s > best.score { best = (e, c, handoff, sw, s) }
                 }
             }
