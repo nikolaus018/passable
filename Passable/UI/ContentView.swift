@@ -1,9 +1,11 @@
+import AppKit
 import SwiftUI
 
 /// Two tabs over one set: the song list, and the transition being played
 /// (or picked with Edit) for shaping by hand. One transport serves both.
 struct ContentView: View {
     @EnvironmentObject private var set: SetSession
+    @State private var keyMonitor: Any?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,6 +40,29 @@ struct ContentView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(set.alert ?? set.editor.alert ?? "")
+        }
+        .onAppear { installKeyMonitor() }
+        .onDisappear { if let keyMonitor { NSEvent.removeMonitor(keyMonitor) } }
+    }
+
+    /// Holding M or S mutes/solos Track A's vocals for as long as the key is down —
+    /// a quick preview gesture, not a toggle, so it doesn't touch the undo stack.
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        let set = self.set
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
+            guard !event.isARepeat, event.modifierFlags.isDisjoint(with: [.command, .option, .control]),
+                  let key = event.charactersIgnoringModifiers?.lowercased(), key == "m" || key == "s" else { return event }
+            guard let responder = event.window?.firstResponder, !(responder is NSTextView) else { return event }
+            let isDown = event.type == .keyDown
+            MainActor.assumeIsolated {
+                if key == "m" {
+                    set.editor.updateLane("A.vocals", undoable: false) { $0.isMuted = isDown }
+                } else {
+                    set.editor.updateLane("A.vocals", undoable: false) { $0.isSoloed = isDown }
+                }
+            }
+            return nil
         }
     }
 }
