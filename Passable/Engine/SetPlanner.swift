@@ -186,28 +186,52 @@ enum SetOrdering {
         return (0..<n).map { Array(flat[($0 * n)..<($0 * n + n)]) }
     }
 
-    /// Hip-hop detected at 70-something is felt at double time in a club.
-    private static func foldToClubRange(_ bpm: Double) -> Double { bpm < 90 ? 2 : 1 }
+    /// Hip-hop detected at 70-something is felt at double time in a club;
+    /// at 85 it's felt at 85 (calling it 170 made it the set's hardest
+    /// record).
+    private static func foldToClubRange(_ bpm: Double) -> Double { bpm < 80 ? 2 : 1 }
+
+    /// Which ordered pairs can only be a Wash Out (tempos too far apart).
+    static func washOuts(_ analyses: [TrackAnalysis]) -> [[Bool]] {
+        analyses.map { a in
+            analyses.map { b in MixMath.recommendedPreset(rate: MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)) == .echoOut }
+        }
+    }
+
+    /// A song between two Wash Outs is heard only between two beatless
+    /// bridges: it flickers past with no beat carried in or out. A song in
+    /// a tempo of its own belongs at an end of the set, not wedged in.
+    static let washOutPairPenalty = 1.5
 
     /// The order with the lowest total transition cost (a shortest
     /// Hamiltonian path over directed costs): exact for small sets, local
-    /// search beyond.
-    static func order(_ costs: [[Double]]) -> [Int] {
+    /// search beyond; then moves that keep Wash Outs apart.
+    static func order(_ costs: [[Double]], washOuts: [[Bool]]? = nil) -> [Int] {
         let n = costs.count
         guard n > 2 else { return Array(0..<n) }
-        if n <= 12 { return exact(costs) }
+        if n <= 12 {
+            var path = exact(costs)
+            if washOuts != nil { improve(&path, costs, washOuts) }
+            return path
+        }
         var best = Array(0..<n), bestCost = Double.infinity
         for start in 0..<n {
             var path = greedy(costs, from: start)
-            improve(&path, costs)
-            let c = total(path, costs)
+            improve(&path, costs, washOuts)
+            let c = total(path, costs, washOuts)
             if c < bestCost { bestCost = c; best = path }
         }
         return best
     }
 
-    static func total(_ path: [Int], _ costs: [[Double]]) -> Double {
-        zip(path, path.dropFirst()).reduce(0) { $0 + costs[$1.0][$1.1] }
+    static func total(_ path: [Int], _ costs: [[Double]], _ washOuts: [[Bool]]? = nil) -> Double {
+        var sum = zip(path, path.dropFirst()).reduce(0) { $0 + costs[$1.0][$1.1] }
+        if let washOuts, path.count > 2 {
+            for i in 1..<(path.count - 1) where washOuts[path[i - 1]][path[i]] && washOuts[path[i]][path[i + 1]] {
+                sum += washOutPairPenalty
+            }
+        }
+        return sum
     }
 
     private static func exact(_ costs: [[Double]]) -> [Int] {
@@ -249,17 +273,17 @@ enum SetOrdering {
     }
 
     /// Or-opt: move single tracks to a better spot until nothing improves.
-    private static func improve(_ path: inout [Int], _ costs: [[Double]]) {
+    private static func improve(_ path: inout [Int], _ costs: [[Double]], _ washOuts: [[Bool]]? = nil) {
         var improved = true
         while improved {
             improved = false
-            let current = total(path, costs)
+            let current = total(path, costs, washOuts)
             outer: for i in path.indices {
                 for j in path.indices where j != i {
                     var p = path
                     let x = p.remove(at: i)
                     p.insert(x, at: j)
-                    if total(p, costs) < current - 1e-9 {
+                    if total(p, costs, washOuts) < current - 1e-9 {
                         path = p
                         improved = true
                         break outer
@@ -370,6 +394,10 @@ struct SetMix: @unchecked Sendable {
         /// two grooves sit together (0…1).
         var nudge: Double = 0
         var grooveLock: Double = 1
+        var grooveLags: [Double] = []
+        /// B's drums built in under A's; A's played on under B's after the
+        /// swap.
+        var drumsLayered = true, drumsLinger = true
         /// Master seconds at which A's vocal is taken out and B's let in
         /// (nil: not automatic, or no vocal to hand over).
         var vocalOut: Double?
@@ -391,6 +419,8 @@ struct SetMix: @unchecked Sendable {
         /// The melodies were heard to clash, so they were swapped rather
         /// than layered.
         var melodiesClash = false
+        /// dB A's drums and melody made way for B's (EQ).
+        var room = 0.0
     }
 
     var tracks: [Track]
@@ -451,7 +481,7 @@ enum BeatAlign {
     ///     stretched to it), output frame 0 at master `aOffset`/`bOffset`.
     static func nudge(a: StemAudio, aOffset: Double, b: StemAudio, bOffset: Double,
                       from: Double, to: Double) -> Result {
-        let sr = AudioIO.sampleRate, hop = Double(TempoEstimator.hop)
+        let sr = AudioIO.sampleRate, hop = Double(onsetHop)
         let pad = 2 * maxNudge
         let bFrom = from - bOffset - pad
         guard let ea = onsets(a, from: from - aOffset, to: to - aOffset),
@@ -474,15 +504,33 @@ enum BeatAlign {
         // votes on its own: before the swap it's A's kit under B's tops,
         // after it the other way round, and grooves can sit differently.
         let window = max(1, Int((to - from) / 8 * sr / hop))
+        // Only a window whose hits line up clearly better at one lag than
+        // on average says anything about the groove. In a sparse intro (a
+        // few hats, a lone snare) every lag scores about the same and the
+        // best one is noise: counting those as votes called beats that sit
+        // together perfectly "won't lock" and threw away half the blends.
         func lags(_ frames: Range<Int>) -> [Double] {
             var out: [Double] = []
             for w in stride(from: frames.lowerBound, to: frames.upperBound - window + 1, by: window) {
                 let f = w..<(w + window)
                 guard ea[f].reduce(0, +) > 0 else { continue }
-                let zero = score(0, f)
-                let best = stride(from: -maxNudge, through: maxNudge, by: 0.001).map { ($0, score($0, f)) }
-                    .max { $0.1 < $1.1 }!
-                if best.1 > 0 { out.append(best.1 > 1.02 * zero ? best.0 : 0) }
+                // Whole onset frames (a millisecond) first, then the peak's
+                // own shape through the best and its neighbours: hits are
+                // sharp, so it's a V (two lines of equal slope), not a
+                // parabola, which would pull the offset towards the
+                // nearest frame.
+                let frame = hop / sr, reach = Int((maxNudge / frame).rounded())
+                let scores = (-reach...reach).map { score(Double($0) * frame, f) }
+                let k = scores.indices.max { scores[$0] < scores[$1] }!
+                let best = scores[k], mean = scores.reduce(0, +) / Double(scores.count)
+                guard best > 0, best > 1.25 * mean else { continue }
+                var lag = Double(k - reach)
+                if k > 0, k < scores.count - 1 {
+                    let left = scores[k - 1], right = scores[k + 1]
+                    let fall = best - min(left, right)
+                    if fall > 0 { lag += 0.5 * (right - left) / fall }
+                }
+                out.append(lag * frame)
             }
             return out
         }
@@ -497,10 +545,18 @@ enum BeatAlign {
         let votes = [consensus(first), consensus(second)].compactMap { $0 }
         let nudge = votes.isEmpty ? 0 : votes.reduce(0, +) / Double(votes.count)
         let all = first + second
-        // How much of the blend sits within 6 ms once nudged: below half,
-        // the two drum parts just don't groove together.
-        let lock = all.count < 4 ? 1 : Double(all.filter { abs($0 - nudge) <= 0.006 }.count) / Double(all.count)
-        return Result(nudge: abs(nudge) >= 0.003 ? nudge : 0, lock: lock)
+        // Before the swap it's A's kit under B's tops, after it the other
+        // way round: each half can groove or not on its own.
+        func sits(_ lags: [Double]) -> Double {
+            lags.count < 2 ? 1 : Double(lags.filter { abs($0 - nudge) <= 0.008 }.count) / Double(lags.count)
+        }
+        // How much of the blend sits within 8 ms once nudged (a flam is
+        // heard from about 10). Too few clear windows to judge: the two
+        // beat grids (tracked, then nudged) are all there is, and they
+        // agree by construction.
+        let lock = all.count < 3 ? 1 : Double(all.filter { abs($0 - nudge) <= 0.008 }.count) / Double(all.count)
+        return Result(nudge: abs(nudge) >= 0.003 ? nudge : 0, lock: lock, lags: all,
+                      lockBefore: sits(first), lockAfter: sits(second))
     }
 
     struct Result {
@@ -508,15 +564,30 @@ enum BeatAlign {
         var nudge: Double
         /// 0…1: how much of the overlap the two drum parts sit together.
         var lock: Double
-        /// Half the blend flamming is still a flam: layering needs a clear
-        /// majority.
-        var grooves: Bool { lock >= 0.6 }
+        /// The best lag of every window that clearly had one (seconds).
+        var lags: [Double] = []
+        /// The same for each half of the overlap.
+        var lockBefore: Double = 1, lockAfter: Double = 1
+        /// Two patterns that differ (a dancehall riddim over a straight
+        /// beat) leave some windows without a clear lag, and those don't
+        /// vote. Of the windows that do, a clear majority has to sit
+        /// together: half the blend flamming is still a flam. B's tops
+        /// layer under A's kit if the first half grooves.
+        var grooves: Bool { lockBefore >= 0.6 }
+        /// A's drums play on under B's after the swap.
+        var groovesAfter: Bool { grooves && lockAfter >= 0.6 }
     }
 
-    /// Onset strength above 150 Hz (the hats, snares and the kick's click,
-    /// which is where a flam is heard; the kick's body is never doubled),
-    /// local mean removed, every 10 ms of a stretch of the stem, or nil if
-    /// it's all but silent.
+    /// Samples per onset frame: a millisecond. The tempo detector's 10 ms
+    /// frames smear where a hit lands inside them, so a steady 8 ms flam
+    /// read as 0 or 10 by turns: never fixed, and taken for no groove.
+    static let onsetHop = 44
+
+    /// Attacks above 150 Hz (the hats, snares and the kick's click, which
+    /// is where a flam is heard; the kick's body is never doubled): the
+    /// rise of the level, log-compressed so soft hits count, over two
+    /// milliseconds, local mean removed, every millisecond of a stretch of
+    /// the stem, or nil if it's all but silent.
     private static func onsets(_ stem: StemAudio, from: Double, to: Double) -> [Float]? {
         let sr = AudioIO.sampleRate
         // Frame 0 is `from` even where that's before the file starts.
@@ -526,14 +597,37 @@ enum BeatAlign {
         for i in max(0, -start)..<mono.count {
             mono[i] = 0.5 * (stem.left.pointer[start + i] + stem.right.pointer[start + i])
         }
-        let envelopes = TempoEstimator.onsetEnvelopes(mono, sampleRate: sr)
-        let flux = zip(envelopes.all, envelopes.low).map { $0 - $1 }
-        guard flux.contains(where: { $0 > 0 }) else { return nil }
-        let w = 25
-        return flux.indices.map { i in
-            let lo = max(0, i - w), hi = min(flux.count, i + w + 1)
-            let mean = flux[lo..<hi].reduce(0, +) / Float(hi - lo)
-            return max(0, flux[i] - mean)
+        return attacks(mono)
+    }
+
+    /// `onsets` of mono audio, frame 0 at its first sample.
+    static func attacks(_ input: [Float]) -> [Float]? {
+        let sr = AudioIO.sampleRate
+        var mono = input, twin = input
+        var hp = Biquad()
+        hp.set(.highPass(frequency: 150, q: 0.707), sampleRate: sr)
+        mono.withUnsafeMutableBufferPointer { m in
+            twin.withUnsafeMutableBufferPointer { t in hp.process(m.baseAddress!, t.baseAddress!, count: m.count) }
+        }
+        let bins = mono.count / onsetHop
+        guard bins > 4 else { return nil }
+        var level = [Float](repeating: 0, count: bins)
+        mono.withUnsafeBufferPointer { m in
+            for i in 0..<bins {
+                var e: Float = 0
+                vDSP_svesq(m.baseAddress! + i * onsetHop, 1, &e, vDSP_Length(onsetHop))
+                level[i] = log1p(100 * (e / Float(onsetHop)).squareRoot())
+            }
+        }
+        let rise = (0..<bins).map { i in i < 2 ? 0 : max(0, level[i] - level[i - 2]) }
+        guard rise.contains(where: { $0 > 0 }) else { return nil }
+        // Minus the mean over ±100 ms: only what stands out is a hit.
+        var prefix = [Float](repeating: 0, count: bins + 1)
+        for i in 0..<bins { prefix[i + 1] = prefix[i] + rise[i] }
+        let w = 100
+        return (0..<bins).map { i in
+            let lo = max(0, i - w), hi = min(bins, i + w + 1)
+            return max(0, rise[i] - (prefix[hi] - prefix[lo]) / Float(hi - lo))
         }
     }
 }
@@ -570,18 +664,24 @@ enum Harmony {
     ///   its own: small to pick a shift, larger to call a clash (only a
     ///   clear one should break up a blend).
     static func fits(_ a: [Float], _ b: [Float], tolerance: Float = 0.08) -> Bool {
+        clash(a, b) <= tolerance
+    }
+
+    /// How much less the two together sit in one diatonic scale than each
+    /// does on its own (0: they share one; a fifth apart ≈ 0.04, a whole
+    /// tone ≈ 0.1, a tritone or semitone ≈ 0.3). Heard as one sound, which
+    /// is what a blend is, rather than B measured against A's best guess
+    /// of a scale (which let almost anything through). Neighbours on the
+    /// key wheel are what blends are made of: `fits` lets 0.08 through.
+    static func clash(_ a: [Float], _ b: [Float]) -> Float {
         let major = [0, 2, 4, 5, 7, 9, 11]
-        func share(_ x: [Float], _ tonic: Int) -> Float {
-            major.reduce(0) { $0 + x[($1 + tonic) % 12] } / max(1e-6, x.reduce(0, +))
+        func best(_ x: [Float]) -> Float {
+            let total = max(1e-6, x.reduce(0, +))
+            return (0..<12).map { tonic in major.reduce(0) { $0 + x[($1 + tonic) % 12] } }.max()! / total
         }
-        let aShares = (0..<12).map { share(a, $0) }
-        let bestA = aShares.max()!
-        // A's scale is the best one, or any as good (a lone chord belongs to
-        // several).
-        let scalesA = (0..<12).filter { aShares[$0] >= bestA - 0.02 }
-        let inA = scalesA.map { share(b, $0) }.max()!
-        let bestB = (0..<12).map { share(b, $0) }.max()!
-        return inA >= bestB - tolerance
+        let sa = max(1e-6, a.reduce(0, +)), sb = max(1e-6, b.reduce(0, +))
+        let both = zip(a, b).map { $0 / sa + $1 / sb }
+        return min(best(a), best(b)) - best(both)
     }
 
     /// Pitch classes moved up by `semitones`.
@@ -606,7 +706,12 @@ enum Harmony {
         // A DJ shifts sparingly (a known voice a tone off gets noticed):
         // the key estimate's own shift, none, or a semitone.
         let candidates = [preferred] + [0, 1, -1].filter { $0 != preferred }
-        return candidates.first { fits(heard, transposed(cb, by: $0)) }
+        // The one that sits best; the key estimate's, none, then a
+        // semitone where they're about as good.
+        let clashes = candidates.map { clash(heard, transposed(cb, by: $0)) }
+        let least = clashes.min()!
+        guard least <= 0.08 else { return nil }
+        return candidates[clashes.firstIndex { $0 <= least + 0.02 }!]
     }
 
     /// `fits`, when both sides have notes to compare; nothing to clash
@@ -618,8 +723,11 @@ enum Harmony {
         return fits(ca, cb, tolerance: tolerance)
     }
 
-    /// Only a clear clash breaks up a blend.
-    static let clashTolerance: Float = 0.15
+    /// Where the key estimates agree, only a clear clash heard in the notes
+    /// breaks up a blend; where they say the keys clash, the notes have to
+    /// show clearly that they don't.
+    static let clashTolerance: Float = 0.10
+    static let keysClashTolerance: Float = 0.04
 }
 
 extension BeatAlign {
@@ -902,8 +1010,9 @@ enum SetBuilder {
             }
             let nudge = align.nudge
             // Vocals hand over between lines, not mid-word.
-            var keysClash = MixMath.keysClash(a.loaded.analysis.key.transposed(by: shifts[k - 1]),
-                                              b.analysis.key.transposed(by: edit.semitones))
+            let keysDisagree = MixMath.keysClash(a.loaded.analysis.key.transposed(by: shifts[k - 1]),
+                                                 b.analysis.key.transposed(by: edit.semitones))
+            var keysClash = keysDisagree
             // Whether the melodies can layer is heard, not guessed from the
             // keys: the notes that will actually overlap (a quarter to three
             // quarters in, B as shifted) decide, where there are any.
@@ -912,7 +1021,7 @@ enum SetBuilder {
                 keysClash = !Harmony.fits([otherA] + [a.stems[.bass]].compactMap { $0 }, aOffset: aOffset,
                                           [otherB], bOffset: offset + nudge,
                                           from: start + n / 4 * bar, to: start + 3 * n / 4 * bar,
-                                          tolerance: Harmony.clashTolerance)
+                                          tolerance: keysDisagree ? Harmony.keysClashTolerance : Harmony.clashTolerance)
             }
             var vocalIn: Double?, vocalOut: Double?
             var mashup = false
@@ -990,6 +1099,7 @@ enum SetBuilder {
                 }
             }
             var payoff: [String] = []
+            var room = 0.0
             var dropAt: Double?
             var vocalOutBlend = false
             if !isEdited {
@@ -1009,17 +1119,31 @@ enum SetBuilder {
                     BeatAlign.snareBeat($0, offset: aOffset, barStart: start + (switchBar - 1) * ga.barSeconds,
                                         beat: ga.barSeconds / 4)
                 } : nil
-                func make(outFade: Double, inFade: Double) -> TransitionBuilder.Made {
-                    TransitionBuilder.make(edit.preset, lanes: Lane.allLanes(), start: ga.downbeat(edit.entryBar),
-                                           barSeconds: ga.barSeconds, bars: edit.bars,
+                func make(outFade: Double, inFade: Double, room: Double, start: Double? = nil,
+                          barSeconds: Double? = nil) -> TransitionBuilder.Made {
+                    TransitionBuilder.make(edit.preset, lanes: Lane.allLanes(), start: start ?? ga.downbeat(edit.entryBar),
+                                           barSeconds: barSeconds ?? ga.barSeconds, bars: edit.bars,
                                            vocalBar: mashup ? plan.placement.vocalHandoff
                                                : max(edit.bars / 2, plan.placement.vocalHandoff),
                                            keysClash: keysClash, lowSwap: plan.placement.lowSwap,
-                                           drumsLayer: align.grooves, vocalIn: vocalIn, vocalOut: vocalOut,
+                                           drumsLayer: align.grooves, drumsLinger: align.groovesAfter,
+                                           vocalIn: vocalIn, vocalOut: vocalOut,
                                            mashup: mashup, dropMoment: dropMoment, rollBeat: rollBeat,
-                                           vocalOutFade: outFade, vocalInFade: inFade)
+                                           vocalOutFade: outFade, vocalInFade: inFade, room: room)
                 }
-                var made = make(outFade: 0, inFade: 0)
+                // Room for B: A's EQ gives way as much as B's parts need to
+                // be heard, judged on the blend as it will play (B through
+                // its entry filters, its drums in or not, A's voice on).
+                if edit.preset == .stemSwap, let sa = a.loaded.analysis.structure, let sb = b.analysis.structure,
+                   let pa = AutoPlacement.powers(sa, trim: Float(MixMath.trimDB(a.loaded.analysis))),
+                   let pb = AutoPlacement.powers(sb, trim: Float(MixMath.trimDB(b.analysis))) {
+                    let q = max(1, edit.bars / 4)
+                    let plain = TransitionShape(lanes: make(outFade: 0, inFade: 0, room: 0, start: 0, barSeconds: 1).lanes,
+                                                preset: edit.preset, bars: edit.bars)
+                    room = AutoPlacement.room(plain, a: pa, e: edit.entryBar, b: pb, c: edit.cueBar, from: q,
+                                              to: max(q + 1, Int(switchBar)))
+                }
+                var made = make(outFade: 0, inFade: 0, room: room)
                 // Cut or blend, from what each vocal is doing right there. A
                 // cut is clean where A's line has ended and B's is starting;
                 // where A is still singing it would chop a word, so A blends
@@ -1039,7 +1163,7 @@ enum SetBuilder {
                                           beat: beat) {
                     inFade = 0.5
                 }
-                if outFade > 0 || inFade > 0 { made = make(outFade: outFade, inFade: inFade) }
+                if outFade > 0 || inFade > 0 { made = make(outFade: outFade, inFade: inFade, room: room) }
                 if made.vocalEntry != nil, VocalPhrasing.reference(b.analysis.structure) != nil {
                     vocalInKind = inFade > 0 ? "blend" : vocalInKind ?? "grid"
                 } else {
@@ -1051,7 +1175,6 @@ enum SetBuilder {
                 payoff = plan.placement.payoff.filter { !$0.hasPrefix("mashup") && $0 != "roll into the drop" }
                 if mashup { payoff.append("mashup: B sings over A's beat") }
                 if dropMoment { payoff.append("roll into the drop") }
-                if outFade > 0 { payoff.append("A's vocal blends out mid-line") }
                 if dropMoment { dropAt = start + switchBar * ga.barSeconds }
             }
             var incoming = SetMix.Track(url: tracks[k].url, loaded: b, map: map, matched: matched, offset: offset + nudge,
@@ -1079,11 +1202,12 @@ enum SetBuilder {
             planned.append(incoming)
             transitions.append(.init(from: k - 1, to: k, plan: plan, edit: edit, isEdited: isEdited, start: start,
                                      end: end, settled: settled, barSeconds: ga.barSeconds, delta: delta,
-                                     entryRange: entryRange, nudge: nudge, grooveLock: align.lock,
+                                     entryRange: entryRange, nudge: nudge, grooveLock: align.lock, grooveLags: align.lags,
+                                     drumsLayered: align.grooves, drumsLinger: align.groovesAfter,
                                      vocalOut: vocalOut.map { start + $0 * ga.barSeconds },
                                      vocalIn: vocalIn.map { start + $0 * ga.barSeconds }, payoff: payoff, dropAt: dropAt,
                                      vocalInKind: vocalInKind, vocalOutBlend: vocalOutBlend, skippedBars: skippedBars,
-                                     melodiesClash: keysClash))
+                                     melodiesClash: keysClash, room: room))
             shifts.append(edit.semitones)
         }
 

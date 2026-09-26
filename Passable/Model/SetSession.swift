@@ -145,7 +145,7 @@ final class SetSession: ObservableObject {
         let ready = items.filter { $0.analysis != nil }
         guard ready.count == items.count, items.count > 2 else { return rebuild() }
         let analyses = ready.map { $0.analysis! }
-        let order = SetOrdering.order(SetOrdering.costMatrix(analyses))
+        let order = SetOrdering.order(SetOrdering.costMatrix(analyses), washOuts: SetOrdering.washOuts(analyses))
         let reordered = order.map { ready[$0] }
         if reordered.map(\.id) != items.map(\.id) {
             items = reordered
@@ -179,6 +179,8 @@ final class SetSession: ObservableObject {
         parts.append(t.melodiesClash ? "melodies clash, swapped" : "melodies fit")
         if t.skippedBars > 0 { parts.append("A skips \(t.skippedBars) bars of verse and breakdown") }
         parts += t.payoff
+        // Not a payoff, a compromise: said apart so it isn't counted as one.
+        if t.vocalOutBlend { parts.append("A's vocal blends out mid-line") }
         return parts.joined(separator: " · ")
     }
 

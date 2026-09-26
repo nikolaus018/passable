@@ -382,10 +382,18 @@ struct TransitionShape {
     let first: Int, last: Int
     private(set) var gains: [DeckSide: [StemKind: [Gains]]] = [:]
 
-    init(_ preset: TransitionPreset, bars n: Int, vocalBar: Int?, keysClash: Bool, lowSwap: Int?, mashup: Bool = false) {
+    init(_ preset: TransitionPreset, bars n: Int, vocalBar: Int?, keysClash: Bool, lowSwap: Int?, mashup: Bool = false,
+         drumsLayer: Bool = true, room: Double = 0) {
+        self.init(lanes: TransitionBuilder.build(preset, lanes: Lane.allLanes(), start: 0, barSeconds: 1, bars: n,
+                                                 vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap,
+                                                 drumsLayer: drumsLayer, mashup: mashup, room: room),
+                  preset: preset, bars: n)
+    }
+
+    /// The shape of automation already written, starting at 0 with
+    /// one-second bars.
+    init(lanes: [Lane], preset: TransitionPreset, bars n: Int) {
         (first, last) = preset == .echoOut ? (-max(1, min(n, 8)), 0) : (0, n)
-        let lanes = TransitionBuilder.build(preset, lanes: Lane.allLanes(), start: 0, barSeconds: 1, bars: n,
-                                            vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap, mashup: mashup)
         for lane in lanes {
             var perBar: [Gains] = []
             for k in first..<last {
@@ -414,6 +422,11 @@ struct TransitionShape {
             high *= min(1, 300 / f)
         }
         low *= pow(10, LaneParameter.eqDecibels(lane[.low].value(at: t, default: 0.5)) / 10)
+        // The mid bell and the high shelf between them cover most of what
+        // sits above 150 Hz (not the low mids).
+        let mid = LaneParameter.eqDecibels(lane[.mid].value(at: t, default: 0.5))
+        let top = LaneParameter.eqDecibels(lane[.high].value(at: t, default: 0.5))
+        high *= pow(10, (0.45 * mid + 0.35 * top) / 10)
         return (Float(low), Float(high))
     }
 
@@ -498,6 +511,32 @@ enum AutoPlacement {
         return out
     }
 
+    /// dB A's drums and melody should give up (see `TransitionBuilder.room`)
+    /// over bars `from..<to` so B is heard as well as A: everything of B
+    /// above 150 Hz, as `shape` (written without room) lets it through,
+    /// within 5 dB of everything of A there. A's voice isn't cut, so where
+    /// it carries A that takes more off the rest. A DJ doesn't bury the
+    /// new song 10 dB under the old one, nor push it over. Whole dB, at
+    /// most 8 (past that A's beat thins into a shadow of itself).
+    static func room(_ shape: TransitionShape, a: [StemKind: [TransitionShape.Gains]], e: Int,
+                     b: [StemKind: [TransitionShape.Gains]], c: Int, from: Int, to: Int) -> Double {
+        guard to > from else { return 0 }
+        var cuttable: Float = 0, kept: Float = 0, pb: Float = 0
+        for k in max(from, shape.first)..<min(to, shape.last) {
+            for (side, p, at) in [(DeckSide.a, a, e + k), (.b, b, c + k)] {
+                for (stem, levels) in p where at >= 0 && at < levels.count {
+                    let heard = (shape.gains[side]?[stem]?[k - shape.first].high ?? 1) * levels[at].high
+                    if side == .b { pb += heard } else if stem == .drums || stem == .other { cuttable += heard } else { kept += heard }
+                }
+            }
+        }
+        // Nothing of B's there to make room for.
+        guard cuttable > 0, pb > 1e-3 * (cuttable + kept) else { return 0 }
+        let within: Float = pow(10, -5 / 10)
+        // The EQ takes about 0.8 dB off a part per dB cut (see `TransitionShape`).
+        return Double((0...8).first { r in pb >= within * (kept + cuttable * pow(10, -0.08 * Float(r))) } ?? 8)
+    }
+
     struct Result: Equatable {
         var entryBar: Int
         var cueBar: Int
@@ -558,14 +597,16 @@ enum AutoPlacement {
         // Nor fading out: the whole blend sits in A's full-level part.
         let musicEndA = (sa.loudness.lastIndex { $0 + trimA > refA - 5 } ?? barsA - 1) + 1
         let latest = max(0, min(barsA, musicEndA) - max(1, span))
-        let range = entryRange.map { min($0.lowerBound, latest)...$0.upperBound }
+        // A Wash Out's bridge starts its bars before the entry: A's own
+        // time on its own comes before that, not under it.
+        let bridge = echo ? min(n, 8) : 0
+        let range = entryRange.map { min($0.lowerBound + bridge, latest)...max($0.upperBound, $0.lowerBound + bridge) }
             ?? min(latest, Int(Double(barsA) * 0.45))...latest
         // Past a jump, only once the eight bars before the transition (and
         // a Wash Out's own) are all played ones.
-        let lead0 = echo ? min(n, 8) : 0
         let entries = stride(from: range.lowerBound, through: max(range.lowerBound, min(range.upperBound, latest)), by: 1)
             .filter { ((($0 - phaseA) % 4) + 4) % 4 == 0 }
-            .filter { e in skip.map { e + span <= $0.lowerBound || e - lead0 - 8 >= $0.upperBound } ?? true }
+            .filter { e in skip.map { e + span <= $0.lowerBound || e - bridge - 8 >= $0.upperBound } ?? true }
         // Skipping more than ~45 % of B throws away too much of it. Far
         // enough to reach the first chorus: a DJ mixes pop in on the hook.
         let lastCue = max(0, min(Int(Double(barsB) * 0.45), barsB - n - 8))
@@ -587,7 +628,7 @@ enum AutoPlacement {
         /// Bar (from B's entry) where B takes over: its beat drops or the
         /// low end changes hands.
         func switchBar(_ sw: Int?) -> Int { echo ? 0 : preset == .dropSwap ? n / 2 : sw ?? n }
-        struct ShapeKey: Hashable { let handoff: Int, lowSwap: Int }
+        struct ShapeKey: Hashable { let handoff: Int, lowSwap: Int, room: Double }
         var shapes: [ShapeKey: TransitionShape] = [:]
         let powerA = AutoPlacement.powers(sa, trim: trimA), powerB = AutoPlacement.powers(sb, trim: trimB)
         let pausesA = sa.vocalQuietBeats, pausesB = sb.vocalQuietBeats
@@ -688,9 +729,16 @@ enum AutoPlacement {
                     // after the swap or B dropping into its breakdown as
                     // soon as it has the floor.
                     if let powerA, let powerB {
-                        let key = ShapeKey(handoff: handoff, lowSwap: sw ?? n)
+                        let plain = ShapeKey(handoff: handoff, lowSwap: sw ?? n, room: 0)
+                        let flat = shapes[plain] ?? TransitionShape(preset, bars: n, vocalBar: handoff, keysClash: keysClash,
+                                                                    lowSwap: sw, mashup: handoff == mash)
+                        shapes[plain] = flat
+                        let room = preset == .stemSwap
+                            ? AutoPlacement.room(flat, a: powerA, e: e, b: powerB, c: c, from: step, to: max(step + 1, sw ?? n))
+                            : 0
+                        let key = ShapeKey(handoff: handoff, lowSwap: sw ?? n, room: room)
                         let shape = shapes[key] ?? TransitionShape(preset, bars: n, vocalBar: handoff, keysClash: keysClash,
-                                                                   lowSwap: sw, mashup: handoff == mash)
+                                                                   lowSwap: sw, mashup: handoff == mash, room: room)
                         shapes[key] = shape
                         // The floor is A's energy: B landing in its own
                         // breakdown is as much a hole as a gap in the blend.
@@ -708,12 +756,14 @@ enum AutoPlacement {
                         }
                         s -= penalty * 24 / Float(bars.count)
                         // A transition, not two songs in a row: both clearly
-                        // heard for a while. Four to eight bars of that is
-                        // a blend; more is just a longer one.
+                        // heard for a while. Six to eight bars of that is
+                        // a blend; more is just a longer one. Fewer than
+                        // four is two songs in a row, whatever else it has.
                         let both = (shape.first..<shape.last).filter {
                             shape.together($0, a: powerA, e: e, b: powerB, c: c)
                         }.count
-                        s += 0.12 * Float(min(both, 6))
+                        s += 0.25 * Float(min(both, 8))
+                        if !echo && both < 4 { s -= 0.5 * Float(4 - both) }
                     }
                     guard !echo else {
                         // B's beat drops with its vocal open: not in the

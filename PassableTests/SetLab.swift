@@ -78,8 +78,10 @@ final class SetLab: XCTestCase {
         }
 
         /// Where both decks' drums play, how far apart their hits land (ms,
-        /// per two-bar window; full-band onsets, since the kicks never
-        /// overlap): anything past ~10 ms is heard as a flam.
+        /// per two-bar window): attacks above 150 Hz to the millisecond,
+        /// the hats, snares and clicks a flam is heard in (a full-band
+        /// measure weighs A's kick body against B's hats and reads its slow
+        /// rise as a flam). Anything past ~10 ms is heard.
         func kickOffsets(_ t: SetMix.Transition, from: Double, bars: Int) -> [Double] {
             func mono(_ track: Int) -> [Float] {
                 let renderer = MixRenderer(snapshot: set.makeSnapshot { i, s in i == track && s == .drums })
@@ -89,37 +91,35 @@ final class SetLab: XCTestCase {
                 renderer.render(left: &l, right: &r, count: n)
                 return zip(l, r).map { ($0 + $1) / 2 }
             }
-            let a = TempoEstimator.onsetEnvelopes(mono(t.from), sampleRate: sr).all
-            let b = TempoEstimator.onsetEnvelopes(mono(t.to), sampleRate: sr).all
-            let fps = sr / Double(TempoEstimator.hop)
+            guard let a = BeatAlign.attacks(mono(t.from)), let b = BeatAlign.attacks(mono(t.to)) else { return [] }
+            let fps = sr / Double(BeatAlign.onsetHop), reach = 40
             let window = Int(2 * t.barSeconds * fps)
             var out: [Double] = []
             var w = 0
             while w + window <= min(a.count, b.count) {
                 let ra = Array(a[w..<(w + window)]), rb = Array(b[w..<(w + window)])
                 let ea = ra.reduce(0, +), eb = rb.reduce(0, +)
-                // Both kicks really there, not one side's bleed, and at the
-                // same time: a window with A's drums in one half and B's in
-                // the other (a hard swap) has nothing that could flam.
-                let together = zip(ra, rb).reduce(Float(0)) { $0 + min($1.0, $1.1) }
-                if ea > 0, eb > 0, min(ea, eb) / max(ea, eb) > 0.2, together / min(ea, eb) > 0.3 {
-                    var best = (lag: 0, score: -Float.infinity)
-                    for lag in -8...8 {
-                        var dot: Float = 0
-                        for i in 8..<(window - 8) { dot += ra[i] * rb[i + lag] }
-                        if dot > best.score { best = (lag, dot) }
-                    }
-                    // Sub-frame peak by parabola.
+                // Both kits really there, not one side's bleed or echo.
+                if ea > 0, eb > 0, min(ea, eb) / max(ea, eb) > 0.2 {
                     func at(_ lag: Int) -> Float {
                         var dot: Float = 0
-                        for i in 8..<(window - 8) { dot += ra[i] * rb[i + lag] }
+                        for i in reach..<(window - reach) { dot += ra[i] * rb[i + lag] }
                         return dot
                     }
-                    var lag = Double(best.lag)
-                    if abs(best.lag) < 8 {
-                        let y0 = at(best.lag - 1), y1 = best.score, y2 = at(best.lag + 1)
-                        let d = y0 - 2 * y1 + y2
-                        if d < 0 { lag += Double(0.5 * (y0 - y2) / d) }
+                    let scores = (-reach...reach).map(at)
+                    let k = scores.indices.max { scores[$0] < scores[$1] }!
+                    let mean = scores.reduce(0, +) / Float(scores.count)
+                    // Playing at the same time and hitting together near
+                    // some lag (normalised correlation): a window with A's
+                    // drums in one half and B's in the other (a hard swap)
+                    // has nothing that could flam, and without a clear
+                    // common lag it's two patterns, not a flam.
+                    let norm = (ra.reduce(0) { $0 + $1 * $1 } * rb.reduce(0) { $0 + $1 * $1 }).squareRoot()
+                    guard norm > 0, scores[k] / norm > 0.2, scores[k] > 1.25 * mean else { w += window; continue }
+                    var lag = Double(k - reach)
+                    if k > 0, k < scores.count - 1 {
+                        let fall = scores[k] - min(scores[k - 1], scores[k + 1])
+                        if fall > 0 { lag += Double(0.5 * (scores[k + 1] - scores[k - 1]) / fall) }
                     }
                     out.append(lag / fps * 1000)
                 }
@@ -203,6 +203,11 @@ final class SetLab: XCTestCase {
                               after - before, dip, bump, lowx2, vocx2, flam,
                               flams.map { String(format: "%.0f", $0) }.joined(separator: " "), t.nudge * 1000, t.grooveLock * 100, phrasing)
             print(line)
+            if t.edit.preset != .echoOut {
+                print(String(format: "      room %.0f dB  layered %@  lags ", t.room,
+                             t.drumsLayered ? (t.drumsLinger ? "yes" : "before the swap") : "no")
+                      + t.grooveLags.map { String(format: "%.0f", $0 * 1000) }.joined(separator: " "))
+            }
             let shift = (t.edit.semitones != 0 ? String(format: "  B %+d st", t.edit.semitones) : "")
                 + (t.skippedBars > 0 ? "  A skipped \(t.skippedBars) bars before" : "")
             if t.skippedBars > 0 { payoffCounts["club edit", default: 0] += 1 }

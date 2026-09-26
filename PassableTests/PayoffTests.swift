@@ -158,6 +158,95 @@ final class PayoffTests: XCTestCase {
         XCTAssertGreaterThan(vocals.value(.delay, at: 2 * 7.8), 0.5)
     }
 
+    /// Once B's melody is in, A's drums and melody turn their mids and
+    /// highs down (EQ, not the fader) so both songs are heard; where the
+    /// keys clash only A's drums do, and without room nothing changes.
+    func testAMakesRoomForB() {
+        let lanes = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16,
+                                           lowSwap: 8, room: 4).lanes
+        func eq(_ lanes: [Lane], _ stem: StemKind, _ band: LaneParameter, bar: Double) -> Double {
+            LaneParameter.eqDecibels(lanes.first { $0.side == .a && $0.stem == stem }!.value(band, at: bar * 2))
+        }
+        XCTAssertEqual(eq(lanes, .other, .high, bar: 3.5), 0, accuracy: 0.01)
+        XCTAssertEqual(eq(lanes, .other, .high, bar: 4.1), -4, accuracy: 0.01)
+        XCTAssertEqual(eq(lanes, .drums, .mid, bar: 6), -4, accuracy: 0.01)
+        XCTAssertEqual(eq(lanes, .vocals, .mid, bar: 6), 0, accuracy: 0.01, "A's voice keeps its presence")
+        let clash = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16,
+                                           keysClash: true, lowSwap: 8, room: 4).lanes
+        XCTAssertEqual(eq(clash, .other, .high, bar: 6), 0, accuracy: 0.01)
+        XCTAssertEqual(eq(clash, .drums, .high, bar: 6), -4, accuracy: 0.01)
+        let none = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16,
+                                          lowSwap: 8).lanes
+        XCTAssertEqual(eq(none, .other, .high, bar: 6), 0, accuracy: 0.01)
+    }
+
+    /// Room is what B needs to be heard within about 5 dB of A, as the
+    /// blend lets it through, and no more.
+    func testRoomComesFromTheLevels() {
+        func song(_ db: Float) -> [StemKind: [TransitionShape.Gains]] {
+            let p = pow(10, db / 10)
+            return Dictionary(uniqueKeysWithValues: StemKind.allCases.map { ($0, Array(repeating: (p, p), count: 32)) })
+        }
+        let shape = TransitionShape(.stemSwap, bars: 16, vocalBar: 16, keysClash: false, lowSwap: 8)
+        func room(_ b: Float) -> Double { AutoPlacement.room(shape, a: song(-10), e: 0, b: song(b), c: 0, from: 5, to: 8) }
+        XCTAssertEqual(room(-10), 0, "as loud: nothing to do")
+        XCTAssertEqual(room(-13), 3)
+        XCTAssertEqual(room(-20), 8, "at most 8 dB")
+        XCTAssertEqual(room(-100), 0, "nothing to make room for")
+    }
+
+    /// A steady offset between two drum parts that's less than one onset
+    /// frame (10 ms) is still found to the millisecond, nudged away, and
+    /// the grooves are called locked.
+    func testBeatAlignFindsASubFrameOffset() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let sr = 44_100, seconds = 20
+        func hits(delay: Double) -> StereoBuffer {
+            var buffer = StereoBuffer(count: sr * seconds)
+            var rng = SystemRandomNumberGenerator()
+            // Eighths at 120 BPM with an accent pattern, bright clicks.
+            for k in 0..<(4 * seconds) {
+                let at = Int((Double(k) * 0.25 + delay) * Double(sr))
+                let level: Float = [1, 0.4, 0.7, 0.4][k % 4]
+                for i in 0..<200 where at + i < buffer.count {
+                    let v = level * Float.random(in: -1...1, using: &rng) * Float(exp(-Double(i) / 40))
+                    buffer.left[at + i] = v
+                    buffer.right[at + i] = v
+                }
+            }
+            return buffer
+        }
+        try StemAudio.save(hits(delay: 0.1), directory: dir, name: "a")
+        try StemAudio.save(hits(delay: 0.107), directory: dir, name: "b")
+        let a = try StemAudio.load(directory: dir, name: "a"), b = try StemAudio.load(directory: dir, name: "b")
+        let result = BeatAlign.nudge(a: a, aOffset: 0, b: b, bOffset: 0, from: 2, to: 18)
+        XCTAssertEqual(result.nudge, -0.007, accuracy: 0.002)
+        XCTAssertTrue(result.grooves)
+    }
+
+    /// The placement simulation hears the EQ cut.
+    func testShapeHearsTheRoom() {
+        let flat = TransitionShape(.stemSwap, bars: 16, vocalBar: 16, keysClash: false, lowSwap: 8)
+        let cut = TransitionShape(.stemSwap, bars: 16, vocalBar: 16, keysClash: false, lowSwap: 8, room: 5)
+        let a = flat.gains[.a]![.other]![5].high, b = cut.gains[.a]![.other]![5].high
+        XCTAssertEqual(10 * log10(b / a), -4, accuracy: 0.3)
+    }
+
+    /// Notes heard together: a fifth sits, a tritone doesn't, and a clash
+    /// can't hide in a scale that suits one side.
+    func testHarmonyClashGrowsWithDistance() {
+        let major = [0, 2, 4, 5, 7, 9, 11]
+        func scale(_ root: Int) -> [Float] { (0..<12).map { major.contains(($0 - root + 12) % 12) ? 1 : 0.05 } }
+        XCTAssertEqual(Harmony.clash(scale(0), scale(0)), 0, accuracy: 1e-6)
+        XCTAssertTrue(Harmony.fits(scale(0), scale(7)), "neighbours on the key wheel")
+        XCTAssertFalse(Harmony.fits(scale(0), scale(6)))
+        XCTAssertGreaterThan(Harmony.clash(scale(0), scale(2)), Harmony.clash(scale(0), scale(7)))
+        XCTAssertGreaterThan(Harmony.clash(scale(0), scale(6)), 0.2)
+        XCTAssertGreaterThan(Harmony.clash(scale(0), scale(1)), 0.2)
+    }
+
     func testHarmonyHearsWhetherNotesSitTogether() {
         func notes(_ pcs: [Int]) -> [Float] { (0..<12).map { pcs.contains($0) ? 1 : 0.05 } }
         let cMajorChord = notes([0, 4, 7])

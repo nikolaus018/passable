@@ -54,6 +54,9 @@ struct TransitionBuilder {
     /// The two drum parts groove together, so B's can build in under A's.
     /// If not, A's beat plays on alone and B's comes in whole on the swap.
     let drumsLayer: Bool
+    /// After the swap, A's drums play on under B's (thinning out) rather
+    /// than stopping on it: only where the two kits groove there too.
+    let drumsLinger: Bool
     /// Bars (from B's entry) where B's vocal is let in and A's taken out,
     /// placed between lines; nil = on the bar grid.
     let vocalIn: Double?, vocalOut: Double?
@@ -71,6 +74,11 @@ struct TransitionBuilder {
     /// the vocal is doing there: a cut is clean where a line has ended (or
     /// a word begins) and chops a word where it hasn't.
     let vocalOutFade: Double, vocalInFade: Double
+    /// dB A's drums and melody give up (mid and high EQ) once B's melody is
+    /// in, so B is heard as well as A rather than 10 dB under it: what a
+    /// DJ does with the EQ, not the fader. Set from the two songs' levels
+    /// there; 0 where B is already as loud.
+    let room: Double
     /// Where A's vocal ended up leaving and B's coming in (bars from B's
     /// entry), for the caller to check against the audio.
     private(set) var vocalExit: Double?, vocalEntry: Double?
@@ -81,9 +89,10 @@ struct TransitionBuilder {
     private var silences: [(DeckSide, StemKind, Double, Double)] = []
 
     init(lanes: [Lane], start: Double, barSeconds: Double, bars: Int, vocalBar: Int? = nil, keysClash: Bool = false,
-         lowSwap: Int? = nil, drumsLayer: Bool = true, vocalIn: Double? = nil, vocalOut: Double? = nil,
-         mashup: Bool = false, dropMoment: Bool = false, rollBeat: Int? = nil,
-         vocalOutFade: Double = 0, vocalInFade: Double = 0) {
+         lowSwap: Int? = nil, drumsLayer: Bool = true, drumsLinger: Bool = true, vocalIn: Double? = nil,
+         vocalOut: Double? = nil, mashup: Bool = false, dropMoment: Bool = false, rollBeat: Int? = nil,
+         vocalOutFade: Double = 0, vocalInFade: Double = 0, room: Double = 0) {
+        self.room = room
         self.vocalOutFade = vocalOutFade
         self.vocalInFade = vocalInFade
         self.mashup = mashup
@@ -91,6 +100,7 @@ struct TransitionBuilder {
         self.dropMoment = dropMoment
         self.lowSwap = lowSwap
         self.drumsLayer = drumsLayer
+        self.drumsLinger = drumsLinger
         self.vocalIn = vocalIn
         self.vocalOut = vocalOut
         self.lanes = lanes
@@ -103,24 +113,26 @@ struct TransitionBuilder {
 
     static func build(_ preset: TransitionPreset, lanes: [Lane], start: Double, barSeconds: Double, bars: Int,
                       vocalBar: Int? = nil, keysClash: Bool = false, lowSwap: Int? = nil,
-                      drumsLayer: Bool = true, vocalIn: Double? = nil, vocalOut: Double? = nil,
-                      mashup: Bool = false, dropMoment: Bool = false) -> [Lane] {
+                      drumsLayer: Bool = true, drumsLinger: Bool = true, vocalIn: Double? = nil, vocalOut: Double? = nil,
+                      mashup: Bool = false, dropMoment: Bool = false, room: Double = 0) -> [Lane] {
         make(preset, lanes: lanes, start: start, barSeconds: barSeconds, bars: bars, vocalBar: vocalBar,
-             keysClash: keysClash, lowSwap: lowSwap, drumsLayer: drumsLayer, vocalIn: vocalIn, vocalOut: vocalOut,
-             mashup: mashup, dropMoment: dropMoment).lanes
+             keysClash: keysClash, lowSwap: lowSwap, drumsLayer: drumsLayer, drumsLinger: drumsLinger,
+             vocalIn: vocalIn, vocalOut: vocalOut,
+             mashup: mashup, dropMoment: dropMoment, room: room).lanes
     }
 
     /// The automation and the beat rolls of a preset.
     static func make(_ preset: TransitionPreset, lanes: [Lane], start: Double, barSeconds: Double, bars: Int,
                      vocalBar: Int? = nil, keysClash: Bool = false, lowSwap: Int? = nil,
-                     drumsLayer: Bool = true, vocalIn: Double? = nil, vocalOut: Double? = nil,
-                     mashup: Bool = false, dropMoment: Bool = false, rollBeat: Int? = nil,
-                     vocalOutFade: Double = 0, vocalInFade: Double = 0) -> Made {
+                     drumsLayer: Bool = true, drumsLinger: Bool = true, vocalIn: Double? = nil,
+                     vocalOut: Double? = nil, mashup: Bool = false, dropMoment: Bool = false, rollBeat: Int? = nil,
+                     vocalOutFade: Double = 0, vocalInFade: Double = 0, room: Double = 0) -> Made {
         var builder = TransitionBuilder(lanes: lanes, start: start, barSeconds: barSeconds, bars: bars,
                                         vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap,
-                                        drumsLayer: drumsLayer, vocalIn: vocalIn, vocalOut: vocalOut,
+                                        drumsLayer: drumsLayer, drumsLinger: drumsLinger,
+                                        vocalIn: vocalIn, vocalOut: vocalOut,
                                         mashup: mashup, dropMoment: dropMoment, rollBeat: rollBeat,
-                                        vocalOutFade: vocalOutFade, vocalInFade: vocalInFade)
+                                        vocalOutFade: vocalOutFade, vocalInFade: vocalInFade, room: room)
         builder.clearAll()
         builder.write(preset)
         for (side, stem, from, to) in builder.silences { builder.silence(side, stem, from: from, to: to) }
@@ -184,6 +196,21 @@ struct TransitionBuilder {
         automate(.a, .other, .filter, [(at, 0.5, .sCurve), (at + 2, 0.2, .linear)])
         automate(.a, .other, .reverb, [(at - 0.5, 0, .linear), (at + 1.5, 0.7, .linear), (at + 4, 0, .linear)])
         automate(.a, .other, .volume, [(at, 1, .logarithmic), (at + 2, 0, .linear)])
+    }
+
+    /// A's drums (and melody, where the keys let B's layer) turn their mids
+    /// and highs down by `room` dB over the beat before bar `at`, and back
+    /// up on the switch at bar `until`, as A hands B the low end: a DJ's EQ
+    /// making space for the incoming song, then letting the old one sing
+    /// on over the new beat instead of vanishing with its bass.
+    private mutating func makeRoom(at at: Double, until: Double, melody: Bool) {
+        guard room > 0.25, at > 0, until > at else { return }
+        let cut = 0.5 - min(room, 8) / 80
+        for stem in melody ? [StemKind.drums, .other] : [.drums] {
+            for band in [LaneParameter.mid, .high] {
+                automate(.a, stem, band, [(at - 0.25, 0.5, .sCurve), (at, cut, .hold), (until, 0.5, .hold)])
+            }
+        }
     }
 
     /// A's vocal is gone at bar `out`: its last words are thrown into the
@@ -295,27 +322,27 @@ struct TransitionBuilder {
                 automate(.a, .other, .reverb, [(2 * q - 1, 0, .linear), (2 * q, 0.8, .hold), (2 * q + 0.001, 0, .linear)])
                 automate(.a, .other, .volume, [(2 * q, 1, .hold), (2 * q + 0.001, 0, .linear)])
                 automate(.b, .other, .volume, [(2 * q, 0, .hold), (2 * q + 0.001, 1, .linear)])
-            } else if sw < n && !dropMoment && drumsLayer {
+            } else if sw < n && !dropMoment {
                 // B melody follows the drums. A's plays on with it after B
                 // takes the low end (the keys fit: both are heard, which is
                 // what makes it a blend), then dissolves: low-pass sweep and
-                // a fade into a reverb wash.
-                bringIn(.other, at: q, filter: 0.7, open: 2 * q)
+                // a fade into a reverb wash. A melody never flams, so this
+                // holds whether or not the two beats groove.
+                bringIn(.other, at: q, filter: 0.7, open: q + 1)
                 let dissolve = max(sw, 3 * q)
                 automate(.a, .other, .filter, [(dissolve, 0.5, .sCurve), (4 * q, 0.14, .linear)])
                 automate(.a, .other, .reverb, [(3 * q, 0, .linear), (4 * q - 0.5, 0.7, .linear), (4 * q + 2, 0, .linear)])
                 automate(.a, .other, .volume, [(3 * q, 1, .logarithmic), (4 * q, 0, .linear)])
             } else {
-                // B is still building, drops at the switch, or the two beats
-                // won't groove together: A drives up to the switch and its
-                // melody dissolves under B over two bars. With beats that
-                // won't lock, B's melody only comes in shortly before: a DJ
-                // makes that a tight mix around the switch, not a long one.
-                let melodyIn = drumsLayer ? q : max(q, sw - 2)
-                bringIn(.other, at: melodyIn, filter: 0.7, open: drumsLayer ? 2 * q : max(melodyIn + 1, sw))
+                // B is still building or drops at the switch: A drives up
+                // to it and its melody dissolves under B over two bars.
+                // B's melody comes in a quarter in either way: only drums
+                // that won't groove would flam, a melody over A's beat
+                // doesn't, and it's what makes both songs heard.
+                bringIn(.other, at: q, filter: 0.7, open: q + 1)
                 dissolveMelody(from: sw)
             }
-            if drumsLayer && sw < n && !dropMoment {
+            if drumsLayer && drumsLinger && sw < n && !dropMoment {
                 // A's tops thin out and hand over.
                 automate(.a, .drums, .filter, [(3 * q, 0.5, .sCurve), (4 * q, 0.78, .linear)])
                 automate(.a, .drums, .volume, [(3 * q, 1, .logarithmic), (4 * q, 0, .linear)])
@@ -325,10 +352,11 @@ struct TransitionBuilder {
                 automate(.a, .drums, .volume, [(sw, 1, .hold), (sw + 0.001, 0, .linear)])
             }
             bringInVocal(at: vin)
+            makeRoom(at: q, until: sw, melody: !keysClash)
             if dropMoment {
                 buildDrop(at: sw)
             } else {
-                buildUp(to: sw, drumsContinue: drumsLayer && sw < n)
+                buildUp(to: sw, drumsContinue: drumsLayer && drumsLinger && sw < n)
             }
 
         case .dropSwap:
