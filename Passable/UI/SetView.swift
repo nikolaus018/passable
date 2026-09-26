@@ -29,7 +29,7 @@ struct SetView: View {
             }
         }
         .sheet(isPresented: $showSearch) {
-            SearchSheet(title: "Add Songs to the Set", pickLabel: "Add", keepOpen: true) { set.add([$0]) }
+            SearchSheet().environmentObject(set)
         }
         .alert("Passable", isPresented: Binding(get: { set.alert != nil }, set: { if !$0 { set.alert = nil } })) {
             Button("OK", role: .cancel) {}
@@ -50,7 +50,7 @@ struct SetView: View {
                 Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Button { OpenPanel.chooseMany { set.add($0) } } label: {
-                Label("Add Songs…", systemImage: "plus")
+                Label("Add Files…", systemImage: "folder")
             }
             Button { showSearch = true } label: {
                 Label("Find Online…", systemImage: "magnifyingglass")
@@ -69,6 +69,7 @@ struct SetView: View {
         guard n > 0 else { return "Add songs; Passable orders them and mixes them into one set." }
         var text = "\(n) song\(n == 1 ? "" : "s")"
         if set.length > 0 { text += " · \(Theme.time(set.length))" }
+        if n > 1 { text += " · drag songs to reorder" }
         return text
     }
 

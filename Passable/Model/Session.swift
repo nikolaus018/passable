@@ -22,12 +22,7 @@ struct Deck {
     var status: Status = .empty
     var loaded: TrackProcessor.Loaded?
 
-    var title: String {
-        guard var t = url?.deletingPathExtension().lastPathComponent else { return "No track loaded" }
-        // Downloads carry the video id: "Title [dQw4w9WgXcQ]".
-        if let r = t.range(of: " [", options: .backwards), t.hasSuffix("]") { t = String(t[..<r.lowerBound]) }
-        return t
-    }
+    var title: String { url.map(SongTitle.of) ?? "No track loaded" }
     var analysis: TrackAnalysis? { loaded?.analysis }
 }
 

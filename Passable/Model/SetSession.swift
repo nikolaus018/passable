@@ -11,11 +11,7 @@ final class SetSession: ObservableObject {
         var status: Deck.Status = .decoding
         var loaded: TrackProcessor.Loaded?
 
-        var title: String {
-            var t = url.deletingPathExtension().lastPathComponent
-            if let r = t.range(of: " [") { t = String(t[..<r.lowerBound]) }
-            return t
-        }
+        var title: String { SongTitle.of(url) }
         var analysis: TrackAnalysis? { loaded?.analysis }
 
         static func == (a: Item, b: Item) -> Bool {

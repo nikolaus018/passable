@@ -51,6 +51,11 @@ enum OpenPanel {
     @MainActor
     static func chooseMany(_ handler: ([URL]) -> Void) {
         let panel = NSOpenPanel()
+        // Downloads land here, so start where the songs are.
+        if FileManager.default.fileExists(atPath: MusicTools.libraryFolder.path) {
+            panel.directoryURL = MusicTools.libraryFolder
+        }
+        panel.prompt = "Add to Set"
         panel.allowedContentTypes = [.audio]
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false

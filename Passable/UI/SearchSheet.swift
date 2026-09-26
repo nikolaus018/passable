@@ -1,93 +1,119 @@
 import SwiftUI
 
-/// Find a track online (yt-dlp) or pick one already downloaded to
-/// ~/Music/Passable, and hand it to a deck or a set.
+/// Find songs on YouTube (yt-dlp) and add them to the set. Downloads run in
+/// the background, several at once, and land in ~/Music/Passable; a song
+/// downloaded before is added straight away.
 struct SearchSheet: View {
+    @EnvironmentObject private var set: SetSession
     @Environment(\.dismiss) private var dismiss
-    let title: String
-    let pickLabel: String
-    /// Stay open after a pick, for adding several songs to a set.
-    var keepOpen = false
-    let onPick: @MainActor (URL) -> Void
-    @State private var picked: Set<URL> = []
+
+    private enum RowState: Equatable {
+        case downloading
+        case failed(String)
+    }
 
     @State private var query = ""
     @State private var results: [MusicSearchResult] = []
-    @State private var library: [URL] = MusicTools.libraryFiles()
     @State private var isSearching = false
-    @State private var downloadingID: String?
     @State private var message: String?
+    @State private var states: [String: RowState] = [:]
+    @FocusState private var fieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(title).font(.title3.bold())
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Find Songs Online").font(.title3.bold())
+                    Text("Search YouTube and add songs to your set. Downloads are saved to ~/Music/Passable.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             HStack {
-                TextField("Artist or title", text: $query)
+                TextField("Artist and song title", text: $query)
                     .textFieldStyle(.roundedBorder)
+                    .focused($fieldFocused)
                     .onSubmit(search)
                 Button("Search", action: search)
                     .disabled(query.trimmingCharacters(in: .whitespaces).isEmpty || isSearching)
                     .keyboardShortcut(.defaultAction)
             }
-            if isSearching {
-                HStack { ProgressView().controlSize(.small); Text("Searching…").foregroundStyle(.secondary) }
-            }
-            if let message {
-                Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(4)
-            }
-
-            List {
-                if !results.isEmpty {
-                    Section("Results") {
-                        ForEach(results) { result in
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(result.title).lineLimit(1)
-                                    Text([result.uploader, result.duration.map { Theme.time($0) }].compactMap { $0 }.joined(separator: " · "))
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                if downloadingID == result.id {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Button("Download & \(pickLabel)") { download(result) }
-                                        .disabled(downloadingID != nil)
-                                }
-                            }
-                        }
-                    }
-                }
-                Section("In ~/Music/Passable") {
-                    if library.isEmpty {
-                        Text("Nothing downloaded yet.").foregroundStyle(.secondary)
-                    }
-                    ForEach(library, id: \.self) { url in
-                        HStack {
-                            Text(url.deletingPathExtension().lastPathComponent).lineLimit(1)
-                            Spacer()
-                            if picked.contains(url) {
-                                Label("Added", systemImage: "checkmark").foregroundStyle(.secondary)
-                            } else {
-                                Button(pickLabel) { pick(url) }
-                            }
-                        }
-                    }
-                }
-            }
-            .listStyle(.inset)
+            content
         }
         .padding(16)
         .frame(width: 620, height: 520)
+        .onAppear { fieldFocused = true }
     }
 
-    private func pick(_ url: URL) {
-        onPick(url)
-        picked.insert(url)
-        if !keepOpen { dismiss() }
+    @ViewBuilder private var content: some View {
+        if isSearching {
+            centered { ProgressView("Searching…") }
+        } else if let message {
+            centered { Text(message).foregroundStyle(.secondary).multilineTextAlignment(.center) }
+        } else if results.isEmpty {
+            centered {
+                VStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass").font(.system(size: 28)).foregroundStyle(.secondary)
+                    Text("Type a song and press Return.").foregroundStyle(.secondary)
+                }
+            }
+        } else {
+            List(results) { result in
+                row(result)
+            }
+            .listStyle(.inset)
+        }
+    }
+
+    private func centered<V: View>(@ViewBuilder _ content: () -> V) -> some View {
+        content().frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func row(_ result: MusicSearchResult) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(SongTitle.clean(result.title)).lineLimit(1)
+                Text([result.uploader, result.duration.map { Theme.time($0) }].compactMap { $0 }.joined(separator: " · "))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            trailing(result)
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder private func trailing(_ result: MusicSearchResult) -> some View {
+        if isInSet(result) {
+            Label("In set", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.secondary)
+        } else if states[result.id] == .downloading {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Downloading…").font(.caption).foregroundStyle(.secondary)
+            }
+        } else if case .failed(let error) = states[result.id] {
+            Button("Retry") { add(result) }
+                .help(error)
+                .foregroundStyle(.red)
+        } else {
+            Button {
+                add(result)
+            } label: {
+                Label("Add", systemImage: "plus")
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    /// A download is recognised by the video id yt-dlp puts in its name.
+    private func downloadedFile(_ result: MusicSearchResult) -> URL? {
+        MusicTools.libraryFiles().first { $0.lastPathComponent.contains("[\(result.id)]") }
+    }
+
+    private func isInSet(_ result: MusicSearchResult) -> Bool {
+        set.items.contains { $0.url.lastPathComponent.contains("[\(result.id)]") }
     }
 
     private func search() {
@@ -103,7 +129,7 @@ struct SearchSheet: View {
                 switch result {
                 case .success(let found):
                     results = found
-                    if found.isEmpty { message = "No results. Try another artist or title." }
+                    if found.isEmpty { message = "Nothing found. Try the artist and title." }
                 case .failure(let error):
                     message = error.localizedDescription
                 }
@@ -111,20 +137,21 @@ struct SearchSheet: View {
         }
     }
 
-    private func download(_ result: MusicSearchResult) {
-        downloadingID = result.id
-        message = "Downloading and converting to WAV…"
+    private func add(_ result: MusicSearchResult) {
+        if let file = downloadedFile(result) {
+            set.add([file])
+            return
+        }
+        states[result.id] = .downloading
         Task.detached(priority: .userInitiated) {
             let outcome = Result { try MusicTools.download(result) }
             await MainActor.run {
-                downloadingID = nil
                 switch outcome {
                 case .success(let url):
-                    library = MusicTools.libraryFiles()
-                    pick(url)
-                    if keepOpen { message = "Added \(url.deletingPathExtension().lastPathComponent)." }
+                    states[result.id] = nil
+                    set.add([url])
                 case .failure(let error):
-                    message = error.localizedDescription
+                    states[result.id] = .failed(error.localizedDescription)
                 }
             }
         }

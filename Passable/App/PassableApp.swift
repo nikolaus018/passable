@@ -16,7 +16,7 @@ struct PassableApp: App {
         .windowToolbarStyle(.unifiedCompact)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Add Songs…") { OpenPanel.chooseMany { set.add($0) } }
+                Button("Add Files…") { OpenPanel.chooseMany { set.add($0) } }
                     .keyboardShortcut("o")
             }
             // Undo covers edits in the transition editor.

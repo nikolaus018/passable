@@ -89,3 +89,25 @@ enum MusicTools {
         return audio.sorted { date($0) > date($1) }
     }
 }
+
+/// Song names as people say them: file and upload names minus the noise
+/// ("(Official Audio)", "| Lyrics", "[dQw4w9WgXcQ]", underscores).
+enum SongTitle {
+    static func of(_ url: URL) -> String { clean(url.deletingPathExtension().lastPathComponent) }
+
+    static func clean(_ raw: String) -> String {
+        var t = raw
+        if !t.contains(" "), t.contains("_") { t = t.replacingOccurrences(of: "_", with: " ") }
+        let patterns = [
+            #"\s*\[[A-Za-z0-9_-]{11}\]\s*$"#,                                     // video id
+            #"\s*[\(\[][^\)\]]*(official|video|audio|lyric|visuali[sz]er|\bhd\b|\bhq\b|\b4k\b)[^\)\]]*[\)\]]"#,
+            #"\s*[|｜].*$"#,                                                        // "| Lyrics", "| Channel"
+            #"\s+(official\s+)?(music\s+)?(video|audio|lyrics?|visuali[sz]er)\s*$"#,
+        ]
+        for p in patterns {
+            t = t.replacingOccurrences(of: p, with: "", options: [.regularExpression, .caseInsensitive])
+        }
+        t = t.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+        return t.trimmingCharacters(in: .whitespaces).isEmpty ? raw : t.trimmingCharacters(in: .whitespaces)
+    }
+}
