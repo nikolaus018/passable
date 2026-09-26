@@ -26,7 +26,7 @@ enum TransitionPreset: String, CaseIterable, Codable, Identifiable {
         case .longBlend:
             return "A slow EQ blend: B fades up with its low end killed, the lows trade places mid-way, A filters out."
         case .echoOut:
-            return "For tempos too far apart to beat-match: A's beat sinks under a low-pass and its melody washes into reverb and echo while B's intro rises at its own tempo, then B's beat drops on the downbeat."
+            return "For tempos too far apart to beat-match: A's beat sinks away first, its melody and vocal float on beatless while B's intro rises underneath, then B's beat drops on its downbeat. Two beats never play at once."
         }
     }
 
@@ -250,26 +250,27 @@ struct TransitionBuilder {
             }
 
         case .echoOut:
-            // The tempos can't be matched, so the songs never share a beat:
-            // over `bars` before B's downbeat A's beat sinks under a
-            // low-pass and fades, its melody and vocal wash into reverb and
-            // echo, and B's intro (its own tempo, filtered) rises into the
-            // gap. B's beat drops on the downbeat as A's tails ring out.
-            // A stays at full level (a filtered crossfade, not a fade to
-            // silence), so the floor never empties.
-            let e = max(1, min(n, 8)), rise = min(4, e / 2)
+            // The tempos can't be matched, so two beats must never play at
+            // once. Like a DJ bridging a tempo jump: A's beat leaves first,
+            // its melody and vocal float on beatless (no tempo to clash
+            // with), B's intro rises under them opening like a riser, and
+            // B's beat drops on its downbeat as A washes into reverb.
+            let e = max(1, min(n, 8)), half = e / 2
             for stem in [StemKind.drums, .bass] {
-                automate(.a, stem, .filter, [(-e, 0.5, .sCurve), (-1, 0.3, .linear), (0, 0.15, .linear)])
-                automate(.a, stem, .volume, [(-1, 1, .logarithmic), (-0.25, 0, .linear)])
+                automate(.a, stem, .filter, [(-e, 0.5, .sCurve), (-half, 0.2, .linear)])
+                automate(.a, stem, .volume, [(-e, 1, .logarithmic), (-half, 0, .linear)])
             }
-            automate(.a, .drums, .delay, [(-2, 0, .exponential), (-0.25, 0.7, .hold), (0, 0, .linear)])
-            automate(.a, .other, .reverb, [(-2, 0, .linear), (-0.5, 0.75, .hold), (0.001, 0, .linear)])
+            automate(.a, .drums, .delay, [(-half - 1, 0, .exponential), (-half - 0.25, 0.6, .hold), (-half + 0.5, 0, .linear)])
+            automate(.a, .other, .reverb, [(-half, 0, .linear), (-0.5, 0.75, .hold), (0.001, 0, .linear)])
             automate(.a, .other, .volume, [(-1, 1, .logarithmic), (0, 0, .linear)])
             let out = max(-e, min(0, vocalOut ?? -1))
             automate(.a, .vocals, .delay, [(out - 1, 0, .linear), (out - 0.25, 0.85, .hold), (out + 2, 0, .linear)])
             automate(.a, .vocals, .volume, [(out - 0.5, 1, .logarithmic), (out, 0, .linear)])
+            // Clashing keys: B's melody only takes the last bar, after A's
+            // has washed away.
+            let rise = keysClash ? min(1, half) : half
             automate(.b, .other, .volume, [(-rise, 0, .exponential), (0, 1, .linear)])
-            automate(.b, .other, .filter, [(-rise, 0.64, .sCurve), (0, 0.5, .linear)])
+            automate(.b, .other, .filter, [(-rise, 0.72, .sCurve), (0, 0.5, .linear)])
             for stem in [StemKind.drums, .bass] {
                 automate(.b, stem, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
             }

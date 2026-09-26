@@ -43,6 +43,12 @@ enum MixMath {
         return Double(max(-12, min(8, targetLoudness - reference)))
     }
 
+    /// No automatic blend runs longer than this, whatever the songs would
+    /// allow: past it a crowd hears two songs fighting, not a mix. In
+    /// seconds, because that's what feels long: 16 bars stay possible down
+    /// to 85 BPM, 32 bars practically never.
+    static let maxBlendSeconds = 45.0
+
     static func keysClash(_ a: MusicalKey, _ b: MusicalKey) -> Bool {
         b.harmonicShift(toMatch: a, limit: 0) == nil
     }
@@ -81,6 +87,9 @@ struct PairPlan: Equatable {
             if abs(rate - 1) < 0.03 { options.append((.stemSwap, 32, 0.3)) }
             options.append((.dropSwap, 8, -0.2))
         }
+        let barSeconds = a.grid.barSeconds
+        options = options.filter { $0.preset == .echoOut || Double($0.bars) * barSeconds <= MixMath.maxBlendSeconds
+            || $0.bars <= 8 }
         let best = options.map { (preset: $0.preset, bars: $0.bars, placement: place($0.preset, $0.bars), prior: $0.prior) }
             .max { $0.placement.score + $0.prior < $1.placement.score + $1.prior }!
         return PairPlan(preset: best.preset, bars: best.bars, rate: best.preset == .echoOut ? 1 : rate,
