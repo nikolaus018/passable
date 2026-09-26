@@ -51,7 +51,7 @@ struct ContentView: View {
         guard keyMonitor == nil else { return }
         let set = self.set
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
-            guard !event.isARepeat, event.modifierFlags.isDisjoint(with: [.command, .option, .control]),
+            guard event.modifierFlags.isDisjoint(with: [.command, .option, .control]),
                   let key = event.charactersIgnoringModifiers?.lowercased(), key == "m" || key == "s" else { return event }
             guard let responder = event.window?.firstResponder, !(responder is NSTextView) else { return event }
             let isDown = event.type == .keyDown
