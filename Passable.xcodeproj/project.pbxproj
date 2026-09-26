@@ -1,0 +1,607 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0383DC407B85DAC099B9F467 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E90F393D5126D1D1B90167C8 /* ContentView.swift */; };
+		0B304481FCF7C128FDE18908 /* EndToEndTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D383015C45F285B6995AFF4 /* EndToEndTests.swift */; };
+		0BABBE71B89EDA3F694628B6 /* KeyDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FCB06E03A60D917E699FB6A /* KeyDetector.swift */; };
+		0F5CF077D02D833A5F5A1CDD /* TrackProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACD810EF2618C9A11628672 /* TrackProcessor.swift */; };
+		169F97F9E7B84D19A05973BD /* MusicSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D473E11FD02BC9A9CE22BEC /* MusicSearch.swift */; };
+		183D43BDE2FC084100B75AAA /* MixRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63FAB67B2900CD6257C1D17A /* MixRenderer.swift */; };
+		1A5250BAF693CC4631755DBA /* Effects.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAFAFB3D6E02981D209981A4 /* Effects.swift */; };
+		2462BF7F99A015EBCE55C3CC /* MixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B69520316B09120BB126F804 /* MixTests.swift */; };
+		2B5C285E85A47F0C3BAC8079 /* DemucsSTFT.swift in Sources */ = {isa = PBXBuildFile; fileRef = 626F56B7CC69E50D409B8CB2 /* DemucsSTFT.swift */; };
+		326B0469D9BBD33F5856CD05 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9C614A9FFAFC94E7A9329C2 /* Theme.swift */; };
+		37165790AA6BA6DA44CBE3F3 /* TrackAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2347CEEF14E7346534DC915 /* TrackAnalyzer.swift */; };
+		3A5B5668F93D8E6C008559EB /* HTDemucs.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 64A942CAB48C8DD5ED1A7DAE /* HTDemucs.mlpackage */; };
+		3EF733298906CFA3A55D16F0 /* Automation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5898144D4E96717801EEC24B /* Automation.swift */; };
+		47D6C330665303CF2A8FA78B /* PassableApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE6C44F5546EC863B0C936DF /* PassableApp.swift */; };
+		4C63F614F9CEAE87D30892BD /* TransitionPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E1FA045141AEACB4C04FDF3 /* TransitionPanel.swift */; };
+		6A87BFA23CB053EBC96C6F40 /* RealTrackProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 683C023C0AB1CCF3B368AA0D /* RealTrackProbe.swift */; };
+		7BC1E725829A8BFA8D01C4F8 /* SearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7DA88A707CD72420E5A9DB5 /* SearchSheet.swift */; };
+		8BCAC83384BA4C243CB878CD /* StemSeparator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 977700D9FDD4CAB06C13E6D9 /* StemSeparator.swift */; };
+		8E662C3F480F3359D00AE471 /* TransitionPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A65494D08EBA4673B965AC1 /* TransitionPreset.swift */; };
+		9F584E397CD55CFEF629FC53 /* TransportBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4DADC8DD339889F45248BC7 /* TransportBar.swift */; };
+		A04A7D184814164455B642EF /* StemCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33A00403D498E07789E76097 /* StemCache.swift */; };
+		A5FD1CC48AC72EDC93603890 /* TimelineArea.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73DCC498B319117423186FE0 /* TimelineArea.swift */; };
+		AE9EA7FFF2681EACB38A9E04 /* SeparationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BD3C5673D80CB6C6602ED07 /* SeparationTests.swift */; };
+		AF9045C0F176E291466BF300 /* AudioIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E503B0A96E3D4D392019409 /* AudioIO.swift */; };
+		BDF596A70818C20E9B6BC2EC /* MappedAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4084CF69E05ADE9164F61510 /* MappedAudio.swift */; };
+		C121BD7290CFD613DE300266 /* AnalysisTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00A6192091A2A47FED7D0042 /* AnalysisTests.swift */; };
+		C48B691562C3FEA8B2393FE9 /* FFT.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D944C20624564CB6056562D /* FFT.swift */; };
+		CC4B190179A272A371E58974 /* TrackStructure.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6D912C254309936498F0062 /* TrackStructure.swift */; };
+		E193BE23C5AF96BBC1E331E6 /* TempoEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1E4B99E816199B410C51BC /* TempoEstimator.swift */; };
+		E4664D5B533004F97739EC41 /* TimeStretcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24A5EFD8292D713991BF390F /* TimeStretcher.swift */; };
+		EAA394F310B918302B0286D3 /* PlaybackEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 583096834C2E781135EA896D /* PlaybackEngine.swift */; };
+		EC64473EB1B541F0A3AF3DFA /* Biquad.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3A3F1C6209FE99261C4C268 /* Biquad.swift */; };
+		FDC3967A0E6E0DDAA722D50C /* Session.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BF5B26B95B55994D8BDFD67 /* Session.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		85C6FCB03B4A88951B931D6E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = DC8287EB39F5AB29F0EB7D69 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 907F1EFF30FC5C0890134E84;
+			remoteInfo = Passable;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		00A6192091A2A47FED7D0042 /* AnalysisTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisTests.swift; sourceTree = "<group>"; };
+		0D944C20624564CB6056562D /* FFT.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFT.swift; sourceTree = "<group>"; };
+		24A5EFD8292D713991BF390F /* TimeStretcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimeStretcher.swift; sourceTree = "<group>"; };
+		33A00403D498E07789E76097 /* StemCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StemCache.swift; sourceTree = "<group>"; };
+		4084CF69E05ADE9164F61510 /* MappedAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MappedAudio.swift; sourceTree = "<group>"; };
+		4A65494D08EBA4673B965AC1 /* TransitionPreset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransitionPreset.swift; sourceTree = "<group>"; };
+		4ADC3F6D852BEE9D996001F8 /* PassableTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PassableTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		4E1FA045141AEACB4C04FDF3 /* TransitionPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransitionPanel.swift; sourceTree = "<group>"; };
+		4FCB06E03A60D917E699FB6A /* KeyDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyDetector.swift; sourceTree = "<group>"; };
+		583096834C2E781135EA896D /* PlaybackEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackEngine.swift; sourceTree = "<group>"; };
+		5898144D4E96717801EEC24B /* Automation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Automation.swift; sourceTree = "<group>"; };
+		5BD3C5673D80CB6C6602ED07 /* SeparationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeparationTests.swift; sourceTree = "<group>"; };
+		5BF5B26B95B55994D8BDFD67 /* Session.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Session.swift; sourceTree = "<group>"; };
+		626F56B7CC69E50D409B8CB2 /* DemucsSTFT.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemucsSTFT.swift; sourceTree = "<group>"; };
+		63FAB67B2900CD6257C1D17A /* MixRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MixRenderer.swift; sourceTree = "<group>"; };
+		64A942CAB48C8DD5ED1A7DAE /* HTDemucs.mlpackage */ = {isa = PBXFileReference; path = HTDemucs.mlpackage; sourceTree = "<group>"; };
+		683C023C0AB1CCF3B368AA0D /* RealTrackProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealTrackProbe.swift; sourceTree = "<group>"; };
+		6D383015C45F285B6995AFF4 /* EndToEndTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EndToEndTests.swift; sourceTree = "<group>"; };
+		73DCC498B319117423186FE0 /* TimelineArea.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineArea.swift; sourceTree = "<group>"; };
+		7D1E4B99E816199B410C51BC /* TempoEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TempoEstimator.swift; sourceTree = "<group>"; };
+		8D473E11FD02BC9A9CE22BEC /* MusicSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicSearch.swift; sourceTree = "<group>"; };
+		8E503B0A96E3D4D392019409 /* AudioIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioIO.swift; sourceTree = "<group>"; };
+		8FB901899286FC7C54821A07 /* Passable.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Passable.entitlements; sourceTree = "<group>"; };
+		977700D9FDD4CAB06C13E6D9 /* StemSeparator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StemSeparator.swift; sourceTree = "<group>"; };
+		B00E4246EF6CEFCC25E06269 /* Passable.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Passable.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B69520316B09120BB126F804 /* MixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MixTests.swift; sourceTree = "<group>"; };
+		B6D912C254309936498F0062 /* TrackStructure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackStructure.swift; sourceTree = "<group>"; };
+		B9C614A9FFAFC94E7A9329C2 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		BACD810EF2618C9A11628672 /* TrackProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackProcessor.swift; sourceTree = "<group>"; };
+		BAFAFB3D6E02981D209981A4 /* Effects.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Effects.swift; sourceTree = "<group>"; };
+		C2347CEEF14E7346534DC915 /* TrackAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackAnalyzer.swift; sourceTree = "<group>"; };
+		C4DADC8DD339889F45248BC7 /* TransportBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransportBar.swift; sourceTree = "<group>"; };
+		D3A3F1C6209FE99261C4C268 /* Biquad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Biquad.swift; sourceTree = "<group>"; };
+		E7DA88A707CD72420E5A9DB5 /* SearchSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchSheet.swift; sourceTree = "<group>"; };
+		E90F393D5126D1D1B90167C8 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		FE6C44F5546EC863B0C936DF /* PassableApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassableApp.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		13506D3C22A383D2EB9C0146 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				8FB901899286FC7C54821A07 /* Passable.entitlements */,
+				FE6C44F5546EC863B0C936DF /* PassableApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		147D8E69C06167A43DE7C617 /* DSP */ = {
+			isa = PBXGroup;
+			children = (
+				D3A3F1C6209FE99261C4C268 /* Biquad.swift */,
+				BAFAFB3D6E02981D209981A4 /* Effects.swift */,
+				63FAB67B2900CD6257C1D17A /* MixRenderer.swift */,
+			);
+			path = DSP;
+			sourceTree = "<group>";
+		};
+		24771AE91370782796F12D12 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				64A942CAB48C8DD5ED1A7DAE /* HTDemucs.mlpackage */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		312B92889758B0053D4B0B25 /* Passable */ = {
+			isa = PBXGroup;
+			children = (
+				32E4B9535E195B8F36B8BA7F /* Analysis */,
+				13506D3C22A383D2EB9C0146 /* App */,
+				3570D5850980A388FD0DD10A /* Audio */,
+				147D8E69C06167A43DE7C617 /* DSP */,
+				8E02FBE30E26D884B6438668 /* Engine */,
+				47318354B92FAE4CF7D9604A /* Library */,
+				9D08802E396BEB0B347D44BE /* Model */,
+				24771AE91370782796F12D12 /* Resources */,
+				A33EFE13F3BFBBD9862CBDF0 /* Separation */,
+				F8A8ED9B9F6839AE0BC1F12E /* UI */,
+			);
+			path = Passable;
+			sourceTree = "<group>";
+		};
+		32E4B9535E195B8F36B8BA7F /* Analysis */ = {
+			isa = PBXGroup;
+			children = (
+				0D944C20624564CB6056562D /* FFT.swift */,
+				4FCB06E03A60D917E699FB6A /* KeyDetector.swift */,
+				7D1E4B99E816199B410C51BC /* TempoEstimator.swift */,
+				C2347CEEF14E7346534DC915 /* TrackAnalyzer.swift */,
+				B6D912C254309936498F0062 /* TrackStructure.swift */,
+			);
+			path = Analysis;
+			sourceTree = "<group>";
+		};
+		3570D5850980A388FD0DD10A /* Audio */ = {
+			isa = PBXGroup;
+			children = (
+				8E503B0A96E3D4D392019409 /* AudioIO.swift */,
+				4084CF69E05ADE9164F61510 /* MappedAudio.swift */,
+				24A5EFD8292D713991BF390F /* TimeStretcher.swift */,
+			);
+			path = Audio;
+			sourceTree = "<group>";
+		};
+		47318354B92FAE4CF7D9604A /* Library */ = {
+			isa = PBXGroup;
+			children = (
+				8D473E11FD02BC9A9CE22BEC /* MusicSearch.swift */,
+			);
+			path = Library;
+			sourceTree = "<group>";
+		};
+		4D27CD8B900FD1EF78D3E9AC /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B00E4246EF6CEFCC25E06269 /* Passable.app */,
+				4ADC3F6D852BEE9D996001F8 /* PassableTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		8E02FBE30E26D884B6438668 /* Engine */ = {
+			isa = PBXGroup;
+			children = (
+				583096834C2E781135EA896D /* PlaybackEngine.swift */,
+				BACD810EF2618C9A11628672 /* TrackProcessor.swift */,
+			);
+			path = Engine;
+			sourceTree = "<group>";
+		};
+		9D08802E396BEB0B347D44BE /* Model */ = {
+			isa = PBXGroup;
+			children = (
+				5898144D4E96717801EEC24B /* Automation.swift */,
+				5BF5B26B95B55994D8BDFD67 /* Session.swift */,
+				4A65494D08EBA4673B965AC1 /* TransitionPreset.swift */,
+			);
+			path = Model;
+			sourceTree = "<group>";
+		};
+		A33EFE13F3BFBBD9862CBDF0 /* Separation */ = {
+			isa = PBXGroup;
+			children = (
+				626F56B7CC69E50D409B8CB2 /* DemucsSTFT.swift */,
+				33A00403D498E07789E76097 /* StemCache.swift */,
+				977700D9FDD4CAB06C13E6D9 /* StemSeparator.swift */,
+			);
+			path = Separation;
+			sourceTree = "<group>";
+		};
+		B273B70FA09314B189F7A9F5 = {
+			isa = PBXGroup;
+			children = (
+				312B92889758B0053D4B0B25 /* Passable */,
+				EE215B207FCEC4BCF91D4945 /* PassableTests */,
+				4D27CD8B900FD1EF78D3E9AC /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		EE215B207FCEC4BCF91D4945 /* PassableTests */ = {
+			isa = PBXGroup;
+			children = (
+				00A6192091A2A47FED7D0042 /* AnalysisTests.swift */,
+				6D383015C45F285B6995AFF4 /* EndToEndTests.swift */,
+				B69520316B09120BB126F804 /* MixTests.swift */,
+				683C023C0AB1CCF3B368AA0D /* RealTrackProbe.swift */,
+				5BD3C5673D80CB6C6602ED07 /* SeparationTests.swift */,
+			);
+			path = PassableTests;
+			sourceTree = "<group>";
+		};
+		F8A8ED9B9F6839AE0BC1F12E /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				E90F393D5126D1D1B90167C8 /* ContentView.swift */,
+				E7DA88A707CD72420E5A9DB5 /* SearchSheet.swift */,
+				B9C614A9FFAFC94E7A9329C2 /* Theme.swift */,
+				73DCC498B319117423186FE0 /* TimelineArea.swift */,
+				4E1FA045141AEACB4C04FDF3 /* TransitionPanel.swift */,
+				C4DADC8DD339889F45248BC7 /* TransportBar.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		907F1EFF30FC5C0890134E84 /* Passable */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 76EDBAFA20E3D1E9B2FF47B4 /* Build configuration list for PBXNativeTarget "Passable" */;
+			buildPhases = (
+				FC54BC46503CE7171A42843F /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Passable;
+			packageProductDependencies = (
+			);
+			productName = Passable;
+			productReference = B00E4246EF6CEFCC25E06269 /* Passable.app */;
+			productType = "com.apple.product-type.application";
+		};
+		969455686510658760A90AFF /* PassableTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 54B4A9F10F0FB23D662AA347 /* Build configuration list for PBXNativeTarget "PassableTests" */;
+			buildPhases = (
+				7C4E1907A47447C53EF178D0 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				DC88C69C909AA6960D1F5BDC /* PBXTargetDependency */,
+			);
+			name = PassableTests;
+			packageProductDependencies = (
+			);
+			productName = PassableTests;
+			productReference = 4ADC3F6D852BEE9D996001F8 /* PassableTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		DC8287EB39F5AB29F0EB7D69 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+				};
+			};
+			buildConfigurationList = B45CFCF6128E40831AEA93F5 /* Build configuration list for PBXProject "Passable" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = B273B70FA09314B189F7A9F5;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 4D27CD8B900FD1EF78D3E9AC /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				907F1EFF30FC5C0890134E84 /* Passable */,
+				969455686510658760A90AFF /* PassableTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		7C4E1907A47447C53EF178D0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C121BD7290CFD613DE300266 /* AnalysisTests.swift in Sources */,
+				0B304481FCF7C128FDE18908 /* EndToEndTests.swift in Sources */,
+				2462BF7F99A015EBCE55C3CC /* MixTests.swift in Sources */,
+				6A87BFA23CB053EBC96C6F40 /* RealTrackProbe.swift in Sources */,
+				AE9EA7FFF2681EACB38A9E04 /* SeparationTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FC54BC46503CE7171A42843F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AF9045C0F176E291466BF300 /* AudioIO.swift in Sources */,
+				3EF733298906CFA3A55D16F0 /* Automation.swift in Sources */,
+				EC64473EB1B541F0A3AF3DFA /* Biquad.swift in Sources */,
+				0383DC407B85DAC099B9F467 /* ContentView.swift in Sources */,
+				2B5C285E85A47F0C3BAC8079 /* DemucsSTFT.swift in Sources */,
+				1A5250BAF693CC4631755DBA /* Effects.swift in Sources */,
+				C48B691562C3FEA8B2393FE9 /* FFT.swift in Sources */,
+				3A5B5668F93D8E6C008559EB /* HTDemucs.mlpackage in Sources */,
+				0BABBE71B89EDA3F694628B6 /* KeyDetector.swift in Sources */,
+				BDF596A70818C20E9B6BC2EC /* MappedAudio.swift in Sources */,
+				183D43BDE2FC084100B75AAA /* MixRenderer.swift in Sources */,
+				169F97F9E7B84D19A05973BD /* MusicSearch.swift in Sources */,
+				47D6C330665303CF2A8FA78B /* PassableApp.swift in Sources */,
+				EAA394F310B918302B0286D3 /* PlaybackEngine.swift in Sources */,
+				7BC1E725829A8BFA8D01C4F8 /* SearchSheet.swift in Sources */,
+				FDC3967A0E6E0DDAA722D50C /* Session.swift in Sources */,
+				A04A7D184814164455B642EF /* StemCache.swift in Sources */,
+				8BCAC83384BA4C243CB878CD /* StemSeparator.swift in Sources */,
+				E193BE23C5AF96BBC1E331E6 /* TempoEstimator.swift in Sources */,
+				326B0469D9BBD33F5856CD05 /* Theme.swift in Sources */,
+				E4664D5B533004F97739EC41 /* TimeStretcher.swift in Sources */,
+				A5FD1CC48AC72EDC93603890 /* TimelineArea.swift in Sources */,
+				37165790AA6BA6DA44CBE3F3 /* TrackAnalyzer.swift in Sources */,
+				0F5CF077D02D833A5F5A1CDD /* TrackProcessor.swift in Sources */,
+				CC4B190179A272A371E58974 /* TrackStructure.swift in Sources */,
+				4C63F614F9CEAE87D30892BD /* TransitionPanel.swift in Sources */,
+				8E662C3F480F3359D00AE471 /* TransitionPreset.swift in Sources */,
+				9F584E397CD55CFEF629FC53 /* TransportBar.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		DC88C69C909AA6960D1F5BDC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 907F1EFF30FC5C0890134E84 /* Passable */;
+			targetProxy = 85C6FCB03B4A88951B931D6E /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0E1289BD9DE2F7DCA10A41BF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Passable/App/Passable.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				COREML_CODEGEN_LANGUAGE = None;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Passable;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.nikolausmarek.Passable;
+				SDKROOT = macosx;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		28322D107C932C2BC7DF3A81 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Passable/App/Passable.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				COREML_CODEGEN_LANGUAGE = None;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Passable;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.nikolausmarek.Passable;
+				SDKROOT = macosx;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		69EE58B598F68FAB111D2709 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		8BEAE385E5F266C87332B122 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.nikolausmarek.PassableTests;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Passable.app/Contents/MacOS/Passable";
+			};
+			name = Release;
+		};
+		AB68B390725CD3B279629A4B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.nikolausmarek.PassableTests;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Passable.app/Contents/MacOS/Passable";
+			};
+			name = Debug;
+		};
+		EB91A01EC0172A58F956AC80 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		54B4A9F10F0FB23D662AA347 /* Build configuration list for PBXNativeTarget "PassableTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AB68B390725CD3B279629A4B /* Debug */,
+				8BEAE385E5F266C87332B122 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		76EDBAFA20E3D1E9B2FF47B4 /* Build configuration list for PBXNativeTarget "Passable" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0E1289BD9DE2F7DCA10A41BF /* Debug */,
+				28322D107C932C2BC7DF3A81 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		B45CFCF6128E40831AEA93F5 /* Build configuration list for PBXProject "Passable" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				69EE58B598F68FAB111D2709 /* Debug */,
+				EB91A01EC0172A58F956AC80 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = DC8287EB39F5AB29F0EB7D69 /* Project object */;
+}

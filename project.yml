@@ -1,0 +1,50 @@
+name: Passable
+options:
+  bundleIdPrefix: com.nikolausmarek
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  MARKETING_VERSION: "0.1"
+  CURRENT_PROJECT_VERSION: "1"
+targets:
+  Passable:
+    type: application
+    platform: macOS
+    sources:
+      - Passable
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.nikolausmarek.Passable
+      SWIFT_VERSION: "5.0"
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      GENERATE_INFOPLIST_FILE: YES
+      INFOPLIST_KEY_CFBundleDisplayName: Passable
+      INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.music
+      INFOPLIST_KEY_NSHumanReadableCopyright: ""
+      ENABLE_PREVIEWS: YES
+      COREML_CODEGEN_LANGUAGE: None
+    entitlements:
+      path: Passable/App/Passable.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+  PassableTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - PassableTests
+    dependencies:
+      - target: Passable
+    settings:
+      SWIFT_VERSION: "5.0"
+      GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Passable:
+    build:
+      targets:
+        Passable: all
+        PassableTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - PassableTests
