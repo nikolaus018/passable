@@ -42,11 +42,17 @@ struct ContentView: View {
             Text(set.alert ?? set.editor.alert ?? "")
         }
         .onAppear { installKeyMonitor() }
+        // A key released while another app has focus never reaches us: let
+        // go of a held vocal rather than leave it muted.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            set.holdVocals(solo: false, down: false)
+        }
         .onDisappear { if let keyMonitor { NSEvent.removeMonitor(keyMonitor) } }
     }
 
-    /// Holding M or S mutes/solos Track A's vocals for as long as the key is down —
-    /// a quick preview gesture, not a toggle, so it doesn't touch the undo stack.
+    /// Holding M mutes the vocal of the song that's playing (let the crowd
+    /// sing the chorus), holding S leaves only that vocal: for as long as
+    /// the key is down. A live gesture, not an edit, so no undo step.
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         let set = self.set
@@ -56,11 +62,7 @@ struct ContentView: View {
             guard let responder = event.window?.firstResponder, !(responder is NSTextView) else { return event }
             let isDown = event.type == .keyDown
             MainActor.assumeIsolated {
-                if key == "m" {
-                    set.editor.updateLane("A.vocals", undoable: false) { $0.isMuted = isDown }
-                } else {
-                    set.editor.updateLane("A.vocals", undoable: false) { $0.isSoloed = isDown }
-                }
+                set.holdVocals(solo: key == "s", down: isDown)
             }
             return nil
         }

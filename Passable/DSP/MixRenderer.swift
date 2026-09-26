@@ -79,9 +79,9 @@ final class MixRenderer: @unchecked Sendable {
         delay = PingPongDelay(sampleRate: sampleRate)
         limiter = Limiter(sampleRate: sampleRate)
         retired.reserveCapacity(256)
-        // Sized for the eight lanes up front so the first real snapshot
-        // doesn't allocate on the render thread.
-        lanes = Array(repeating: LaneDSP(), count: max(128, snapshot.lanes.count))
+        // Sized up front (four lanes a song, sets of up to 128 songs) so no
+        // real snapshot makes the render thread allocate.
+        lanes = Array(repeating: LaneDSP(), count: max(512, snapshot.lanes.count))
         prepare(for: snapshot)
     }
 

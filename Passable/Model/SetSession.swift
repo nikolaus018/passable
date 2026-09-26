@@ -238,13 +238,42 @@ final class SetSession: ObservableObject {
         }
     }
 
+    /// Held M or S: the vocal of the song that's playing, muted (the crowd
+    /// sings the chorus) or alone, for as long as the key is down.
+    struct VocalHold: Equatable {
+        let track: Int
+        let solo: Bool
+    }
+
+    @Published private(set) var vocalHold: VocalHold?
+
+    /// Press and release of M (`solo` false) or S. Taken from the song
+    /// leading at the press and kept until the release, whatever the
+    /// editor shows meanwhile.
+    func holdVocals(solo: Bool, down: Bool) {
+        if down {
+            guard vocalHold == nil, let i = currentIndex else { return }
+            vocalHold = VocalHold(track: i, solo: solo)
+        } else {
+            guard vocalHold != nil else { return }
+            vocalHold = nil
+        }
+        refreshSnapshot()
+    }
+
     func makeSnapshot(including: (Int, StemKind) -> Bool = { _, _ in true }) -> MixSnapshot {
         // Mute and solo in the editor apply to the two songs it shows.
         let pair = mix.flatMap { mix in focused.flatMap { i in mix.transitions.first { $0.from == i } } }
         let editor = self.editor
         let anySolo = pair != nil && editor.lanes.contains(where: \.isSoloed)
+        let hold = vocalHold
         return mix?.snapshot(masterGain: Float(masterVolume)) { track, stem in
             guard including(track, stem) else { return false }
+            if let hold {
+                let held = track == hold.track && stem == .vocals
+                if hold.solo { return held }
+                if held { return false }
+            }
             guard let pair else { return true }
             if track == pair.from { return editor.isAudible(.a, stem) }
             if track == pair.to { return editor.isAudible(.b, stem) }

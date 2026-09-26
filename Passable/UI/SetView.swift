@@ -258,6 +258,14 @@ struct SetTransportBar: View {
                 .font(.system(.body, design: .monospaced))
                 .fixedSize()
 
+            if let hold = set.vocalHold {
+                Text(hold.solo ? "VOCALS ONLY" : "VOCALS OUT")
+                    .font(.caption.bold()).foregroundStyle(.white)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(Capsule().fill(Theme.deckB))
+                    .fixedSize()
+            }
+
             Slider(value: Binding(get: { transport.seconds }, set: { set.seek(to: $0) }),
                    in: 0...max(1, set.length))
                 .disabled(set.mix == nil)

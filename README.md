@@ -20,7 +20,7 @@ Shows the transition that's playing, or the one you picked with **Edit**: both s
 
 Any change goes straight into the set and unticks **Automatic**. Tick it again to return to the automatic transition. Undo and redo (⌘Z / ⇧⌘Z) cover your edits. Mute and solo apply to the set's playback.
 
-One transport serves both tabs: **Space** plays or pauses, **⌘→** (or the keyboard's ⏭ key) jumps to just before the next transition, **⌘←** (⏮) goes back to the start of the current song's transition, and twice quickly to the one before. The ⏯ ⏮ ⏭ keys, headphone buttons and Control Center work while Passable is in the background. **Render** writes the whole set, or just this transition, as an AAC `.m4a` (256 kbps): the songs are already AAC, so a WAV would be ten times bigger and sound the same. Type a `.wav` name to get a 24-bit, 44.1 kHz WAV for other software. The set and your edits are remembered between launches.
+One transport serves both tabs: **Space** plays or pauses, holding **M** mutes the playing song's vocal (let the crowd sing the chorus) and holding **S** leaves only that vocal, for as long as the key is down, **⌘→** (or the keyboard's ⏭ key) jumps to just before the next transition, **⌘←** (⏮) goes back to the start of the current song's transition, and twice quickly to the one before. The ⏯ ⏮ ⏭ keys, headphone buttons and Control Center work while Passable is in the background. **Render** writes the whole set, or just this transition, as an AAC `.m4a` (256 kbps): the songs are already AAC, so a WAV would be ten times bigger and sound the same. Type a `.wav` name to get a 24-bit, 44.1 kHz WAV for other software. The set and your edits are remembered between launches.
 
 ## Set files (.passable)
 

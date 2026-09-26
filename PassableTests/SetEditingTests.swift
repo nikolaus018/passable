@@ -26,6 +26,19 @@ final class SetEditingTests: XCTestCase {
         XCTAssertEqual(mix.transitions.count, 1)
         XCTAssertFalse(set.isEdited(from: 0))
 
+        // Holding M mutes the playing song's vocal, and only that; letting
+        // go brings it back.
+        let vocals = StemKind.laneOrder.firstIndex(of: .vocals)!
+        let playing = try XCTUnwrap(set.currentIndex)
+        set.holdVocals(solo: false, down: true)
+        XCTAssertEqual(set.vocalHold?.track, playing)
+        var lanes = set.makeSnapshot().lanes
+        XCTAssertFalse(lanes[playing * StemKind.laneOrder.count + vocals].audible)
+        XCTAssertEqual(lanes.filter { !$0.audible }.count, 1)
+        set.holdVocals(solo: false, down: false)
+        lanes = set.makeSnapshot().lanes
+        XCTAssertTrue(lanes.allSatisfy(\.audible))
+
         // The editor shows the transition, on a clock the set can map exactly.
         set.edit(transitionFrom: 0)
         let editor = set.editor
