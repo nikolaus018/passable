@@ -444,6 +444,12 @@ final class SetSession: ObservableObject {
     }
 
     private func tick() {
+        // The output went away and couldn't be restarted: say so, rather
+        // than show a clock that's frozen.
+        if transport.isPlaying && !playback.isRunning {
+            transport.isPlaying = false
+            updateNowPlaying()
+        }
         if transport.isPlaying {
             let s = Double(playback.renderer.currentFrame) / AudioIO.sampleRate
             transport.seconds = s

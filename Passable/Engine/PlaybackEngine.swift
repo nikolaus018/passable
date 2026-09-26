@@ -3,9 +3,11 @@ import AVFoundation
 /// Live preview: an AVAudioSourceNode pulling straight from the MixRenderer.
 final class PlaybackEngine {
     let renderer = MixRenderer()
-    private let engine = AVAudioEngine()
+    /// Internal so tests can simulate an output change.
+    let engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode!
     private(set) var isRunning = false
+    private var configurationObserver: NSObjectProtocol?
 
     init() {
         let renderer = self.renderer
@@ -21,10 +23,31 @@ final class PlaybackEngine {
         engine.attach(sourceNode)
         engine.connect(sourceNode, to: engine.mainMixerNode, format: AudioIO.stereoFormat)
         engine.prepare()
+        // Plugging a cable in, or an interface connecting or dropping out,
+        // stops the engine. Rewire to the new output and carry on playing
+        // from where the music was, instead of going silent.
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in self?.outputChanged() }
+    }
+
+    deinit {
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
+    }
+
+    private func outputChanged() {
+        let wasRunning = isRunning
+        engine.stop()
+        engine.disconnectNodeOutput(sourceNode)
+        engine.connect(sourceNode, to: engine.mainMixerNode, format: AudioIO.stereoFormat)
+        engine.prepare()
+        isRunning = false
+        if wasRunning { try? play() }
     }
 
     func play() throws {
-        guard !isRunning else { return }
+        // Our flag and the engine can disagree after an output change.
+        guard !(isRunning && engine.isRunning) else { return }
         try engine.start()
         isRunning = true
     }

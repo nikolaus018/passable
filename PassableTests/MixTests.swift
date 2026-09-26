@@ -186,3 +186,27 @@ final class SessionEditingTests: XCTestCase {
         XCTAssertFalse(session.canRedo)
     }
 }
+
+/// Plugging into a club mixer changes the output device mid-set: playback
+/// has to carry on, not go silent.
+final class PlaybackRecoveryTests: XCTestCase {
+    func testPlaybackSurvivesAnOutputChange() throws {
+        let playback = PlaybackEngine()
+        try playback.play()
+        XCTAssertTrue(playback.engine.isRunning)
+        let before = playback.renderer.currentFrame
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertGreaterThan(playback.renderer.currentFrame, before, "audio should be flowing")
+
+        // What macOS does on a device change: the engine stops, then posts.
+        playback.engine.stop()
+        NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: playback.engine)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertTrue(playback.isRunning)
+        XCTAssertTrue(playback.engine.isRunning, "playback restarts on the new output")
+        let after = playback.renderer.currentFrame
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertGreaterThan(playback.renderer.currentFrame, after, "and the music keeps moving")
+        playback.pause()
+    }
+}
