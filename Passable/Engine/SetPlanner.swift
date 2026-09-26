@@ -244,6 +244,12 @@ struct SetMix: @unchecked Sendable {
         /// Bars of A the transition may start on: not before A is back at its
         /// own tempo.
         let entryRange: ClosedRange<Int>
+        /// Where to start listening: four bars before anything happens (a
+        /// Wash Out begins up to eight bars before B's downbeat).
+        var cue: Double {
+            let lead = edit.preset == .echoOut ? Double(max(1, min(8, edit.bars))) : 0
+            return max(0, start - (lead + 4) * barSeconds)
+        }
         /// Seconds B was moved to lock its hits onto A's, and how well the
         /// two grooves sit together (0…1).
         var nudge: Double = 0

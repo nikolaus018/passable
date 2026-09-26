@@ -270,7 +270,7 @@ final class SetSession: ObservableObject {
         focus(i, reopen: true)
         tab = .transition
         guard let t = mix?.transitions.first(where: { $0.from == i }) else { return }
-        seek(to: t.start - 4 * t.barSeconds)
+        seek(to: t.cue)
     }
 
     private func focus(_ i: Int?, reopen: Bool) {
@@ -382,11 +382,11 @@ final class SetSession: ObservableObject {
 
     // MARK: - Skipping
 
-    /// Where Next and Previous land: the start of the set and four bars
-    /// before each transition, so every jump lands just ahead of a mix.
+    /// Where Next and Previous land: the start of the set and just before
+    /// each transition, so every jump lands ahead of a mix.
     private var cuePoints: [Double] {
         guard let mix else { return [] }
-        return [0] + mix.transitions.map { max(0, $0.start - 4 * $0.barSeconds) }
+        return [0] + mix.transitions.map(\.cue)
     }
 
     /// Jumps to just before the next transition.
@@ -415,7 +415,7 @@ final class SetSession: ObservableObject {
     func cue(transitionFrom i: Int) {
         guard let t = mix?.transitions.first(where: { $0.from == i }) else { return }
         focus(i, reopen: false)
-        seek(to: t.start - 4 * t.barSeconds)
+        seek(to: t.cue)
         play()
     }
 
