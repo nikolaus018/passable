@@ -46,12 +46,17 @@ final class Session: ObservableObject {
         }
     }
 
+    /// Beat rolls, on the same timeline as the lanes. Set before `lanes`
+    /// wherever both change, so the lanes' update carries both.
+    private(set) var rolls: [Roll] = []
+
     /// A's bar on which B's cue bar lands.
     @Published var entryBar = 0 {
         didSet {
             guard entryBar != oldValue else { return }
             if !isRestoring && !isPlacing {
-                pushUndo(Arrangement(lanes: lanes, entryBar: oldValue, cueBar: cueBar, preset: preset, bars: transitionBars))
+                pushUndo(Arrangement(lanes: lanes, rolls: rolls, entryBar: oldValue, cueBar: cueBar, preset: preset,
+                                     bars: transitionBars))
             }
             alignmentChanged(from: oldValue)
             editChanged()
@@ -62,7 +67,8 @@ final class Session: ObservableObject {
         didSet {
             guard cueBar != oldValue else { return }
             if !isRestoring && !isPlacing {
-                pushUndo(Arrangement(lanes: lanes, entryBar: entryBar, cueBar: oldValue, preset: preset, bars: transitionBars))
+                pushUndo(Arrangement(lanes: lanes, rolls: rolls, entryBar: entryBar, cueBar: oldValue, preset: preset,
+                                     bars: transitionBars))
             }
             alignmentChanged(from: nil)
             editChanged()
@@ -125,7 +131,7 @@ final class Session: ObservableObject {
 
     var currentEdit: TransitionEdit {
         TransitionEdit(entryBar: entryBar, cueBar: cueBar, preset: preset, bars: transitionBars,
-                       semitones: semitones, lanes: lanes)
+                       semitones: semitones, lanes: lanes, rolls: rolls)
     }
 
     /// Shows one transition of a set, exactly as the set plays it.
@@ -142,8 +148,7 @@ final class Session: ObservableObject {
         matchStatus = nil
         deckA = a
         deckB = b
-        // In a set, songs aren't key-shifted unless you do it by hand: the
-        // order already puts compatible keys side by side.
+        // In a set, the plan's key shift (if any) is what B plays at.
         autoKey = edit.semitones == 0
         keyClash = nil
         semitones = edit.semitones
@@ -153,8 +158,11 @@ final class Session: ObservableObject {
         entryBar = edit.entryBar
         vocalHandoff = placement.vocalHandoff
         lowSwap = placement.lowSwap
+        placedFor = isEdited ? nil : Placed(preset: edit.preset, bars: edit.bars, mashup: placement.mashup,
+                                            dropMoment: placement.dropMoment)
         placementNote = isEdited || placement.reason.isEmpty ? nil : placement.reason
         self.matched = matched
+        rolls = edit.rolls
         lanes = edit.lanes
         self.entryRange = entryRange
         self.isEdited = isEdited
@@ -191,7 +199,7 @@ final class Session: ObservableObject {
 
     private static func sameContent(_ a: TransitionEdit, _ b: TransitionEdit) -> Bool {
         a.entryBar == b.entryBar && a.cueBar == b.cueBar && a.preset == b.preset && a.bars == b.bars
-            && a.semitones == b.semitones && a.lanes.map(\.envelopes) == b.lanes.map(\.envelopes)
+            && a.semitones == b.semitones && a.lanes.map(\.envelopes) == b.lanes.map(\.envelopes) && a.rolls == b.rolls
     }
 
     /// Keeps the transition exactly as it is, as a hand edit: later changes
@@ -438,6 +446,7 @@ final class Session: ObservableObject {
     private func alignmentChanged(from oldEntry: Int?) {
         if !isRestoring, let oldEntry, let g = masterGrid {
             let shift = g.downbeat(entryBar) - g.downbeat(oldEntry)
+            rolls = rolls.map { $0.shifted(by: shift) }
             for i in lanes.indices {
                 for p in LaneParameter.allCases {
                     var moved = Envelope()
@@ -458,15 +467,27 @@ final class Session: ObservableObject {
     private var vocalHandoff: Int?
     /// Bars after B's entry where the low end changes hands (auto placement).
     private var lowSwap: Int?
+    /// What auto placement found worth doing, for the preset and length it
+    /// placed: a mashup, a roll into the drop.
+    private struct Placed {
+        let preset: TransitionPreset, bars: Int, mashup: Bool, dropMoment: Bool
+    }
+    private var placedFor: Placed?
+    /// `placedFor`, if it was placed for the preset and length in use.
+    private var placedHere: Placed? {
+        placedFor.flatMap { $0.preset == preset && $0.bars == transitionBars ? $0 : nil }
+    }
 
     /// Why the automatic placement chose what it did, shown in the panel.
     @Published private(set) var placementNote: String?
 
     private func place(a: TrackAnalysis, b: TrackAnalysis) {
         let result = AutoPlacement.place(a: a, b: b, bars: transitionBars, preset: preset,
-                                         trimA: Float(trimDB(.a)), trimB: Float(trimDB(.b)), keysClash: keysIncompatible)
+                                         trimA: Float(trimDB(.a)), trimB: Float(trimDB(.b)), keysClash: keysIncompatible,
+                                         mashup: !keysIncompatible && abs(matchRate - 1) < MixMath.mashupStretch)
         vocalHandoff = result.vocalHandoff
         lowSwap = result.lowSwap
+        placedFor = Placed(preset: preset, bars: transitionBars, mashup: result.mashup, dropMoment: result.dropMoment)
         isPlacing = true
         defer { isPlacing = false }
         cueBar = result.cueBar
@@ -508,10 +529,37 @@ final class Session: ObservableObject {
 
     private func writePreset() {
         guard let g = masterGrid else { return }
-        lanes = TransitionBuilder.build(preset, lanes: lanes, start: g.downbeat(entryBar),
-                                        barSeconds: g.barSeconds, bars: transitionBars, vocalBar: vocalHandoff,
-                                        keysClash: keysIncompatible,
-                                        lowSwap: lowSwap.flatMap { $0 <= transitionBars ? $0 : nil })
+        let placed = placedHere
+        let made = TransitionBuilder.make(preset, lanes: lanes, start: g.downbeat(entryBar),
+                                          barSeconds: g.barSeconds, bars: transitionBars, vocalBar: vocalHandoff,
+                                          keysClash: keysIncompatible,
+                                          lowSwap: lowSwap.flatMap { $0 <= transitionBars ? $0 : nil },
+                                          mashup: placed?.mashup ?? false, dropMoment: placed?.dropMoment ?? false,
+                                          vocalOutFade: vocalFade(.a), vocalInFade: vocalFade(.b) / 2)
+        rolls = made.rolls
+        lanes = made.lanes
+    }
+
+    /// The editor places vocals on the bar grid, not between lines: where
+    /// the vocal is singing at that bar, a cut would chop a word, so it
+    /// blends (1 bar for A's exit; B's entry uses half).
+    private func vocalFade(_ side: DeckSide) -> Double {
+        guard let g = masterGrid, let stem = side == .a ? deckA.loaded?.stems[.vocals] : matched?.stems[.vocals],
+              let ref = VocalPhrasing.reference(deck(side).analysis?.structure) else { return 1 }
+        let probe = TransitionBuilder.make(preset, lanes: Lane.allLanes(), start: g.downbeat(entryBar), barSeconds: g.barSeconds,
+                                           bars: transitionBars, vocalBar: vocalHandoff, keysClash: keysIncompatible,
+                                           lowSwap: lowSwap.flatMap { $0 <= transitionBars ? $0 : nil },
+                                           mashup: placedHere?.mashup ?? false)
+        let beat = g.barSeconds / 4
+        if side == .a, let exit = probe.vocalExit {
+            let t = g.downbeat(entryBar) + exit * g.barSeconds
+            return VocalPhrasing.sounding(stem, offset: 0, reference: ref, at: t, beat: beat) ? 1 : 0
+        }
+        if side == .b, let entry = probe.vocalEntry {
+            let t = g.downbeat(entryBar) + entry * g.barSeconds - beat
+            return VocalPhrasing.sounding(stem, offset: offsetB, reference: ref, at: t, beat: beat) ? 1 : 0
+        }
+        return 0
     }
 
     func clearAutomation() {
@@ -520,6 +568,7 @@ final class Session: ObservableObject {
     }
 
     private func resetAutomation() {
+        rolls = []
         for i in lanes.indices {
             for p in LaneParameter.allCases { lanes[i][p].removeAll() }
         }
@@ -539,6 +588,7 @@ final class Session: ObservableObject {
 
     private struct Arrangement {
         var lanes: [Lane]
+        var rolls: [Roll]
         var entryBar: Int
         var cueBar: Int
         var preset: TransitionPreset
@@ -553,7 +603,7 @@ final class Session: ObservableObject {
     @Published private(set) var canRedo = false
 
     private var currentArrangement: Arrangement {
-        Arrangement(lanes: lanes, entryBar: entryBar, cueBar: cueBar, preset: preset, bars: transitionBars)
+        Arrangement(lanes: lanes, rolls: rolls, entryBar: entryBar, cueBar: cueBar, preset: preset, bars: transitionBars)
     }
 
     /// Records the arrangement as it is now, before an edit.
@@ -584,6 +634,7 @@ final class Session: ObservableObject {
         transitionBars = state.bars
         entryBar = state.entryBar
         cueBar = state.cueBar
+        rolls = state.rolls
         lanes = state.lanes
         isRestoring = false
         rebuildSnapshot()
@@ -711,7 +762,9 @@ final class Session: ObservableObject {
                 offset: Int((laneOffset(lane) * sr).rounded()),
                 envelopes: lane.envelopes,
                 audible: !lane.isMuted && (!anySolo || lane.isSoloed) && including(lane),
-                trim: Float(pow(10, trimDB(lane.side) / 20)))
+                trim: Float(pow(10, trimDB(lane.side) / 20)),
+                rolls: rolls.filter { $0.side == lane.side && $0.stem == lane.stem }.sorted { $0.start < $1.start }
+                    .compactMap { MixSnapshot.FrameRoll($0, sampleRate: sr) })
         }
         // Dotted-eighth echo: syncopated against the grid, so repeats sit
         // between the kicks instead of on top of them.

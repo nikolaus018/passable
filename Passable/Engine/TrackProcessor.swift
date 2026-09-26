@@ -35,6 +35,9 @@ final class TrackProcessor: @unchecked Sendable {
     }
 
     private let queue = DispatchQueue(label: "com.nikolausmarek.passable.processing", qos: .userInitiated)
+    /// Renditions only stretch audio (no GPU), so several can run at once.
+    private let matchQueue = DispatchQueue(label: "com.nikolausmarek.passable.matching", qos: .userInitiated,
+                                           attributes: .concurrent)
     private var separator: StemSeparator?
 
     func load(_ url: URL, ticket: Ticket,
@@ -60,7 +63,8 @@ final class TrackProcessor: @unchecked Sendable {
                 if let cached = StemCache.loadAnalysis(from: directory), cached.version == TrackAnalysis.currentVersion,
                    (60...200).contains(cached.grid.bpm) {
                     analysis = cached
-                    if analysis.structure?.stemLevel == nil || analysis.structure?.vocalBeatLevel == nil {
+                    if analysis.structure?.stemLevel == nil || analysis.structure?.vocalBeatLevel == nil
+                        || analysis.structure?.hookStart == nil || analysis.structure?.barChroma == nil {
                         analysis.structure = TrackStructure.measure(stems: stems, grid: analysis.grid)
                         StemCache.saveAnalysis(analysis, to: directory)
                     }
@@ -70,7 +74,7 @@ final class TrackProcessor: @unchecked Sendable {
                     StemCache.saveAnalysis(analysis, to: directory)
                 }
                 return Loaded(directory: directory, stems: stems, analysis: analysis,
-                              peaks: stems.mapValues { $0.peaks(hop: Self.peakHop) })
+                              peaks: StemCache.peaks(stems, in: directory, hop: Self.peakHop))
             })
         }
     }
@@ -108,7 +112,7 @@ final class TrackProcessor: @unchecked Sendable {
     /// unlinked.
     func match(_ loaded: Loaded, plan: MatchPlan, ticket: Ticket,
                completion: @escaping @Sendable (Result<Matched, Error>) -> Void) {
-        queue.async {
+        matchQueue.async {
             completion(Result {
                 if plan.map.isIdentity && plan.semitones == 0 {
                     return Matched(plan: plan, stems: loaded.stems, peaks: loaded.peaks)
@@ -117,7 +121,7 @@ final class TrackProcessor: @unchecked Sendable {
                 let directory = root.appendingPathComponent(plan.cacheName, isDirectory: true)
                 StemCache.removeLegacyMatches(in: loaded.directory)
                 if StemCache.hasStems(in: directory), let stems = try? StemCache.loadStems(from: directory) {
-                    return Matched(plan: plan, stems: stems, peaks: stems.mapValues { $0.peaks(hop: Self.peakHop) })
+                    return Matched(plan: plan, stems: stems, peaks: StemCache.peaks(stems, in: directory, hop: Self.peakHop))
                 }
                 // Written under a temporary name and moved into place, so a
                 // half-written rendition is never mistaken for a finished one.
@@ -154,7 +158,7 @@ final class TrackProcessor: @unchecked Sendable {
                 where old.lastPathComponent != directory.lastPathComponent && !old.lastPathComponent.hasPrefix(".") {
                     try? FileManager.default.removeItem(at: old)
                 }
-                return Matched(plan: plan, stems: stems, peaks: stems.mapValues { $0.peaks(hop: Self.peakHop) })
+                return Matched(plan: plan, stems: stems, peaks: StemCache.peaks(stems, in: directory, hop: Self.peakHop))
             })
         }
     }

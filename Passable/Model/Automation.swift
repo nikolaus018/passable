@@ -226,3 +226,24 @@ struct Lane: Identifiable, Equatable, Codable {
         StemKind.laneOrder.flatMap { stem in DeckSide.allCases.map { Lane(side: $0, stem: stem) } }
     }
 }
+
+/// A DJ roll on one stem: from `start` to `end` (seconds on the timeline)
+/// the stem repeats the `length` seconds of itself that begin at `anchor`,
+/// and afterwards carries on where it would have been (slip), so the beat
+/// never loses its place.
+struct Roll: Codable, Equatable {
+    var side: DeckSide
+    var stem: StemKind
+    var start: Double
+    var end: Double
+    var anchor: Double
+    var length: Double
+
+    func shifted(by delta: Double) -> Roll {
+        var r = self
+        r.start += delta
+        r.end += delta
+        r.anchor += delta
+        return r
+    }
+}

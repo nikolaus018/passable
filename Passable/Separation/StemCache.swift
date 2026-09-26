@@ -36,6 +36,25 @@ enum StemCache {
         return stems
     }
 
+    /// Waveform overviews, kept next to the stems. Working one out reads
+    /// every sample of a stem (a few hundred MB a song, which is what made
+    /// opening a set slow); reading it back is a few hundred KB.
+    static func peaks(_ stems: [StemKind: StemAudio], in directory: URL, hop: Int) -> [StemKind: [Float]] {
+        var out: [StemKind: [Float]] = [:]
+        for (kind, stem) in stems {
+            let url = directory.appendingPathComponent("\(kind.rawValue).peaks\(hop).f32")
+            let count = (stem.count + hop - 1) / hop
+            if let data = try? Data(contentsOf: url), data.count == count * MemoryLayout<Float>.size {
+                out[kind] = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+            } else {
+                let peaks = stem.peaks(hop: hop)
+                out[kind] = peaks
+                try? MappedChannel.write(peaks, to: url)
+            }
+        }
+        return out
+    }
+
     /// Tempo-matched stems from before matching was sample-exact.
     static func removeLegacyMatches(in directory: URL) {
         let items = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []

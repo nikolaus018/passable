@@ -30,6 +30,9 @@ final class StemSeparator {
     private let model: MLModel
     private let segment: Int
     private let stft: DemucsSTFT
+    /// The reassembly's own: it runs alongside the next segment's forward
+    /// transform, and an STFT keeps scratch buffers.
+    private let inverseSTFT: DemucsSTFT
     private static let overlap = 0.25
 
     init() throws {
@@ -44,6 +47,7 @@ final class StemSeparator {
         let metadata = model.modelDescription.metadata[.creatorDefinedKey] as? [String: String] ?? [:]
         segment = Int(metadata["segment"] ?? "") ?? 343_980
         stft = DemucsSTFT(segment: segment)
+        inverseSTFT = DemucsSTFT(segment: segment)
     }
 
     func separate(_ mix: StereoBuffer,
@@ -70,6 +74,15 @@ final class StemSeparator {
         let stride = Int((1 - Self.overlap) * Double(segment))
         var scratch = [Float](repeating: 0, count: segment)
 
+        // The GPU runs one segment while the CPU reassembles the one before:
+        // one reassembly in flight, done on its own queue, which alone
+        // touches the outputs until the end.
+        let reassembly = DispatchQueue(label: "com.nikolausmarek.passable.demucs-reassembly", qos: .userInitiated)
+        let inFlight = DispatchGroup()
+        var reassemblyError: Error?
+        defer { inFlight.wait() }
+
+        let segment = self.segment
         let offsets = Array(Swift.stride(from: 0, to: length, by: stride))
         for (chunkIndex, offset) in offsets.enumerated() {
             if isCancelled() { throw CancellationError() }
@@ -103,42 +116,53 @@ final class StemSeparator {
                   let spec = result.featureValue(for: "spec_out")?.multiArrayValue
             else { throw PassableError.message("HTDemucs returned no output.") }
 
-            let ws = wave.strides.map(\.intValue), ss = spec.strides.map(\.intValue)
-            try Self.withFloats(wave) { wavePtr in
-                try Self.withFloats(spec) { specOut in
-                    for s in 0..<StemKind.allCases.count {
-                        for c in 0..<2 {
-                            // time branch
-                            let w = wavePtr + s * ws[1] + c * ws[2]
-                            for i in 0..<segment { scratch[i] = w[i * ws[3]] }
-                            // + frequency branch
-                            let reChannel = s * 4 + c * 2
-                            scratch.withUnsafeMutableBufferPointer { out in
-                                stft.inverse(re: specOut + reChannel * ss[1], im: specOut + (reChannel + 1) * ss[1],
-                                             binStride: ss[2], frameStride: ss[3],
-                                             output: out.baseAddress!, count: segment)
-                            }
-                            // weighted overlap-add into the full-length stem
-                            let dst = c == 0 ? \StereoBuffer.left : \StereoBuffer.right
-                            outputs[s][keyPath: dst].withUnsafeMutableBufferPointer { o in
-                                scratch.withUnsafeBufferPointer { sc in
-                                    weight.withUnsafeBufferPointer { wt in
-                                        vDSP_vma(sc.baseAddress! + lead, 1, wt.baseAddress!, 1, o.baseAddress! + offset, 1,
-                                                 o.baseAddress! + offset, 1, vDSP_Length(chunk))
+            inFlight.wait()
+            if let reassemblyError { throw reassemblyError }
+            let stft = inverseSTFT
+            reassembly.async(group: inFlight) {
+                do {
+                    let ws = wave.strides.map(\.intValue), ss = spec.strides.map(\.intValue)
+                    try Self.withFloats(wave) { wavePtr in
+                        try Self.withFloats(spec) { specOut in
+                            for s in 0..<StemKind.allCases.count {
+                                for c in 0..<2 {
+                                    // time branch
+                                    let w = wavePtr + s * ws[1] + c * ws[2]
+                                    for i in 0..<segment { scratch[i] = w[i * ws[3]] }
+                                    // + frequency branch
+                                    let reChannel = s * 4 + c * 2
+                                    scratch.withUnsafeMutableBufferPointer { out in
+                                        stft.inverse(re: specOut + reChannel * ss[1], im: specOut + (reChannel + 1) * ss[1],
+                                                     binStride: ss[2], frameStride: ss[3],
+                                                     output: out.baseAddress!, count: segment)
+                                    }
+                                    // weighted overlap-add into the full-length stem
+                                    let dst = c == 0 ? \StereoBuffer.left : \StereoBuffer.right
+                                    outputs[s][keyPath: dst].withUnsafeMutableBufferPointer { o in
+                                        scratch.withUnsafeBufferPointer { sc in
+                                            weight.withUnsafeBufferPointer { wt in
+                                                vDSP_vma(sc.baseAddress! + lead, 1, wt.baseAddress!, 1, o.baseAddress! + offset, 1,
+                                                         o.baseAddress! + offset, 1, vDSP_Length(chunk))
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
-            }
-            weightSum.withUnsafeMutableBufferPointer { ws in
-                weight.withUnsafeBufferPointer { wt in
-                    vDSP_vadd(ws.baseAddress! + offset, 1, wt.baseAddress!, 1, ws.baseAddress! + offset, 1, vDSP_Length(chunk))
+                    weightSum.withUnsafeMutableBufferPointer { ws in
+                        weight.withUnsafeBufferPointer { wt in
+                            vDSP_vadd(ws.baseAddress! + offset, 1, wt.baseAddress!, 1, ws.baseAddress! + offset, 1, vDSP_Length(chunk))
+                        }
+                    }
+                } catch {
+                    reassemblyError = error
                 }
             }
             progress(Double(chunkIndex + 1) / Double(offsets.count))
         }
+        inFlight.wait()
+        if let reassemblyError { throw reassemblyError }
 
         // Undo the weighting and the normalisation.
         var result: [StemKind: StereoBuffer] = [:]

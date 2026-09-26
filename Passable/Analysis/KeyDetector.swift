@@ -112,7 +112,8 @@ struct KeyDetector {
         return denom > 0 ? num / denom : 0
     }
 
-    private static func computeChroma(samples: [Float], sampleRate: Double) -> [Double] {
+    /// Energy per pitch class of `samples`, scaled so the strongest is 1.
+    static func computeChroma(samples: [Float], sampleRate: Double) -> [Double] {
         let frameSize = 4096
         let hopSize = 2048
         guard samples.count >= frameSize else { return [Double](repeating: 0, count: 12) }

@@ -145,14 +145,7 @@ final class SetSession: ObservableObject {
         let ready = items.filter { $0.analysis != nil }
         guard ready.count == items.count, items.count > 2 else { return rebuild() }
         let analyses = ready.map { $0.analysis! }
-        let n = analyses.count
-        var costs = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
-        for i in 0..<n {
-            for j in 0..<n where i != j {
-                costs[i][j] = PairPlan.make(a: analyses[i], b: analyses[j]).cost(a: analyses[i], b: analyses[j])
-            }
-        }
-        let order = SetOrdering.order(costs)
+        let order = SetOrdering.order(SetOrdering.costMatrix(analyses))
         let reordered = order.map { ready[$0] }
         if reordered.map(\.id) != items.map(\.id) {
             items = reordered
@@ -182,7 +175,10 @@ final class SetSession: ObservableObject {
             parts.append("\(t.plan.bars) bars")
             parts.append(String(format: "%+.1f%% tempo", t.plan.stretchPercent))
         }
-        parts.append(t.plan.keysClash ? "keys clash, melodies swapped" : "keys fit")
+        if t.edit.semitones != 0 { parts.append("B \(t.edit.semitones > 0 ? "+" : "")\(t.edit.semitones) st to fit") }
+        parts.append(t.melodiesClash ? "melodies clash, swapped" : "melodies fit")
+        if t.skippedBars > 0 { parts.append("A skips \(t.skippedBars) bars of verse and breakdown") }
+        parts += t.payoff
         return parts.joined(separator: " · ")
     }
 
@@ -319,8 +315,17 @@ final class SetSession: ObservableObject {
         editor.open(title: "\(t.from + 1) → \(t.to + 1)",
                     a: Deck(url: a.url, status: .ready, loaded: a.loaded),
                     b: Deck(url: b.url, status: .ready, loaded: b.loaded),
-                    edit: t.edit, isEdited: t.isEdited, matched: b.matched, placement: t.plan.placement,
+                    edit: t.edit, isEdited: t.isEdited, matched: b.matched, placement: played(t),
                     entryRange: t.entryRange, offset: t.delta)
+    }
+
+    /// The plan's placement as the set really plays it: a mashup only where
+    /// it passed the checks on the audio.
+    private func played(_ t: SetMix.Transition) -> AutoPlacement.Result {
+        var p = t.plan.placement
+        p.mashup = t.payoff.contains { $0.hasPrefix("mashup") }
+        p.dropMoment = t.dropAt != nil
+        return p
     }
 
     /// After a build: keep the editor on its transition (by pair, since the

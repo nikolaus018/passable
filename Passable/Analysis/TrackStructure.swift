@@ -17,6 +17,13 @@ struct TrackStructure: Codable, Equatable {
     /// The vocal's level per beat, in dB: where its lines start and stop,
     /// which bars are too coarse for. Optional like the above.
     var vocalBeatLevel: [Float]?
+    /// Per bar, 0…1: how strongly a hook (the chorus, the drop: what the
+    /// crowd waits for) starts there. Optional like the above.
+    var hookStart: [Float]?
+    /// Per bar, the 12 pitch-class energies of the melody and vocal: where
+    /// the song repeats itself, for hooks and for jumps. Optional like the
+    /// above.
+    var barChroma: [[Float]]?
 
     /// How loud the track is when it's going: the level of its loud bars
     /// (80th percentile), which is what a DJ matches with the trim knob.
@@ -136,8 +143,163 @@ struct TrackStructure: Codable, Equatable {
                 i += 1
             }
         }
-        return TrackStructure(activity: activity, loudness: loudness, stemLevel: stemLevel, stemLowLevel: stemLowLevel,
-                              vocalBeatLevel: vocalBeats)
+        // Harmony and melody per bar (the melody stems and the vocal, which
+        // is what a chorus repeats), for finding the hooks.
+        var chroma: [[Float]] = []
+        if let other = stems[.other] {
+            let vocals = stems[.vocals]
+            var bar = 0
+            while true {
+                let start = Int(grid.downbeat(bar) * sr), end = Int(grid.downbeat(bar + 1) * sr)
+                guard end <= other.count, end <= vocals?.count ?? end else { break }
+                bar += 1
+                guard start >= 0 else { chroma.append([Float](repeating: 0, count: 12)); continue }
+                let n = end - start
+                var mono = [Float](repeating: 0, count: n)
+                for channel in [other.left, other.right] + (vocals.map { [$0.left, $0.right] } ?? []) {
+                    vDSP_vadd(mono, 1, channel.pointer + start, 1, &mono, 1, vDSP_Length(n))
+                }
+                chroma.append(KeyDetector.computeChroma(samples: mono, sampleRate: sr).map(Float.init))
+            }
+        }
+        var structure = TrackStructure(activity: activity, loudness: loudness, stemLevel: stemLevel,
+                                       stemLowLevel: stemLowLevel, vocalBeatLevel: vocalBeats)
+        structure.hookStart = hookStarts(chroma: chroma, structure: structure)
+        structure.barChroma = chroma
+        return structure
+    }
+
+    /// How strongly a hook starts on each bar (0…1). A hook is what a song
+    /// comes back to at full power: its harmony and melody return later in
+    /// the song (compared four bars at a time, the song's average harmony
+    /// taken out so a verse in the same key doesn't count), it's among the
+    /// song's loudest parts with beat and bass going, and a new section
+    /// starts on it, lifting from what came before.
+    /// - Parameter chroma: per bar, the 12 pitch-class energies of the
+    ///   melody and vocal.
+    static func hookStarts(chroma: [[Float]], structure s: TrackStructure) -> [Float] {
+        let drums = s.activity(.drums), bass = s.activity(.bass)
+        let n = min(chroma.count, s.loudness.count, drums.count, bass.count)
+        guard n >= 24 else { return [Float](repeating: 0, count: max(0, n)) }
+
+        let centred = Array(centredChroma(chroma)[0..<n])
+        func dot(_ x: [Float], _ y: [Float]) -> Float { zip(x, y).reduce(0) { $0 + $1.0 * $1.1 } }
+        // Four bars starting at b against the best match at least eight
+        // bars away: a section the song plays again.
+        let blocks = n - 3
+        var repetition = [Float](repeating: 0, count: n)
+        for b in 0..<blocks {
+            var best: Float = -1
+            for c in 0..<blocks where abs(c - b) >= 8 {
+                let sim = (0..<4).reduce(Float(0)) { $0 + dot(centred[b + $1], centred[c + $1]) } / 4
+                best = max(best, sim)
+            }
+            repetition[b] = best
+        }
+        func spread(_ x: [Float]) -> [Float] {
+            let sorted = x.sorted()
+            let mid = sorted[sorted.count / 2], high = sorted[sorted.count * 9 / 10]
+            guard high - mid > 1e-4 else { return x.map { _ in 0 } }
+            return x.map { min(1, max(0, ($0 - mid) / (high - mid))) }
+        }
+        let repeats = spread(Array(repetition[0..<blocks])) + [Float](repeating: 0, count: n - blocks)
+        let reference = s.referenceLoudness
+        let power: [Float] = (0..<n).map { b in
+            let energy = min(1, max(0, (s.loudness[b] - (reference - 9)) / 9))
+            let full = min(1, drums[b]) * min(1, bass[b])
+            return 0.45 * repeats[b] + 0.35 * energy + 0.2 * full
+        }
+        func section(_ r: Range<Int>) -> Float {
+            let r = max(0, r.lowerBound)..<min(n, r.upperBound)
+            return r.isEmpty ? 0 : power[r].reduce(0, +) / Float(r.count)
+        }
+        let sections = (0..<n).map { section($0..<($0 + 8)) }
+        let ranked = spread(sections)
+        let boundary = s.boundaryStrength()
+        return (0..<n).map { b in
+            let lift = min(1, max(0, (sections[b] - section((b - 4)..<b)) / 0.2))
+            let starts = min(1, (b < boundary.count ? boundary[b] : 0) / 0.4)
+            return ranked[b] * (0.5 + 0.5 * lift) * starts
+        }
+    }
+
+    /// Per bar, the chroma with the song's average taken out and scaled to
+    /// unit length: what's particular to that bar (silent bars are zero).
+    static func centredChroma(_ chroma: [[Float]]) -> [[Float]] {
+        var mean = [Float](repeating: 0, count: 12)
+        let voiced = chroma.indices.filter { chroma[$0].contains { $0 > 0 } }
+        for b in voiced { for p in 0..<12 { mean[p] += chroma[b][p] / Float(max(1, voiced.count)) } }
+        return chroma.map { bar in
+            guard bar.contains(where: { $0 > 0 }) else { return [Float](repeating: 0, count: 12) }
+            let v = (0..<12).map { bar[$0] - mean[$0] }
+            let norm = sqrt(v.reduce(0) { $0 + $1 * $1 })
+            return norm > 1e-6 ? v.map { $0 / norm } : [Float](repeating: 0, count: 12)
+        }
+    }
+
+    /// Below full power: a verse, a breakdown, the beat or the bass gone.
+    /// What cools a floor when a song plays it on its own.
+    func sags(_ bar: Int) -> Bool {
+        let drums = activity(.drums), bass = activity(.bass)
+        guard bar >= 0, bar < loudness.count else { return false }
+        let full = bar < drums.count && bar < bass.count && min(drums[bar], bass[bar]) >= 0.4
+        return loudness[bar] < referenceLoudness - 3.5 || !full
+    }
+
+    /// A club edit: bars `x..<y` the song can leave out, jumping from bar x
+    /// straight to bar y, because the song repeats itself there: the four
+    /// bars on either side of x sound like those on either side of y (same
+    /// harmony and melody, level, beat and bass), so the jump is a seam no
+    /// one hears, and no vocal line is cut in two (both points sit in a
+    /// pause, or the vocal repeats too). Worth it only if what it leaves out
+    /// is mostly verse and breakdown. nil: no such jump from `earliest` on
+    /// that lands by `latest`.
+    func skip(from earliest: Int, landingBy latest: Int) -> Range<Int>? {
+        guard let chroma = barChroma, chroma.count >= 32 else { return nil }
+        let c = Self.centredChroma(chroma)
+        let n = min(c.count, loudness.count)
+        let phase = phrasePhase(), pauses = vocalQuietBeats
+        let drums = activity(.drums), bass = activity(.bass)
+        func dot(_ x: [Float], _ y: [Float]) -> Float { zip(x, y).reduce(0) { $0 + $1.0 * $1.1 } }
+        func similarity(_ x: Int, _ y: Int) -> Float? {
+            guard x >= 4, y + 4 <= n else { return nil }
+            var sum: Float = 0
+            for k in -4..<4 {
+                let a = c[x + k], b = c[y + k]
+                guard a.contains(where: { $0 != 0 }), b.contains(where: { $0 != 0 }) else { return nil }
+                sum += dot(a, b)
+            }
+            return sum / 8
+        }
+        func mean(_ a: [Float], _ r: Range<Int>) -> Float {
+            let r = max(0, r.lowerBound)..<min(a.count, r.upperBound)
+            return r.isEmpty ? 0 : a[r].reduce(0, +) / Float(r.count)
+        }
+        func seamless(_ x: Int, _ y: Int) -> Bool {
+            guard let pauses else { return true }
+            return (pauses.isQuiet(4 * x - 1) || pauses.isQuiet(4 * x)) && (pauses.isQuiet(4 * y - 1) || pauses.isQuiet(4 * y))
+        }
+        var best: (range: Range<Int>, score: Float)?
+        for x in max(4, earliest)..<max(max(4, earliest), min(n, latest)) where ((x - phase) % 4 + 4) % 4 == 0 {
+            for y in stride(from: x + 8, through: min(latest, n - 4), by: 4) {
+                guard let sim = similarity(x, y), sim >= 0.75,
+                      abs(meanLoudness(bars: (x - 4)..<(x + 4)) - meanLoudness(bars: (y - 4)..<(y + 4))) <= 1.5,
+                      abs(mean(drums, x..<(x + 4)) - mean(drums, y..<(y + 4))) <= 0.25,
+                      abs(mean(bass, x..<(x + 4)) - mean(bass, y..<(y + 4))) <= 0.25,
+                      seamless(x, y) || sim >= 0.9 else { continue }
+                let sag = (x..<y).filter { sags($0) }.count
+                guard sag >= 6, 2 * sag >= y - x else { continue }
+                let score = sim + 0.05 * Float(sag)
+                if score > best?.score ?? -1 { best = (x..<y, score) }
+            }
+        }
+        return best?.range
+    }
+
+    /// 0…1: how strongly a hook starts on `bar`.
+    func hook(_ bar: Int) -> Float {
+        guard let h = hookStart, bar >= 0, bar < h.count else { return 0 }
+        return h[bar]
     }
 }
 
@@ -220,10 +382,10 @@ struct TransitionShape {
     let first: Int, last: Int
     private(set) var gains: [DeckSide: [StemKind: [Gains]]] = [:]
 
-    init(_ preset: TransitionPreset, bars n: Int, vocalBar: Int?, keysClash: Bool, lowSwap: Int?) {
+    init(_ preset: TransitionPreset, bars n: Int, vocalBar: Int?, keysClash: Bool, lowSwap: Int?, mashup: Bool = false) {
         (first, last) = preset == .echoOut ? (-max(1, min(n, 8)), 0) : (0, n)
         let lanes = TransitionBuilder.build(preset, lanes: Lane.allLanes(), start: 0, barSeconds: 1, bars: n,
-                                            vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap)
+                                            vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap, mashup: mashup)
         for lane in lanes {
             var perBar: [Gains] = []
             for k in first..<last {
@@ -273,6 +435,22 @@ struct TransitionShape {
     }
 }
 
+extension TransitionShape {
+    /// Whether both songs are clearly heard in bar `k`: drums, melody and
+    /// voice (above 150 Hz; the low end has one owner by design), each
+    /// within 8 dB of the two together.
+    func together(_ k: Int, a: [StemKind: [Gains]], e: Int, b: [StemKind: [Gains]], c: Int) -> Bool {
+        guard k >= first, k < last else { return false }
+        var side: [Float] = [0, 0]
+        for (i, (s, p, bar)) in [(DeckSide.a, a, e + k), (.b, b, c + k)].enumerated() {
+            for (stem, levels) in p where bar >= 0 && bar < levels.count {
+                side[i] += (gains[s]?[stem]?[k - first].high ?? 1) * levels[bar].high
+            }
+        }
+        return min(side[0], side[1]) >= 0.158 * (side[0] + side[1])
+    }
+}
+
 /// Picks where B should enter A, the way a club DJ would:
 ///
 /// - **Energy holds.** What B plays right after the transition is about as
@@ -284,7 +462,26 @@ struct TransitionShape {
 /// - **The beat carries through.** Drums on both sides where they overlap.
 /// - **Vocals hand over.** B's vocal arrives as A's is echoed out, not
 ///   muted mid-line, and A isn't cut off mid-line either.
+/// - **Something happens.** None of the above makes anyone look up. The
+///   best spots give the blend a payoff: B's hook (its chorus or drop)
+///   landing right on the switch, B singing over A's beat (a mashup), or a
+///   real drop of B to build into.
 enum AutoPlacement {
+    /// A crowd stays with a song for its hooks, not for the verse and the
+    /// breakdown between them. What it costs to keep A playing on its own
+    /// from bar `from` to bar `to`: every bar under full power (a verse, a
+    /// breakdown, the beat or bass gone) cools the floor, and past about a
+    /// minute and a half on its own even a song at full power has said what
+    /// it has to say. Too short, and the songs just flicker past.
+    /// - Parameter skipping: bars left out by a jump (not played at all).
+    static func pacing(_ s: TrackStructure, from: Int, to: Int, barSeconds: Double,
+                       skipping: Range<Int>? = nil) -> Float {
+        let bars = (max(0, from)..<max(max(0, from), to)).filter { !(skipping?.contains($0) ?? false) }
+        let sag = bars.filter { s.sags($0) }.count
+        let seconds = Float(Double(bars.count) * barSeconds)
+        return 0.1 * Float(sag) + 0.02 * max(0, seconds - 90) + 0.02 * max(0, 30 - seconds)
+    }
+
     /// Every stem's power per bar, split at 150 Hz, with the deck's trim
     /// applied; nil for structures measured before per-stem levels existed.
     static func powers(_ s: TrackStructure, trim: Float) -> [StemKind: [TransitionShape.Gains]]? {
@@ -313,6 +510,12 @@ enum AutoPlacement {
         /// How good the best spot is (higher is better); comparable between
         /// pairs, which is what set ordering uses it for.
         var score: Float = 0
+        /// B's vocal comes in early, over A's beat.
+        var mashup = false
+        /// The switch is worth building into: roll, silence, drop.
+        var dropMoment = false
+        /// What makes this transition more than a crossfade, in words.
+        var payoff: [String] = []
     }
 
     /// - Parameters:
@@ -322,9 +525,17 @@ enum AutoPlacement {
     ///     before A has had its time).
     ///   - keysClash: the melodies will be swapped rather than layered,
     ///     which changes what plays when.
+    ///   - mashup: B's vocal may sing over A's beat from a quarter into the
+    ///     blend (the keys fit and the tempos are close).
+    ///   - soloFrom: A's bar from which it has the floor to itself (in a
+    ///     set: once its own transition in is over). Given, the exit is
+    ///     paced for a crowd; nil, it favours letting A play out.
+    ///   - skip: bars of A a jump leaves out, if A plays that far: the
+    ///     transition starts before them or well after.
     static func place(a: TrackAnalysis, b: TrackAnalysis, bars n: Int, preset: TransitionPreset,
                       trimA: Float = 0, trimB: Float = 0, entryRange: ClosedRange<Int>? = nil,
-                      keysClash: Bool = false) -> Result {
+                      keysClash: Bool = false, mashup: Bool = false, soloFrom: Int? = nil,
+                      skip: Range<Int>? = nil) -> Result {
         let barsA = a.grid.barCount(duration: a.duration)
         let barsB = b.grid.barCount(duration: b.duration)
         guard let sa = a.structure, let sb = b.structure, !sa.loudness.isEmpty, !sb.loudness.isEmpty else {
@@ -334,6 +545,8 @@ enum AutoPlacement {
         // Bar (from B's entry) at which A's vocal is taken out and B's comes in.
         let swap = echo ? 0 : n / 2
         let vocalIn = echo ? 0 : n
+        let mash = mashup && preset == .stemSwap && n >= 16 ? Int(TransitionBuilder.mashupWindow(bars: n).earliest) : nil
+        let handoffs = (swap == vocalIn ? [vocalIn] : [vocalIn, swap]) + (mash.map { [$0] } ?? [])
         let span = echo ? 0 : n
         let boundA = sa.boundaryStrength(), boundB = sb.boundaryStrength()
         let phaseA = sa.phrasePhase(), phaseB = sb.phrasePhase()
@@ -347,10 +560,15 @@ enum AutoPlacement {
         let latest = max(0, min(barsA, musicEndA) - max(1, span))
         let range = entryRange.map { min($0.lowerBound, latest)...$0.upperBound }
             ?? min(latest, Int(Double(barsA) * 0.45))...latest
+        // Past a jump, only once the eight bars before the transition (and
+        // a Wash Out's own) are all played ones.
+        let lead0 = echo ? min(n, 8) : 0
         let entries = stride(from: range.lowerBound, through: max(range.lowerBound, min(range.upperBound, latest)), by: 1)
             .filter { ((($0 - phaseA) % 4) + 4) % 4 == 0 }
-        // Skipping more than ~40 % of B throws away too much of it.
-        let lastCue = max(0, min(Int(Double(barsB) * 0.4), barsB - n - 8))
+            .filter { e in skip.map { e + span <= $0.lowerBound || e - lead0 - 8 >= $0.upperBound } ?? true }
+        // Skipping more than ~45 % of B throws away too much of it. Far
+        // enough to reach the first chorus: a DJ mixes pop in on the hook.
+        let lastCue = max(0, min(Int(Double(barsB) * 0.45), barsB - n - 8))
         let cues = (0...lastCue).filter { ((($0 - phaseB) % 4) + 4) % 4 == 0 }
 
         // Where the low end changes hands for a given cue: the first phrase
@@ -366,6 +584,9 @@ enum AutoPlacement {
                 return sb.meanActivity(.bass, bars: r) > 0.5 && sb.meanActivity(.drums, bars: r) > 0.5
             } ?? n
         }
+        /// Bar (from B's entry) where B takes over: its beat drops or the
+        /// low end changes hands.
+        func switchBar(_ sw: Int?) -> Int { echo ? 0 : preset == .dropSwap ? n / 2 : sw ?? n }
         struct ShapeKey: Hashable { let handoff: Int, lowSwap: Int }
         var shapes: [ShapeKey: TransitionShape] = [:]
         let powerA = AutoPlacement.powers(sa, trim: trimA), powerB = AutoPlacement.powers(sb, trim: trimB)
@@ -381,10 +602,17 @@ enum AutoPlacement {
             let preA = sa.meanLoudness(bars: (e - lead - 8)..<(e - lead)) + trimA
             let duringA = sa.meanLoudness(bars: e..<(e + max(1, span / 2))) + trimA
             var scoreA: Float = echo ? 0 : drumsA
-            scoreA -= 0.12 * max(0, refA - preA - 2)
+            // Leaving out of a breakdown starts the transition on a floor
+            // that has already cooled.
+            scoreA -= 0.2 * max(0, refA - preA - 2)
             scoreA -= 0.10 * max(0, preA - duringA - 3)
             scoreA += 0.6 * bound(boundA, e) + 0.3 * bound(boundA, e + span)
-            scoreA += 0.3 * Float(e) / Float(max(1, barsA))
+            if let soloFrom {
+                scoreA -= pacing(sa, from: soloFrom, to: e - lead, barSeconds: a.grid.barSeconds,
+                                 skipping: skip.flatMap { e >= $0.upperBound ? $0 : nil })
+            } else {
+                scoreA += 0.3 * Float(e) / Float(max(1, barsA))
+            }
             if echo {
                 scoreA -= 1.5 * sa.meanActivity(.vocals, bars: e..<(e + 1))
                 scoreA -= 0.3 * sa.meanActivity(.vocals, bars: (e - 1)..<e)
@@ -412,8 +640,17 @@ enum AutoPlacement {
                     score -= 0.15 * max(0, postB - opening - 3)
                 }
                 score += 0.4 * bound(boundB, c) + 0.8 * bound(boundB, c + span)
-                score -= 0.8 * Float(c) / Float(max(1, barsB))
+                score -= 0.4 * Float(c) / Float(max(1, barsB))
                 let sw = lowSwap(cue: c)
+                // The payoff: B's hook lands right as B takes over (a Wash
+                // Out drops straight into it), or B has a real drop there.
+                let switchAt = switchBar(sw)
+                score += 1.2 * sb.hook(c + switchAt)
+                if preset == .stemSwap {
+                    let rise = sb.meanLoudness(bars: (c + switchAt)..<(c + switchAt + 8))
+                        - sb.meanLoudness(bars: (c + switchAt - 4)..<(c + switchAt))
+                    score += 0.5 * bound(boundB, c + switchAt) * min(1, max(0, (rise - 2) / 6))
+                }
                 if preset == .dropSwap {
                     // Worth it only onto a real drop: a new section of B at
                     // the switch that's clearly louder than B's bars before
@@ -432,8 +669,17 @@ enum AutoPlacement {
                     // section of B and the end of one of A's.
                     score += 0.4 * bound(boundB, c + sw) + 0.3 * bound(boundA, e + sw)
                 }
-                for handoff in Set([vocalIn, swap]) {
+                // B's vocal may also come in right on the switch, so a hook
+                // landing there isn't muted until the end of the blend.
+                let options = sw.map { $0 > n / 2 && $0 < n && !handoffs.contains($0) ? handoffs + [$0] : handoffs } ?? handoffs
+                for handoff in options {
                     var s = score + (handoff == vocalIn ? 0.15 : 0)
+                    if handoff == mash {
+                        // B singing over A's beat is the moment, best with
+                        // its hook.
+                        s += 0.5 * min(1, sb.meanActivity(.vocals, bars: (c + handoff)..<(c + n / 2)))
+                        s += 0.8 * sb.hook(c + handoff)
+                    }
                     s -= 1.5 * sb.meanActivity(.vocals, bars: c..<(c + handoff))
                     s += 0.6 * sb.meanActivity(.vocals, bars: (c + handoff)..<(c + handoff + 4))
                     // The mix, bar by bar, as the automation will play it,
@@ -444,12 +690,15 @@ enum AutoPlacement {
                     if let powerA, let powerB {
                         let key = ShapeKey(handoff: handoff, lowSwap: sw ?? n)
                         let shape = shapes[key] ?? TransitionShape(preset, bars: n, vocalBar: handoff, keysClash: keysClash,
-                                                                   lowSwap: sw)
+                                                                   lowSwap: sw, mashup: handoff == mash)
                         shapes[key] = shape
                         // The floor is A's energy: B landing in its own
                         // breakdown is as much a hole as a gap in the blend.
                         // Per bar, so short and long blends compete fairly.
-                        let floor = preA - 2.5, ceiling = max(preA, postB) + 2.5
+                        // Measured from A at full power, not from whatever
+                        // A played last: after a breakdown that would call a
+                        // dead floor level.
+                        let floor = max(preA, refA - 4) - 2.5, ceiling = max(preA, postB) + 2.5
                         let bars = shape.first..<(shape.last + 8)
                         var penalty: Float = 0
                         for k in bars {
@@ -458,6 +707,13 @@ enum AutoPlacement {
                             penalty += 0.1 * hole + 0.02 * hole * hole + 0.04 * max(0, level - ceiling)
                         }
                         s -= penalty * 24 / Float(bars.count)
+                        // A transition, not two songs in a row: both clearly
+                        // heard for a while. Four to eight bars of that is
+                        // a blend; more is just a longer one.
+                        let both = (shape.first..<shape.last).filter {
+                            shape.together($0, a: powerA, e: e, b: powerB, c: c)
+                        }.count
+                        s += 0.12 * Float(min(both, 6))
                     }
                     guard !echo else {
                         // B's beat drops with its vocal open: not in the
@@ -483,8 +739,8 @@ enum AutoPlacement {
                     // builder will look for one (half-way to four bars past
                     // the handoff), a line end for A's near its exit.
                     // Without one, B's voice has to fade in mid-sentence.
-                    let v = min(n, max(n / 2, handoff))
-                    if let pausesB, !pausesB.hasPause(in: (4 * (c + n / 2))...(4 * (c + v + 4))) { s -= 0.8 }
+                    let window = handoff == mash ? (handoff, n / 2) : (n / 2, min(n, max(n / 2, handoff)) + 4)
+                    if let pausesB, !pausesB.hasPause(in: (4 * (c + window.0))...(4 * (c + window.1))) { s -= 0.8 }
                     if let pausesA, !pausesA.hasPause(in: (4 * (e + out - 4))...(4 * (e + out + 2))) { s -= 0.3 }
                     if s > best.score { best = (e, c, handoff, sw, s) }
                 }
@@ -508,7 +764,24 @@ enum AutoPlacement {
         if postB < preA - 4 { notes.append(String(format: "energy drops %.0f dB", preA - postB)) }
 
         if best.lowSwap == n && n >= 8 { notes.append("A holds the low end until B's drop") }
+
+        var payoff: [String] = []
+        let switchAt = switchBar(best.lowSwap)
+        if sb.hook(best.cue + switchAt) >= 0.4 { payoff.append(echo ? "drops into B's hook" : "B's hook on the switch") }
+        let isMashup = handoff == mash
+        if isMashup { payoff.append("mashup: B sings over A's beat") }
+        // Worth building into: B's hook or a real lift of B at the switch,
+        // with A's beat there to roll.
+        let rise = sb.meanLoudness(bars: (best.cue + switchAt)..<(best.cue + switchAt + 8))
+            - sb.meanLoudness(bars: (best.cue + switchAt - 4)..<(best.cue + switchAt))
+        let dropMoment = !echo && switchAt >= 4
+            && sa.meanActivity(.drums, bars: (best.entry + switchAt - 2)..<(best.entry + switchAt)) > 0.5
+            && (preset == .dropSwap || sb.hook(best.cue + switchAt) >= 0.4
+                || (bound(boundB, best.cue + switchAt) >= 0.5 && rise >= 3))
+        if dropMoment { payoff.append("roll into the drop") }
+        notes.insert(contentsOf: payoff, at: 0)
         return Result(entryBar: best.entry, cueBar: best.cue, vocalHandoff: handoff, lowSwap: best.lowSwap,
-                      reason: notes.joined(separator: " · "), score: best.score)
+                      reason: notes.joined(separator: " · "), score: best.score, mashup: isMashup,
+                      dropMoment: dropMoment, payoff: payoff)
     }
 }

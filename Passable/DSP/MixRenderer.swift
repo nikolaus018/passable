@@ -15,6 +15,22 @@ final class MixSnapshot: @unchecked Sendable {
         let audible: Bool
         /// Static gain in front of the fader: the deck's level match.
         var trim: Float = 1
+        /// Beat rolls on this stem, in master frames, sorted by start.
+        var rolls: [FrameRoll] = []
+    }
+
+    /// A `Roll` on the master timeline, in frames.
+    struct FrameRoll {
+        let start: Int, end: Int, anchor: Int, length: Int
+
+        /// nil when it's too short to play.
+        init?(_ roll: Roll, sampleRate: Double) {
+            start = Int((roll.start * sampleRate).rounded())
+            end = Int((roll.end * sampleRate).rounded())
+            anchor = Int((roll.anchor * sampleRate).rounded())
+            length = Int((roll.length * sampleRate).rounded())
+            guard end > start, length >= 2 * MixRenderer.declick else { return nil }
+        }
     }
 
     let lanes: [LaneData]
@@ -43,6 +59,9 @@ final class MixSnapshot: @unchecked Sendable {
 /// both live preview and the offline render, so what you hear is what you get.
 final class MixRenderer: @unchecked Sendable {
     static let blockSize = 64
+    /// Frames (~2 ms) over which a roll's every jump is faded out and in,
+    /// so its repeats don't click.
+    static let declick = 96
     let sampleRate = AudioIO.sampleRate
 
     private struct LaneDSP {
@@ -199,11 +218,15 @@ final class MixRenderer: @unchecked Sendable {
                 guard src + n > 0, src < audio.count else { continue }
 
                 // Copy the stem's frames for this block, zero outside the file.
-                ll.update(repeating: 0, count: n)
-                lr.update(repeating: 0, count: n)
-                let lo = max(0, -src), hi = min(n, audio.count - src)
-                (ll + lo).update(from: audio.left.pointer + src + lo, count: hi - lo)
-                (lr + lo).update(from: audio.right.pointer + src + lo, count: hi - lo)
+                if lane.rolls.contains(where: { $0.start - Self.declick < position + n && $0.end + Self.declick > position }) {
+                    Self.copyRolled(lane, audio: audio, from: position, count: n, left: ll, right: lr)
+                } else {
+                    ll.update(repeating: 0, count: n)
+                    lr.update(repeating: 0, count: n)
+                    let lo = max(0, -src), hi = min(n, audio.count - src)
+                    (ll + lo).update(from: audio.left.pointer + src + lo, count: hi - lo)
+                    (lr + lo).update(from: audio.right.pointer + src + lo, count: hi - lo)
+                }
 
                 updateFilters(lane: i, envelopes: lane.envelopes, at: tm)
                 lanes[i].hp.process(ll, lr, count: n)
@@ -247,6 +270,37 @@ final class MixRenderer: @unchecked Sendable {
         }}}}}}}}
     }
 
+    /// A block of a stem that rolls: inside a roll, frames come from its
+    /// loop; everywhere else from where the stem really is. Every jump is
+    /// faded out and back in over `declick` frames.
+    private static func copyRolled(_ lane: MixSnapshot.LaneData, audio: StemAudio, from position: Int, count n: Int,
+                                   left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>) {
+        let xf = Float(declick)
+        for j in 0..<n {
+            let p = position + j
+            var s = p - lane.offset
+            var g: Float = 1
+            for r in lane.rolls {
+                if p >= r.start && p < r.end {
+                    let phase = (p - r.start) % r.length
+                    s = r.anchor - lane.offset + phase
+                    g = min(g, Float(min(phase, r.length - phase, r.end - p)) / xf)
+                } else if p >= r.start - declick && p < r.start {
+                    g = min(g, Float(r.start - p) / xf)
+                } else if p >= r.end && p < r.end + declick {
+                    g = min(g, Float(p - r.end) / xf)
+                }
+            }
+            if s >= 0 && s < audio.count {
+                left[j] = audio.left.pointer[s] * g
+                right[j] = audio.right.pointer[s] * g
+            } else {
+                left[j] = 0
+                right[j] = 0
+            }
+        }
+    }
+
     @inline(__always)
     private func value(_ envelopes: [Envelope], _ p: LaneParameter, _ t: Double) -> Double {
         envelopes[p.rawValue].value(at: t, default: p.defaultValue)
@@ -271,8 +325,12 @@ final class MixRenderer: @unchecked Sendable {
                 dsp.hp.set(.highPass(frequency: hz, q: 1.0), sampleRate: sr)
             }
         }
+        // Where a DJ mixer's low knob sits: a kill takes the kick and the
+        // bass line (what only one song may own at a time) and leaves the
+        // body of everything else, so a song under the other still sounds
+        // like itself rather than a thin shadow.
         Self.updateBand(&dsp.low, cached: &dsp.lowValue, value(envelopes, .low, t), sr) {
-            .lowShelf(frequency: 250, gainDB: $0)
+            .lowShelf(frequency: 120, gainDB: $0)
         }
         Self.updateBand(&dsp.mid, cached: &dsp.midValue, value(envelopes, .mid, t), sr) {
             .peak(frequency: 1_200, q: 0.7, gainDB: $0)
