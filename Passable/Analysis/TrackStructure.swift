@@ -379,12 +379,18 @@ enum AutoPlacement {
                         let shape = shapes[key] ?? TransitionShape(preset, bars: n, vocalBar: handoff, keysClash: keysClash,
                                                                    lowSwap: sw)
                         shapes[key] = shape
-                        let floor = min(preA, postB) - 2.5, ceiling = max(preA, postB) + 2.5
-                        for k in shape.first..<(shape.last + 8) {
+                        // The floor is A's energy: B landing in its own
+                        // breakdown is as much a hole as a gap in the blend.
+                        // Per bar, so short and long blends compete fairly.
+                        let floor = preA - 2.5, ceiling = max(preA, postB) + 2.5
+                        let bars = shape.first..<(shape.last + 8)
+                        var penalty: Float = 0
+                        for k in bars {
                             let level = shape.mixLevel(k, a: powerA, e: e, b: powerB, c: c)
                             let hole = max(0, floor - level)
-                            s -= 0.1 * hole + 0.02 * hole * hole + 0.04 * max(0, level - ceiling)
+                            penalty += 0.1 * hole + 0.02 * hole * hole + 0.04 * max(0, level - ceiling)
                         }
+                        s -= penalty * 24 / Float(bars.count)
                     }
                     guard !echo else {
                         if s > best.score { best = (e, c, handoff, sw, s) }

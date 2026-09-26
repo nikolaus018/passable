@@ -62,13 +62,26 @@ struct PairPlan: Equatable {
     static func make(a: TrackAnalysis, b: TrackAnalysis, entryRange: ClosedRange<Int>? = nil) -> PairPlan {
         let rate = MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)
         let preset = MixMath.recommendedPreset(rate: rate)
-        let bars = preset.defaultBars
         let keysClash = MixMath.keysClash(a.key, b.key)
-        let placement = AutoPlacement.place(a: a, b: b, bars: bars, preset: preset,
-                                            trimA: Float(MixMath.trimDB(a)), trimB: Float(MixMath.trimDB(b)),
-                                            entryRange: entryRange, keysClash: keysClash)
-        return PairPlan(preset: preset, bars: bars, rate: preset == .echoOut ? 1 : rate,
-                        placement: placement, keysClash: keysClash)
+        func place(_ bars: Int) -> AutoPlacement.Result {
+            AutoPlacement.place(a: a, b: b, bars: bars, preset: preset,
+                                trimA: Float(MixMath.trimDB(a)), trimB: Float(MixMath.trimDB(b)),
+                                entryRange: entryRange, keysClash: keysClash)
+        }
+        // A DJ fits the blend to the music: long where both sides just
+        // groove, short where vocals or a drop leave no room. Every length
+        // is judged by the same simulation; the priors only break near-ties
+        // (long blends are the smoother ride, and a long stretch is only
+        // worth it when the tempos are close).
+        var lengths = [(bars: preset.defaultBars, prior: Float(0))]
+        if preset == .stemSwap {
+            lengths.append((8, -0.3))
+            if abs(rate - 1) < 0.03 { lengths.append((32, 0.3)) }
+        }
+        let best = lengths.map { (bars: $0.bars, placement: place($0.bars), prior: $0.prior) }
+            .max { $0.placement.score + $0.prior < $1.placement.score + $1.prior }!
+        return PairPlan(preset: preset, bars: best.bars, rate: preset == .echoOut ? 1 : rate,
+                        placement: best.placement, keysClash: keysClash)
     }
 
     /// Lower is better. What a DJ weighs when picking the next record:
