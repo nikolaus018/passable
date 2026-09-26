@@ -63,7 +63,7 @@ struct PairPlan: Equatable {
         let rate = MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)
         let preset = MixMath.recommendedPreset(rate: rate)
         let keysClash = MixMath.keysClash(a.key, b.key)
-        func place(_ bars: Int) -> AutoPlacement.Result {
+        func place(_ preset: TransitionPreset, _ bars: Int) -> AutoPlacement.Result {
             AutoPlacement.place(a: a, b: b, bars: bars, preset: preset,
                                 trimA: Float(MixMath.trimDB(a)), trimB: Float(MixMath.trimDB(b)),
                                 entryRange: entryRange, keysClash: keysClash)
@@ -73,14 +73,17 @@ struct PairPlan: Equatable {
         // is judged by the same simulation; the priors only break near-ties
         // (long blends are the smoother ride, and a long stretch is only
         // worth it when the tempos are close).
-        var lengths = [(bars: preset.defaultBars, prior: Float(0))]
+        // A Drop Swap is in the running too; it only wins where B really
+        // drops at the switch (placement rewards that, nothing else does).
+        var options = [(preset: preset, bars: preset.defaultBars, prior: Float(0))]
         if preset == .stemSwap {
-            lengths.append((8, -0.3))
-            if abs(rate - 1) < 0.03 { lengths.append((32, 0.3)) }
+            options.append((.stemSwap, 8, -0.3))
+            if abs(rate - 1) < 0.03 { options.append((.stemSwap, 32, 0.3)) }
+            options.append((.dropSwap, 8, -0.2))
         }
-        let best = lengths.map { (bars: $0.bars, placement: place($0.bars), prior: $0.prior) }
+        let best = options.map { (preset: $0.preset, bars: $0.bars, placement: place($0.preset, $0.bars), prior: $0.prior) }
             .max { $0.placement.score + $0.prior < $1.placement.score + $1.prior }!
-        return PairPlan(preset: preset, bars: best.bars, rate: preset == .echoOut ? 1 : rate,
+        return PairPlan(preset: best.preset, bars: best.bars, rate: best.preset == .echoOut ? 1 : rate,
                         placement: best.placement, keysClash: keysClash)
     }
 
@@ -569,11 +572,25 @@ enum SetBuilder {
                 let n = Double(edit.bars), bar = ga.barSeconds, beat = bar / 4
                 let v = min(n, max(n / 2, Double(plan.placement.vocalHandoff)))
                 let sw = min(n, max(n / 2, Double(plan.placement.lowSwap ?? edit.bars / 2)))
-                if let ref = VocalPhrasing.reference(b.analysis.structure),
-                   let t = VocalPhrasing.lineStart(vocalsB, offset: offset + nudge, reference: ref,
-                                                   target: start + v * bar, earliest: start + n / 2 * bar,
-                                                   latest: start + (v + 4) * bar, beat: beat) {
-                    vocalIn = (t - start) / bar
+                // A mashup moment: B's vocal sings over A's instrumental from
+                // early in the blend. Only where it can't go wrong: the keys
+                // fit, the tempos are close, the grooves lock, and A sings
+                // nothing from there to the handover.
+                let aSilent = a.loaded.analysis.structure.map {
+                    $0.meanActivity(.vocals, bars: (edit.entryBar + edit.bars / 4)..<(edit.entryBar + Int(v))) < 0.15
+                } ?? false
+                let mashup = edit.preset == .stemSwap && edit.bars >= 16 && abs(rate - 1) < 0.03 && align.grooves
+                    && !MixMath.keysClash(a.loaded.analysis.key, b.analysis.key) && aSilent
+                if let ref = VocalPhrasing.reference(b.analysis.structure) {
+                    if mashup, let t = VocalPhrasing.lineStart(vocalsB, offset: offset + nudge, reference: ref,
+                                                               target: start + n / 4 * bar, earliest: start + n / 4 * bar,
+                                                               latest: start + v * bar, beat: beat) {
+                        vocalIn = (t - start) / bar
+                    } else if let t = VocalPhrasing.lineStart(vocalsB, offset: offset + nudge, reference: ref,
+                                                              target: start + v * bar, earliest: start + n / 2 * bar,
+                                                              latest: start + (v + 4) * bar, beat: beat) {
+                        vocalIn = (t - start) / bar
+                    }
                 }
                 let target = min(vocalIn ?? v, min(v, sw))
                 if let ref = VocalPhrasing.reference(a.loaded.analysis.structure),

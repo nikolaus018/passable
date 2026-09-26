@@ -22,7 +22,7 @@ enum TransitionPreset: String, CaseIterable, Codable, Identifiable {
         case .stemSwap:
             return "B's drums and melody build in with their low end killed; kick and bass change hands on one downbeat (on B's drop if B is still building); A's vocal echoes out as B's vocal or low end takes over."
         case .dropSwap:
-            return "B's drums build filtered, then everything swaps at once on the drop while A's melody and vocal echo away."
+            return "A rides its build while B's drums creep in filtered; on B's drop everything flips at once and A's melody and vocal echo away."
         case .longBlend:
             return "A slow EQ blend: B fades up with its low end killed, the lows trade places mid-way, A filters out."
         case .echoOut:
@@ -99,6 +99,31 @@ struct TransitionBuilder {
         }
     }
 
+    /// B's vocal comes in at bar `vin`: on the breath before its next line
+    /// it simply opens (the line then starts exactly as in the song); with
+    /// no pause to use, it rises over a bar from a filter rather than jump
+    /// in mid-sentence.
+    private mutating func bringInVocal(at vin: Double) {
+        if vocalIn != nil {
+            automate(.b, .vocals, .volume, [(vin - 0.25, 0, .exponential), (vin, 1, .linear)])
+        } else {
+            automate(.b, .vocals, .volume, [(vin, 0, .exponential), (vin + 1, 1, .linear)])
+            automate(.b, .vocals, .filter, [(vin, 0.68, .sCurve), (vin + 1, 0.5, .linear)])
+        }
+    }
+
+    /// Tension into the big change at bar `at`: over the two bars before,
+    /// A's beat thins (a gentle high-pass lifts the kick's weight) and its
+    /// last beat is thrown into the echo, so the switch lands as a release.
+    /// - Parameter drumsContinue: A's drums play on past the switch (their
+    ///   own fade takes over), so the filter only eases back.
+    private mutating func buildUp(to at: Double, drumsContinue: Bool) {
+        guard at >= 2 else { return }
+        automate(.a, .drums, .filter, [(at - 2, 0.5, .exponential), (at - 0.001, 0.63, .hold),
+                                       (at, drumsContinue ? 0.5 : 0.63, .linear)])
+        automate(.a, .drums, .delay, [(at - 1, 0, .exponential), (at - 0.25, 0.5, .hold), (at + 0.25, 0, .linear)])
+    }
+
     private mutating func write(_ preset: TransitionPreset) {
         let n = Double(bars)
         // Never before A's vocal is out (the swap), never after the end.
@@ -165,34 +190,34 @@ struct TransitionBuilder {
                 // A's beat carries the build and cuts on B's drop.
                 automate(.a, .drums, .volume, [(4 * q, 1, .hold), (4 * q + 0.001, 0, .linear)])
             }
-            if vocalIn != nil {
-                // Let in on the breath before its next line: the line then
-                // starts exactly as it does in the song.
-                automate(.b, .vocals, .volume, [(vin - 0.25, 0, .exponential), (vin, 1, .linear)])
-            } else {
-                // No pause to use: the voice would jump in mid-sentence, so
-                // it rises over a bar instead, opening up from a filter.
-                automate(.b, .vocals, .volume, [(vin, 0, .exponential), (vin + 1, 1, .linear)])
-                automate(.b, .vocals, .filter, [(vin, 0.68, .sCurve), (vin + 1, 0.5, .linear)])
-            }
+            bringInVocal(at: vin)
+            buildUp(to: sw, drumsContinue: drumsLayer && sw < n)
 
         case .dropSwap:
+            // A rides its build; on the drop everything flips to B at once.
             let h = n / 2
-            automate(.b, .drums, .volume, [(0, 0, .exponential), (h, 1, .linear)])
-            automate(.b, .drums, .filter, [(0, 0.9, .exponential), (h - 0.001, 0.62, .hold), (h, 0.5, .linear)])
+            let vin = max(h, vocalIn ?? v)
+            let out = min(vin, vocalOut ?? h)
+            if drumsLayer {
+                automate(.b, .drums, .volume, [(0, 0, .exponential), (h, 1, .linear)])
+                automate(.b, .drums, .filter, [(0, 0.9, .exponential), (h - 0.001, 0.62, .hold), (h, 0.5, .linear)])
+            } else {
+                automate(.b, .drums, .volume, [(h, 0, .hold), (h + 0.001, 1, .linear)])
+            }
             // No second kick before the drop.
             automate(.b, .drums, .low, [(h, 0, .hold), (h + 0.001, 0.5, .linear)])
             for stem in [StemKind.bass, .other] {
                 automate(.b, stem, .volume, [(h, 0, .hold), (h + 0.001, 1, .linear)])
             }
-            automate(.b, .vocals, .volume, [(v, 0, .hold), (v + 0.001, 1, .linear)])
             for stem in [StemKind.drums, .bass] {
                 automate(.a, stem, .volume, [(h, 1, .hold), (h + 0.001, 0, .linear)])
             }
             automate(.a, .other, .reverb, [(h - 1, 0, .linear), (h, 0.8, .hold), (h + 0.001, 0, .linear)])
             automate(.a, .other, .volume, [(h, 1, .hold), (h + 0.001, 0, .linear)])
-            automate(.a, .vocals, .delay, [(h - 1, 0, .linear), (h - 0.25, 0.85, .hold), (h + 0.001, 0, .linear)])
-            automate(.a, .vocals, .volume, [(h, 1, .hold), (h + 0.001, 0, .linear)])
+            automate(.a, .vocals, .delay, [(out - 1, 0, .linear), (out - 0.25, 0.85, .hold), (out + 0.001, 0, .linear)])
+            automate(.a, .vocals, .volume, [(out, 1, .hold), (out + 0.001, 0, .linear)])
+            bringInVocal(at: vin)
+            buildUp(to: h, drumsContinue: false)
 
         case .longBlend:
             let q = n / 4

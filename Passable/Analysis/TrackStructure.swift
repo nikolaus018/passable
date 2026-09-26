@@ -308,6 +308,8 @@ enum AutoPlacement {
         let step = max(1, n / 4)
         func lowSwap(cue c: Int) -> Int? {
             guard !echo else { return nil }
+            // A Drop Swap flips everything half-way, low end included.
+            if preset == .dropSwap { return n / 2 }
             return stride(from: n / 2, to: n, by: step).first { k in
                 let r = (c + k)..<(c + k + 4)
                 return sb.meanActivity(.bass, bars: r) > 0.5 && sb.meanActivity(.drums, bars: r) > 0.5
@@ -360,6 +362,19 @@ enum AutoPlacement {
                 score += 0.4 * bound(boundB, c) + 0.8 * bound(boundB, c + span)
                 score -= 0.8 * Float(c) / Float(max(1, barsB))
                 let sw = lowSwap(cue: c)
+                if preset == .dropSwap {
+                    // Worth it only onto a real drop: a new section of B at
+                    // the switch that's clearly louder than B's bars before
+                    // it, ideally as a section of A ends.
+                    let h = n / 2
+                    let rise = sb.meanLoudness(bars: (c + h)..<(c + h + 8)) - sb.meanLoudness(bars: c..<(c + h))
+                    // A cut onto anything less than a real drop is just a
+                    // hard cut: not a Drop Swap spot at all.
+                    guard rise >= 4, bound(boundB, c + h) >= 0.5 else { continue }
+                    score += 1.0 * bound(boundB, c + h) * min(1, max(0, (rise - 2) / 6))
+                    score += 0.4 * bound(boundA, e + h)
+                    score -= 0.6 * sa.meanActivity(.vocals, bars: (e + h - 1)..<(e + h + 1))
+                }
                 if let sw, sw < span {
                     // The real change happens at the swap: best on a new
                     // section of B and the end of one of A's.

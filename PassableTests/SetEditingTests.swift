@@ -44,9 +44,11 @@ final class SetEditingTests: XCTestCase {
         set.editor.syncTransport()
         XCTAssertEqual(editor.transport.seconds, editor.transitionStart, accuracy: 1e-6)
 
-        // An edit in the editor becomes the set's transition.
-        editor.choosePreset(.dropSwap)
-        try await wait("the edit to reach the set") { set.mix?.transitions.first?.edit.preset == .dropSwap }
+        // An edit in the editor becomes the set's transition (any preset
+        // other than the one the planner chose).
+        let other: TransitionPreset = editor.preset == .longBlend ? .dropSwap : .longBlend
+        editor.choosePreset(other)
+        try await wait("the edit to reach the set") { set.mix?.transitions.first?.edit.preset == other }
         XCTAssertTrue(set.isEdited(from: 0))
         XCTAssertTrue(editor.isEdited)
         XCTAssertEqual(set.mix!.transitions[0].edit.lanes, editor.lanes)
