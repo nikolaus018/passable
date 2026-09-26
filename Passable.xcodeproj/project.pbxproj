@@ -43,6 +43,7 @@
 		CAEE19D81772DC0E77CC176F /* SetSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 207AD4A7DAD98931C0D36418 /* SetSession.swift */; };
 		CC4B190179A272A371E58974 /* TrackStructure.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6D912C254309936498F0062 /* TrackStructure.swift */; };
 		D2E15B7C73274E5227720F2A /* TransitionLab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D0E76ECD3BE8D66CBAC9876 /* TransitionLab.swift */; };
+		D2F5E624FB9D9DE91CFE3DC4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A85F3A2C18D4CEA7EE7B1E6D /* Assets.xcassets */; };
 		E193BE23C5AF96BBC1E331E6 /* TempoEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1E4B99E816199B410C51BC /* TempoEstimator.swift */; };
 		E4664D5B533004F97739EC41 /* TimeStretcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24A5EFD8292D713991BF390F /* TimeStretcher.swift */; };
 		E5D0D6C73A4657C63AAB32A7 /* PassableFileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBE8701944F6FE295DC98B92 /* PassableFileTests.swift */; };
@@ -95,6 +96,7 @@
 		8FB901899286FC7C54821A07 /* Passable.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Passable.entitlements; sourceTree = "<group>"; };
 		977700D9FDD4CAB06C13E6D9 /* StemSeparator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StemSeparator.swift; sourceTree = "<group>"; };
 		9E1B704DA053ABB65522FC89 /* SetPack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetPack.swift; sourceTree = "<group>"; };
+		A85F3A2C18D4CEA7EE7B1E6D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B00E4246EF6CEFCC25E06269 /* Passable.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Passable.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B69520316B09120BB126F804 /* MixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MixTests.swift; sourceTree = "<group>"; };
 		B6D912C254309936498F0062 /* TrackStructure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackStructure.swift; sourceTree = "<group>"; };
@@ -136,6 +138,7 @@
 		24771AE91370782796F12D12 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				A85F3A2C18D4CEA7EE7B1E6D /* Assets.xcassets */,
 				64A942CAB48C8DD5ED1A7DAE /* HTDemucs.mlpackage */,
 			);
 			path = Resources;
@@ -278,6 +281,7 @@
 			buildConfigurationList = 76EDBAFA20E3D1E9B2FF47B4 /* Build configuration list for PBXNativeTarget "Passable" */;
 			buildPhases = (
 				FC54BC46503CE7171A42843F /* Sources */,
+				839A529BC3E140DE1AAFC3EA /* Resources */,
 			);
 			buildRules = (
 			);
@@ -338,6 +342,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		839A529BC3E140DE1AAFC3EA /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D2F5E624FB9D9DE91CFE3DC4 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		7C4E1907A47447C53EF178D0 /* Sources */ = {

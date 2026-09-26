@@ -22,6 +22,7 @@ targets:
       INFOPLIST_KEY_NSHumanReadableCopyright: ""
       ENABLE_PREVIEWS: YES
       COREML_CODEGEN_LANGUAGE: None
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: Passable/App/Info.plist
       properties:
