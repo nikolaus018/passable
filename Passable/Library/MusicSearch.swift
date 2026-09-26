@@ -56,30 +56,32 @@ enum MusicTools {
         return try JSONDecoder().decode(Response.self, from: data).entries
     }
 
-    /// Downloads best audio, converts to WAV, and returns the file's URL in
-    /// the library folder.
+    /// Downloads the song's audio as YouTube serves it (AAC in M4A), without
+    /// re-encoding: YouTube audio is lossy, so WAV would only make it eight
+    /// times bigger, never better. Only when no M4A stream exists is the best
+    /// stream converted. Returns the file's URL in the library folder.
     static func download(_ result: MusicSearchResult, folder: URL = libraryFolder) throws -> URL {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let ffmpeg = try executable("ffmpeg")
-        // Stage conversions outside the library: nothing should ever load a partial WAV.
+        // Stage downloads outside the library: nothing should ever load a partial file.
         let staging = folder.appendingPathComponent(".downloads/\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: staging) }
-        _ = try run(["--no-playlist", "--no-progress", "-f", "bestaudio/best", "-x", "--audio-format", "wav",
+        _ = try run(["--no-playlist", "--no-progress", "-f", "bestaudio[ext=m4a]/bestaudio/best", "-x", "--audio-format", "m4a",
                      "--ffmpeg-location", ffmpeg.path, "-P", staging.path,
                      "-o", "%(title).150B [%(id)s].%(ext)s", "--", "https://www.youtube.com/watch?v=\(result.id)"])
         let files = try FileManager.default.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil)
-        guard let wav = files.first(where: { $0.pathExtension == "wav" }) else {
-            throw PassableError.message("The download did not produce a WAV file.")
+        guard let audio = files.first(where: { $0.pathExtension.lowercased() == "m4a" }) else {
+            throw PassableError.message("The download did not produce an audio file.")
         }
-        let destination = folder.appendingPathComponent(wav.lastPathComponent)
+        let destination = folder.appendingPathComponent(audio.lastPathComponent)
         if !FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.moveItem(at: wav, to: destination)
+            try FileManager.default.moveItem(at: audio, to: destination)
         }
         return destination
     }
 
-    /// WAV/AIFF files already in the library folder, newest first.
+    /// Audio files already in the library folder, newest first.
     static func libraryFiles() -> [URL] {
         let fm = FileManager.default
         guard let urls = try? fm.contentsOfDirectory(at: libraryFolder, includingPropertiesForKeys: [.contentModificationDateKey],

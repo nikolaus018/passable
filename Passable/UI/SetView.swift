@@ -35,11 +35,6 @@ struct SetView: View {
         .sheet(isPresented: $showSearch) {
             SearchSheet().environmentObject(set)
         }
-        .alert("Passable", isPresented: Binding(get: { set.alert != nil }, set: { if !$0 { set.alert = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(set.alert ?? "")
-        }
     }
 
     private var header: some View {
@@ -153,7 +148,7 @@ private struct TrackRow: View {
         case .decoding: Text("Decoding…").font(.caption).foregroundStyle(.secondary)
         case .separating(let p): Text("Separating stems \(Int(p * 100))%").font(.caption).foregroundStyle(.secondary)
         case .analyzing: Text("Finding beat grid, key & structure…").font(.caption).foregroundStyle(.secondary)
-        case .failed(let m): Text(m).font(.caption).foregroundStyle(.red).lineLimit(1)
+        case .failed(let m): Text(m).font(.caption).foregroundStyle(.red).lineLimit(1).help(m)
         case .ready, .empty: EmptyView()
         }
     }
@@ -202,7 +197,7 @@ private struct TransitionRow: View {
                 Button { set.edit(transitionFrom: index) } label: {
                     Label("Edit", systemImage: "slider.horizontal.3")
                 }
-                .help("Shape this transition by hand in the editor below")
+                .help("Shape this transition by hand in the Transition tab")
             } else {
                 Text(" ").font(.caption)
                 Spacer()
@@ -229,6 +224,20 @@ struct SetTransportBar: View {
             .keyboardShortcut(.space, modifiers: [])
             .disabled(set.mix == nil)
             .help("Play / Pause (Space)")
+
+            Button { set.skipBack() } label: {
+                Image(systemName: "backward.end.fill")
+            }
+            .keyboardShortcut(.leftArrow, modifiers: [.command])
+            .disabled(set.mix == nil)
+            .help("Back to the start of this song's transition; twice for the one before (⌘← or ⏮)")
+
+            Button { set.skipForward() } label: {
+                Image(systemName: "forward.end.fill")
+            }
+            .keyboardShortcut(.rightArrow, modifiers: [.command])
+            .disabled(set.mix == nil || !set.canSkipForward)
+            .help("Jump to just before the next transition (⌘→ or ⏭)")
 
             Button { set.cueFocused() } label: {
                 Label("Cue", systemImage: "arrow.uturn.backward")

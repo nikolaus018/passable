@@ -25,6 +25,7 @@ struct PassableApp: App {
                 Divider()
                 Button("Open Set…") { OpenPanel.chooseSet { set.openSet($0) } }
                     .keyboardShortcut("o", modifiers: [.command, .shift])
+                    .disabled(set.exportProgress != nil)
                 Button("Export Set…") {
                     OpenPanel.save(name: set.suggestedSetName, type: .passableSet) { set.exportSet(to: $0) }
                 }
@@ -43,6 +44,9 @@ struct PassableApp: App {
                 // menu key equivalents they'd swallow typing in the search sheet.
                 Button("Play / Pause") { set.togglePlay() }
                 Button("Cue Transition") { set.cueFocused() }
+                Divider()
+                Button("Next Transition") { set.skipForward() }
+                Button("Back to Song Start") { set.skipBack() }
             }
         }
     }

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MediaPlayer
 
 /// A DJ set: any number of songs, put in the order that flows best, every
 /// transition planned automatically, played back or rendered as one mix.
@@ -68,6 +69,7 @@ final class SetSession: ObservableObject {
         clock = Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
+        if persists { setUpMediaKeys() }
     }
 
     /// Brings back the set from the last launch, in its saved order.
@@ -123,6 +125,7 @@ final class SetSession: ObservableObject {
                     if self.needsOrdering { self.autoOrder() } else { self.rebuild() }
                 case .failure(let error):
                     self.update(id) { $0.status = .failed(error.localizedDescription) }
+                    self.rebuild()
                 }
             }
         })
@@ -193,6 +196,7 @@ final class SetSession: ObservableObject {
     private func invalidate() {
         pause()
         mix = nil
+        updateNowPlaying()
         reopenFocus = true
         refreshSnapshot()
         rebuild()
@@ -201,7 +205,11 @@ final class SetSession: ObservableObject {
     private func rebuild() {
         buildTask?.cancel()
         guard isReady, !needsOrdering else {
-            buildStatus = items.isEmpty ? nil : "Waiting for all songs to be analysed…"
+            if let failed = items.first(where: { if case .failed = $0.status { return true } else { return false } }) {
+                buildStatus = "“\(failed.title)” couldn't be loaded. Remove it to build the set."
+            } else {
+                buildStatus = items.isEmpty ? nil : "Waiting for all songs to be analysed…"
+            }
             return
         }
         let tracks = items.compactMap { item in item.loaded.map { (url: item.url, loaded: $0) } }
@@ -353,6 +361,7 @@ final class SetSession: ObservableObject {
         do {
             try playback.play()
             transport.isPlaying = true
+            updateNowPlaying()
         } catch {
             alert = "Couldn't start audio: \(error.localizedDescription)"
         }
@@ -361,13 +370,46 @@ final class SetSession: ObservableObject {
     func pause() {
         playback.pause()
         transport.isPlaying = false
+        updateNowPlaying()
     }
 
     func seek(to seconds: Double) {
         let s = max(0, min(seconds, length))
         playback.renderer.seek(to: Int(s * AudioIO.sampleRate))
         transport.seconds = s
+        updateNowPlaying()
     }
+
+    // MARK: - Skipping
+
+    /// Where Next and Previous land: the start of the set and four bars
+    /// before each transition, so every jump lands just ahead of a mix.
+    private var cuePoints: [Double] {
+        guard let mix else { return [] }
+        return [0] + mix.transitions.map { max(0, $0.start - 4 * $0.barSeconds) }
+    }
+
+    /// Jumps to just before the next transition.
+    func skipForward() {
+        let now = transport.seconds
+        guard let next = cuePoints.first(where: { $0 > now + 0.5 }) else { return }
+        jump(to: next)
+    }
+
+    /// Back to the lead-in of the song that's playing; pressed again right
+    /// away, to the one before (like a CD player).
+    func skipBack() {
+        guard mix != nil else { return }
+        let now = transport.seconds
+        jump(to: cuePoints.last(where: { $0 < now - 3 }) ?? 0)
+    }
+
+    private func jump(to seconds: Double) {
+        seek(to: seconds)
+        if let i = transitionAt(seconds), i != focused { focus(i, reopen: false) }
+    }
+
+    var canSkipForward: Bool { cuePoints.contains { $0 > transport.seconds + 0.5 } }
 
     /// Four bars before a transition, to audition it.
     func cue(transitionFrom i: Int) {
@@ -400,10 +442,57 @@ final class SetSession: ObservableObject {
             let s = Double(playback.renderer.currentFrame) / AudioIO.sampleRate
             transport.seconds = s
             if s >= length + 2 { pause() }
+            if currentIndex != nowPlayingIndex { updateNowPlaying() }
             // The editor follows the music.
             if let i = transitionAt(s), i != focused { focus(i, reopen: false) }
         }
         editor.syncTransport()
+    }
+
+    // MARK: - Media keys
+
+    /// The keyboard's ⏯ ⏮ ⏭ keys, headphone buttons and Control Center
+    /// drive the set like a player.
+    private func setUpMediaKeys() {
+        let center = MPRemoteCommandCenter.shared()
+        func on(_ command: MPRemoteCommand, _ action: @escaping @MainActor (MPRemoteCommandEvent) -> Void) {
+            command.isEnabled = true
+            command.addTarget { event in
+                Task { @MainActor in action(event) }
+                return .success
+            }
+        }
+        on(center.togglePlayPauseCommand) { [weak self] _ in self?.togglePlay() }
+        on(center.playCommand) { [weak self] _ in self?.play() }
+        on(center.pauseCommand) { [weak self] _ in self?.pause() }
+        on(center.nextTrackCommand) { [weak self] _ in self?.skipForward() }
+        on(center.previousTrackCommand) { [weak self] _ in self?.skipBack() }
+        on(center.changePlaybackPositionCommand) { [weak self] event in
+            if let event = event as? MPChangePlaybackPositionCommandEvent { self?.seek(to: event.positionTime) }
+        }
+    }
+
+    private var nowPlayingIndex: Int?
+
+    /// What macOS shows as playing (and so where the media keys go).
+    private func updateNowPlaying() {
+        guard persists else { return }
+        let center = MPNowPlayingInfoCenter.default()
+        guard mix != nil, let i = currentIndex, items.indices.contains(i) else {
+            nowPlayingIndex = nil
+            center.nowPlayingInfo = nil
+            center.playbackState = .stopped
+            return
+        }
+        nowPlayingIndex = i
+        center.nowPlayingInfo = [
+            MPMediaItemPropertyTitle: items[i].title,
+            MPMediaItemPropertyArtist: "Passable Set · song \(i + 1) of \(items.count)",
+            MPMediaItemPropertyPlaybackDuration: length,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: transport.seconds,
+            MPNowPlayingInfoPropertyPlaybackRate: transport.isPlaying ? 1.0 : 0.0,
+        ]
+        center.playbackState = transport.isPlaying ? .playing : .paused
     }
 
     // MARK: - Export
@@ -476,7 +565,10 @@ final class SetSession: ObservableObject {
     /// Opens a `.passable` file in place of the current set, unpacking its
     /// songs into the library folder.
     func openSet(_ url: URL) {
-        guard exportTask == nil else { return }
+        guard exportTask == nil else {
+            alert = "Wait for the current \(exportLabel.dropLast().lowercased()) to finish, then open the set again."
+            return
+        }
         if !items.isEmpty {
             let alert = NSAlert()
             alert.messageText = "Replace the current set?"
