@@ -109,7 +109,8 @@ struct TimelineArea: View {
             viewport.show(0...max(10, session.lengthSeconds))
             return
         }
-        let lead = session.preset == .echoOut ? 4.0 : 2.0
+        // A Wash Out plays out in the bars before B's downbeat.
+        let lead = session.preset == .echoOut ? Double(min(8, session.transitionBars)) + 2 : 2.0
         viewport.show((session.transitionStart - lead * g.barSeconds)...(session.transitionEnd + 2 * g.barSeconds))
     }
 

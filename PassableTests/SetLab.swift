@@ -1,3 +1,4 @@
+import Accelerate
 import XCTest
 @testable import Passable
 
@@ -109,7 +110,8 @@ final class SetLab: XCTestCase {
         var worst: [String] = []
         for t in mix.transitions {
             let bar = t.barSeconds
-            let from = t.start - 8 * bar
+            // A Wash Out happens in the bars before B's downbeat.
+            let from = t.start - Double(8 + (t.edit.preset == .echoOut ? min(8, t.edit.bars) : 0)) * bar
             let glideEnd = mix.tracks[t.to].offset + mix.tracks[t.to].map.rampEnd / sr
             let until = max(t.end, glideEnd.isFinite ? glideEnd : t.end) + 8 * bar
             let bars = Int(((until - from) / bar).rounded(.up))
@@ -125,18 +127,44 @@ final class SetLab: XCTestCase {
             let bump = middle.isEmpty ? 0 : middle.max()! - max(before, after)
             let lowx2 = (0..<all.count).filter { lowA[$0] > -38 && lowB[$0] > -38 && abs(lowA[$0] - lowB[$0]) < 10 }.count
             let vocx2 = (0..<all.count).filter { vocA[$0] > -40 && vocB[$0] > -40 && abs(vocA[$0] - vocB[$0]) < 12 }.count
-            // Echo Out has no overlap to flam in.
+            // Wash Out never layers the beats.
             let flams = t.edit.preset == .echoOut ? [] : kickOffsets(t, from: from, bars: bars)
             // Typical, not worst: in some windows the two patterns simply
             // differ and correlate anywhere.
             let flam = flams.isEmpty ? 0 : flams.map(abs).sorted()[flams.count / 2]
-            let line = String(format: "%2d→%2d at %@  %@  level %.1f → %.1f dB (%+.1f)  dip %.1f  bump %.1f  lowx2 %d  vocx2 %d  flam %.0f ms [%@] nudge %+.0f ms",
+            // Phrasing, heard on the vocals as they play: was A's still
+            // sounding right where it was taken out, B's right where it was
+            // let in (a line cut in two)?
+            var phrasing = ""
+            if t.edit.preset != .echoOut, !t.isEdited {
+                func sounding(_ track: Int, at master: Double) -> Bool {
+                    let tr = mix.tracks[track]
+                    guard let stem = tr.stems[.vocals], let ref = VocalPhrasing.reference(tr.loaded.analysis.structure)
+                    else { return false }
+                    let i = Int((master - tr.offset) * sr), n = Int(0.12 * sr)
+                    guard i - n >= 0, i + n <= stem.count else { return false }
+                    func db(_ from: Int) -> Float {
+                        var l: Float = 0, r: Float = 0
+                        vDSP_measqv(stem.left.pointer + from, 1, &l, vDSP_Length(n))
+                        vDSP_measqv(stem.right.pointer + from, 1, &r, vDSP_Length(n))
+                        return 10 * log10(max((l + r) / 2, 1e-9))
+                    }
+                    return db(i - n) > ref - 12 && db(i) > ref - 12
+                }
+                let n = Double(t.edit.bars), p = t.plan.placement
+                let gridIn = t.start + min(n, max(n / 2, Double(p.vocalHandoff))) * t.barSeconds
+                let vin = t.vocalIn ?? gridIn
+                let out = t.vocalOut ?? t.start + min(n, max(n / 2, Double(min(p.vocalHandoff, p.lowSwap ?? t.edit.bars)))) * t.barSeconds
+                if sounding(t.from, at: out) { phrasing += " A-CUT" }
+                if sounding(t.to, at: vin) { phrasing += " B-MIDLINE" }
+            }
+            let line = String(format: "%2d→%2d at %@  %@  level %.1f → %.1f dB (%+.1f)  dip %.1f  bump %.1f  lowx2 %d  vocx2 %d  flam %.0f ms [%@] nudge %+.0f ms lock %.0f%%%@",
                               t.from + 1, t.to + 1, Theme.time(t.start), t.plan.preset.displayName, before, after,
                               after - before, dip, bump, lowx2, vocx2, flam,
-                              flams.map { String(format: "%.0f", $0) }.joined(separator: " "), t.nudge * 1000)
+                              flams.map { String(format: "%.0f", $0) }.joined(separator: " "), t.nudge * 1000, t.grooveLock * 100, phrasing)
             print(line)
             // A lift is how a set builds; a drop is what empties a floor.
-            if after - before < -3 || after - before > 6 || dip > 4 || lowx2 > 2 || vocx2 > 1 || flam > 10 {
+            if after - before < -3 || after - before > 6 || dip > 4 || lowx2 > 2 || vocx2 > 1 || flam > 10 || !phrasing.isEmpty {
                 worst.append(line)
                 let a = levels(from: from, seconds: Double(bars) * bar, step: bar) { i, _ in i == t.from }
                 let b = levels(from: from, seconds: Double(bars) * bar, step: bar) { i, _ in i == t.to }

@@ -164,16 +164,18 @@ extension TrackStructure {
 /// placement judges the transition that will play.
 struct TransitionShape {
     typealias Gains = (low: Float, high: Float)
-    let bars: Int
+    /// Bars (from B's entry) the automation spans: before B's downbeat for
+    /// a Wash Out, after it for the blends.
+    let first: Int, last: Int
     private(set) var gains: [DeckSide: [StemKind: [Gains]]] = [:]
 
     init(_ preset: TransitionPreset, bars n: Int, vocalBar: Int?, keysClash: Bool, lowSwap: Int?) {
-        bars = n
+        (first, last) = preset == .echoOut ? (-max(1, min(n, 8)), 0) : (0, n)
         let lanes = TransitionBuilder.build(preset, lanes: Lane.allLanes(), start: 0, barSeconds: 1, bars: n,
                                             vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap)
         for lane in lanes {
             var perBar: [Gains] = []
-            for k in 0..<n {
+            for k in first..<last {
                 var low: Float = 0, high: Float = 0
                 for u in [0.125, 0.375, 0.625, 0.875] {
                     let g = Self.gains(lane, at: Double(k) + u)
@@ -209,8 +211,10 @@ struct TransitionShape {
         var power: Float = 0
         for (side, p, bar) in [(DeckSide.a, a, e + k), (.b, b, c + k)] {
             for (stem, levels) in p where bar >= 0 && bar < levels.count {
-                // Past the end A is gone and B plays on its own.
-                let g: Gains = k < bars ? gains[side]?[stem]?[k] ?? (1, 1) : side == .a ? (0, 0) : (1, 1)
+                // Before it A plays on its own, past the end B does.
+                let g: Gains = k < first ? (side == .a ? (1, 1) : (0, 0))
+                    : k >= last ? (side == .a ? (0, 0) : (1, 1))
+                    : gains[side]?[stem]?[k - first] ?? (1, 1)
                 power += g.low * levels[bar].low + g.high * levels[bar].high
             }
         }
@@ -318,7 +322,9 @@ enum AutoPlacement {
         for e in entries.isEmpty ? [max(0, latest)] : entries {
             // A side: beat under the first half, energy before and during.
             let drumsA = min(1.2, sa.meanActivity(.drums, bars: e..<(e + max(1, span / 2))))
-            let preA = sa.meanLoudness(bars: (e - 8)..<e) + trimA
+            // Before the transition: for a Wash Out, before its bars.
+            let lead = echo ? min(n, 8) : 0
+            let preA = sa.meanLoudness(bars: (e - lead - 8)..<(e - lead)) + trimA
             let duringA = sa.meanLoudness(bars: e..<(e + max(1, span / 2))) + trimA
             var scoreA: Float = echo ? 0 : drumsA
             scoreA -= 0.12 * max(0, refA - preA - 2)
@@ -363,6 +369,23 @@ enum AutoPlacement {
                     var s = score + (handoff == vocalIn ? 0.15 : 0)
                     s -= 1.5 * sb.meanActivity(.vocals, bars: c..<(c + handoff))
                     s += 0.6 * sb.meanActivity(.vocals, bars: (c + handoff)..<(c + handoff + 4))
+                    // The mix, bar by bar, as the automation will play it,
+                    // through B's first two phrases on its own too: no hole
+                    // in the middle, no pile-up either, and no lull right
+                    // after the swap or B dropping into its breakdown as
+                    // soon as it has the floor.
+                    if let powerA, let powerB {
+                        let key = ShapeKey(handoff: handoff, lowSwap: sw ?? n)
+                        let shape = shapes[key] ?? TransitionShape(preset, bars: n, vocalBar: handoff, keysClash: keysClash,
+                                                                   lowSwap: sw)
+                        shapes[key] = shape
+                        let floor = min(preA, postB) - 2.5, ceiling = max(preA, postB) + 2.5
+                        for k in shape.first..<(shape.last + 8) {
+                            let level = shape.mixLevel(k, a: powerA, e: e, b: powerB, c: c)
+                            let hole = max(0, floor - level)
+                            s -= 0.1 * hole + 0.02 * hole * hole + 0.04 * max(0, level - ceiling)
+                        }
+                    }
                     guard !echo else {
                         if s > best.score { best = (e, c, handoff, sw, s) }
                         continue
@@ -372,24 +395,12 @@ enum AutoPlacement {
                     let out = min(handoff, sw ?? n)
                     s -= 1.5 * sa.meanActivity(.vocals, bars: (e + out)..<(e + max(out + 1, span)))
                     s -= 0.3 * sa.meanActivity(.vocals, bars: (e + out - 1)..<(e + out))
-                    // The mix, bar by bar, as the automation will play it: no
-                    // hole in the middle, no pile-up either.
-                    if let powerA, let powerB {
-                        let key = ShapeKey(handoff: handoff, lowSwap: sw ?? n)
-                        let shape = shapes[key] ?? TransitionShape(preset, bars: n, vocalBar: handoff, keysClash: keysClash,
-                                                                   lowSwap: sw)
-                        shapes[key] = shape
-                        // Through B's first two phrases on its own too: a lull
-                        // right after the swap, or B dropping into its
-                        // breakdown as soon as it has the floor, is as much a
-                        // hole.
-                        let floor = min(preA, postB) - 2.5, ceiling = max(preA, postB) + 2.5
-                        for k in 0..<(span + 8) {
-                            let level = shape.mixLevel(k, a: powerA, e: e, b: powerB, c: c)
-                            let hole = max(0, floor - level)
-                            s -= 0.1 * hole + 0.02 * hole * hole + 0.04 * max(0, level - ceiling)
-                        }
+                    // Best between lines on both sides: a vocal singing
+                    // through the handover gets cut in two.
+                    func through(_ s: TrackStructure, _ bar: Int) -> Float {
+                        min(s.meanActivity(.vocals, bars: (bar - 1)..<bar), s.meanActivity(.vocals, bars: bar..<(bar + 1)))
                     }
+                    s -= 0.8 * through(sb, c + handoff) + 0.4 * through(sa, e + out)
                     if s > best.score { best = (e, c, handoff, sw, s) }
                 }
             }

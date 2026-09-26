@@ -81,11 +81,13 @@ final class MixTests: XCTestCase {
             for lane in lanes {
                 XCTAssertFalse(lane[.volume].isEmpty, "\(preset) leaves \(lane.title) volume untouched")
             }
-            // B is silent before it enters; A is gone once the transition ends.
+            // B is silent before it enters (a Wash Out lets B's intro rise
+            // over the four bars before); A is gone once the transition ends.
             let end = 60 + 2 * Double(max(preset.defaultBars, 1)) + 1
+            let before = preset == .echoOut ? 60 - 2 * 4 - 1 : 59.0
             for lane in lanes {
                 if lane.side == .b {
-                    XCTAssertEqual(lane.value(.volume, at: 59), 0, "\(preset) \(lane.title)")
+                    XCTAssertEqual(lane.value(.volume, at: before), 0, "\(preset) \(lane.title)")
                     XCTAssertEqual(lane.value(.volume, at: end + 30), 1, "\(preset) \(lane.title)")
                 } else {
                     XCTAssertEqual(lane.value(.volume, at: end + 30), 0, "\(preset) \(lane.title)")

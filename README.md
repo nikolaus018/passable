@@ -9,7 +9,7 @@ A native macOS app that mixes songs like a DJ, stem by stem. Add songs to a set,
 3. When all songs are ready, Passable orders them. It minimises tempo stretch, prefers compatible keys, keeps the energy building, and favours pairs whose sections line up. **Auto-Order** re-runs this; drag rows to override.
 4. Every transition is planned from the two songs alone:
    - **Where:** B's next section (ideally its chorus or drop) lands as A leaves. Energy stays level, with no chorus into a quiet intro and no breakdown or fade-out inside the blend. Vocals hand over instead of clashing.
-   - **How:** exactly one kick and one bass line at a time. B enters with its low end killed, and the lows swap on one downbeat, as late as B's drop when B is still building. Clashing keys swap melodies instead of layering them. Tempos more than 6 % apart use Echo Out.
+   - **How:** exactly one kick and one bass line at a time. B enters with its low end killed, and the lows swap on one downbeat, as late as B's drop when B is still building. Clashing keys swap melodies instead of layering them. Tempos more than 8 % apart can't share a beat: A washes out under a low-pass, reverb and echo while B's intro rises at its own tempo, and B's beat drops on its downbeat.
    - **Levels:** every song's loud sections are matched (trim), so nothing jumps.
    - **Tempo:** B is matched to A only while they overlap, then glides home and plays untouched. Stretching is sample-exact: a phase-locked vocoder for tonal stems, with the original drum hits copied onto their new positions.
 5. **Listen** plays from four bars before a transition. **Edit** opens it in the Transition tab.
@@ -20,7 +20,7 @@ Shows the transition that's playing, or the one you picked with **Edit**: both s
 
 Any change goes straight into the set and unticks **Automatic**. Tick it again to return to the automatic transition. Undo and redo (⌘Z / ⇧⌘Z) cover your edits. Mute and solo apply to the set's playback.
 
-One transport serves both tabs: **Space** plays or pauses, **Return** cues the open transition, **⌘→** (or the keyboard's ⏭ key) jumps to just before the next transition, **⌘←** (⏮) goes back to the start of the current song's transition, and twice quickly to the one before. The ⏯ ⏮ ⏭ keys, headphone buttons and Control Center work while Passable is in the background. **Render** writes the whole set, or just this transition, as an AAC `.m4a` (256 kbps): the songs are already AAC, so a WAV would be ten times bigger and sound the same. Type a `.wav` name to get a 24-bit, 44.1 kHz WAV for other software. The set and your edits are remembered between launches.
+One transport serves both tabs: **Space** plays or pauses, **⌘→** (or the keyboard's ⏭ key) jumps to just before the next transition, **⌘←** (⏮) goes back to the start of the current song's transition, and twice quickly to the one before. The ⏯ ⏮ ⏭ keys, headphone buttons and Control Center work while Passable is in the background. **Render** writes the whole set, or just this transition, as an AAC `.m4a` (256 kbps): the songs are already AAC, so a WAV would be ten times bigger and sound the same. Type a `.wav` name to get a 24-bit, 44.1 kHz WAV for other software. The set and your edits are remembered between launches.
 
 ## Set files (.passable)
 

@@ -419,9 +419,15 @@ final class SetSession: ObservableObject {
         play()
     }
 
-    /// Four bars before the transition in the editor.
-    func cueFocused() {
-        if let focused { cue(transitionFrom: focused) }
+    /// Plays the set from where a song comes in (the start, for the first).
+    func play(song i: Int) {
+        guard let mix else { return }
+        if let t = mix.transitions.first(where: { $0.to == i }) {
+            jump(to: max(0, t.start))
+        } else {
+            jump(to: 0)
+        }
+        play()
     }
 
     /// Which song is playing (the incoming one once a transition is over).
@@ -472,7 +478,9 @@ final class SetSession: ObservableObject {
         }
     }
 
-    private var nowPlayingIndex: Int?
+    /// The song Control Center shows; published so the set list can follow
+    /// the music.
+    @Published private(set) var nowPlayingIndex: Int?
 
     /// What macOS shows as playing (and so where the media keys go).
     private func updateNowPlaying() {

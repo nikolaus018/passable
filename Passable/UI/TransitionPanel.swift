@@ -51,7 +51,7 @@ struct TransitionPanel: View {
                 Image(systemName: "metronome").frame(width: 16)
                 if session.preset == .echoOut {
                     Text(String(format: "B stays at %.2f BPM", own))
-                    Text("no overlap").foregroundStyle(.secondary)
+                    Text("no shared beat").foregroundStyle(.secondary)
                 } else {
                     Text(String(format: "B %.2f → %.2f BPM", own, a.grid.bpm))
                     Text(String(format: "%+.1f%%", percent))
@@ -60,16 +60,22 @@ struct TransitionPanel: View {
                 Spacer()
             }
             .help(session.preset == .echoOut
-                  ? "Echo Out never overlaps the songs, so B keeps its own tempo."
+                  ? "Wash Out never layers the two beats, so B keeps its own tempo."
                   : "B matches A's tempo only while they overlap, then glides back to its own over \(session.glideBars) bars and plays untouched."
-                    + (abs(percent) > 8 ? " That's a big stretch: Echo Out avoids it." : ""))
+                    + (abs(percent) > 8 ? " That's a big stretch: Wash Out avoids it." : ""))
             HStack(spacing: 6) {
                 Image(systemName: "tuningfork").frame(width: 16)
-                Text("\(b.key.camelotCode) → \(session.keyAfterShift?.camelotCode ?? "–")")
-                Text("A \(a.key.camelotCode)").foregroundStyle(.secondary)
+                if session.semitones == 0 {
+                    Text("B in \(b.key.camelotCode)")
+                } else {
+                    Text("B \(b.key.camelotCode) → \(session.keyAfterShift?.camelotCode ?? "–")")
+                }
+                Text("A in \(a.key.camelotCode)").foregroundStyle(.secondary)
                 if session.keysIncompatible {
-                    Text("clash").font(.caption).foregroundStyle(.orange)
-                        .help("The keys don't fit: presets swap the melodies instead of layering them.")
+                    Text("keys clash").font(.caption).foregroundStyle(.orange)
+                        .help("The keys don't fit: the melodies are swapped, never layered. Shifting B's key can fix it.")
+                } else {
+                    Text("keys fit").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Stepper(value: Binding(get: { session.semitones }, set: { session.setSemitones($0) }), in: -6...6) {

@@ -96,21 +96,36 @@ struct SetView: View {
     }
 
     private var list: some View {
-        List {
-            ForEach(Array(set.items.enumerated()), id: \.element.id) { index, item in
-                VStack(alignment: .leading, spacing: 6) {
-                    TrackRow(index: index, item: item, isPlaying: set.transport.isPlaying && set.currentIndex == index) {
-                        set.remove(item.id)
+        ScrollViewReader { proxy in
+            List {
+                ForEach(Array(set.items.enumerated()), id: \.element.id) { index, item in
+                    VStack(alignment: .leading, spacing: 6) {
+                        TrackRow(index: index, item: item, isPlaying: set.transport.isPlaying && set.currentIndex == index) {
+                            set.remove(item.id)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { set.play(song: index) }
+                        .contextMenu {
+                            Button("Play from Here") { set.play(song: index) }.disabled(set.mix == nil)
+                            Button("Remove from Set", role: .destructive) { set.remove(item.id) }
+                        }
+                        .help("Double-click to play the set from this song")
+                        if index < set.items.count - 1 {
+                            TransitionRow(index: index)
+                        }
                     }
-                    if index < set.items.count - 1 {
-                        TransitionRow(index: index)
-                    }
+                    .padding(.vertical, 2)
+                    .id(item.id)
                 }
-                .padding(.vertical, 2)
+                .onMove { set.move(from: $0, to: $1) }
             }
-            .onMove { set.move(from: $0, to: $1) }
+            .listStyle(.inset)
+            // Keep the playing song in view, like a DJ app's deck list.
+            .onChange(of: set.nowPlayingIndex) { _, i in
+                guard set.transport.isPlaying, let i, set.items.indices.contains(i) else { return }
+                withAnimation { proxy.scrollTo(set.items[i].id, anchor: .center) }
+            }
         }
-        .listStyle(.inset)
     }
 }
 
@@ -238,13 +253,6 @@ struct SetTransportBar: View {
             .keyboardShortcut(.rightArrow, modifiers: [.command])
             .disabled(set.mix == nil || !set.canSkipForward)
             .help("Jump to just before the next transition (⌘→ or ⏭)")
-
-            Button { set.cueFocused() } label: {
-                Label("Cue", systemImage: "arrow.uturn.backward")
-            }
-            .keyboardShortcut(.return, modifiers: [])
-            .disabled(set.focused == nil)
-            .help("Play from four bars before the transition in the editor (Return)")
 
             Text("\(Theme.time(transport.seconds)) / \(Theme.time(set.length))")
                 .font(.system(.body, design: .monospaced))

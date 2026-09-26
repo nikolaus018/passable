@@ -1,3 +1,4 @@
+import Accelerate
 import Foundation
 
 /// The mixing rules shared by the two-deck editor and the set builder.
@@ -19,9 +20,9 @@ enum MixMath {
         return a / (b * tempoMultiplier(a: a, b: b))
     }
 
-    /// Beyond this, stretching B is audible (and it is as far as a DJ's
-    /// key-locked pitch fader is usually pushed): Echo Out, no overlap.
-    static let maxStretch = 0.06
+    /// Beyond this, stretching B is audible even with its tempo matched
+    /// only through the blend: Wash Out, no shared beat.
+    static let maxStretch = 0.08
 
     static func recommendedPreset(rate: Double) -> TransitionPreset {
         abs(rate - 1) > maxStretch ? .echoOut : .stemSwap
@@ -51,7 +52,7 @@ enum MixMath {
 struct PairPlan: Equatable {
     var preset: TransitionPreset
     var bars: Int
-    /// B's rate during the overlap (1 for Echo Out).
+    /// B's rate during the overlap (1 for Wash Out).
     var rate: Double
     var placement: AutoPlacement.Result
     var keysClash: Bool
@@ -79,8 +80,8 @@ struct PairPlan: Equatable {
         var cost: Double
         switch stretch {
         case ..<3: cost = 0.05 * stretch
-        case ..<6: cost = 0.15 + 0.14 * (stretch - 3)
-        default: cost = 1.5 + 0.05 * stretch // Echo Out: fine once, not all night
+        case ..<8: cost = 0.15 + 0.14 * (stretch - 3)
+        default: cost = 1.5 + 0.05 * stretch // Wash Out: fine once, not all night
         }
         if keysClash { cost += 0.8 }
         let drop = SetOrdering.energy(a) - SetOrdering.energy(b)
@@ -243,8 +244,14 @@ struct SetMix: @unchecked Sendable {
         /// Bars of A the transition may start on: not before A is back at its
         /// own tempo.
         let entryRange: ClosedRange<Int>
-        /// Seconds B was moved to lock its hits onto A's.
+        /// Seconds B was moved to lock its hits onto A's, and how well the
+        /// two grooves sit together (0…1).
         var nudge: Double = 0
+        var grooveLock: Double = 1
+        /// Master seconds at which A's vocal is taken out and B's let in
+        /// (nil: not automatic, or no vocal to hand over).
+        var vocalOut: Double?
+        var vocalIn: Double?
     }
 
     var tracks: [Track]
@@ -288,18 +295,19 @@ enum BeatAlign {
     /// that it could lock onto the next subdivision.
     static let maxNudge = 0.04
 
-    /// Seconds to delay B by (negative: earlier) so its drum hits land on
-    /// A's, measured over the overlap `from…to` (master seconds).
+    /// How far to delay B (negative: earlier) so its drum hits land on A's,
+    /// and how well the two grooves sit together once they do, measured
+    /// over the overlap `from…to` (master seconds).
     /// - Parameters:
     ///   - a, b: the drums as they play (A at its own tempo there, B
     ///     stretched to it), output frame 0 at master `aOffset`/`bOffset`.
     static func nudge(a: StemAudio, aOffset: Double, b: StemAudio, bOffset: Double,
-                      from: Double, to: Double) -> Double {
+                      from: Double, to: Double) -> Result {
         let sr = AudioIO.sampleRate, hop = Double(TempoEstimator.hop)
         let pad = 2 * maxNudge
         let bFrom = from - bOffset - pad
         guard let ea = onsets(a, from: from - aOffset, to: to - aOffset),
-              let eb = onsets(b, from: bFrom, to: to - bOffset + pad) else { return 0 }
+              let eb = onsets(b, from: bFrom, to: to - bOffset + pad) else { return Result(nudge: 0, lock: 1) }
         func score(_ lag: Double, _ frames: Range<Int>) -> Double {
             var sum = 0.0
             for i in frames where ea[i] > 0 {
@@ -337,10 +345,22 @@ enum BeatAlign {
             return 4 * agreeing >= 3 * lags.count ? median : nil
         }
         let half = ea.count / 2
-        let votes = [consensus(lags(0..<half)), consensus(lags(half..<ea.count))].compactMap { $0 }
-        guard !votes.isEmpty else { return 0 }
-        let nudge = votes.reduce(0, +) / Double(votes.count)
-        return abs(nudge) >= 0.003 ? nudge : 0
+        let first = lags(0..<half), second = lags(half..<ea.count)
+        let votes = [consensus(first), consensus(second)].compactMap { $0 }
+        let nudge = votes.isEmpty ? 0 : votes.reduce(0, +) / Double(votes.count)
+        let all = first + second
+        // How much of the blend sits within 6 ms once nudged: below half,
+        // the two drum parts just don't groove together.
+        let lock = all.count < 4 ? 1 : Double(all.filter { abs($0 - nudge) <= 0.006 }.count) / Double(all.count)
+        return Result(nudge: abs(nudge) >= 0.003 ? nudge : 0, lock: lock)
+    }
+
+    struct Result {
+        /// Seconds to delay B by.
+        var nudge: Double
+        /// 0…1: how much of the overlap the two drum parts sit together.
+        var lock: Double
+        var grooves: Bool { lock >= 0.5 }
     }
 
     /// Onset strength above 150 Hz (the hats, snares and the kick's click,
@@ -365,6 +385,74 @@ enum BeatAlign {
             let mean = flux[lo..<hi].reduce(0, +) / Float(hi - lo)
             return max(0, flux[i] - mean)
         }
+    }
+}
+
+/// Where vocal lines start and stop, to the beat. A DJ lets the new vocal
+/// in on the breath before its next line and takes the old one out on the
+/// breath after its last, never mid-word; bars are too coarse for that.
+enum VocalPhrasing {
+    /// Mean square of `stem` over one beat starting at `time` (seconds of
+    /// the stem's own output), in dB.
+    private static func level(_ stem: StemAudio, at time: Double, beat: Double) -> Float {
+        let sr = AudioIO.sampleRate
+        let start = Int(time * sr), end = Int((time + beat) * sr)
+        guard start >= 0, end <= stem.count, end > start else { return -90 }
+        var l: Float = 0, r: Float = 0
+        vDSP_measqv(stem.left.pointer + start, 1, &l, vDSP_Length(end - start))
+        vDSP_measqv(stem.right.pointer + start, 1, &r, vDSP_Length(end - start))
+        return 10 * log10(max((l + r) / 2, 1e-9))
+    }
+
+    /// The level a vocal sings at: its loud bars (90th percentile).
+    static func reference(_ structure: TrackStructure?) -> Float? {
+        guard let levels = structure?.stemLevel?[StemKind.vocals.rawValue]?.filter({ $0 > -80 }).sorted(),
+              !levels.isEmpty else { return nil }
+        return levels[min(levels.count - 1, levels.count * 9 / 10)]
+    }
+
+    /// A beat with no more than breath and bleed in it.
+    private static func quiet(_ db: Float, _ reference: Float) -> Bool { db < reference - 16 }
+
+    /// Master time to let a vocal in at, from `earliest` on: at once if it's
+    /// silent there, else on the second beat of its next pause (two quiet
+    /// beats), so the next line plays whole. nil: it sings on for `within`
+    /// seconds, and letting it in anyway is the lesser evil.
+    /// - Parameter offset: master time of the stem's output frame 0.
+    static func lineStart(_ stem: StemAudio, offset: Double, reference: Float, earliest: Double, beat: Double,
+                          within: Double) -> Double? {
+        var t = earliest
+        var previousQuiet = quiet(level(stem, at: t - beat - offset, beat: beat), reference)
+        if previousQuiet && quiet(level(stem, at: t - offset, beat: beat), reference) { return t }
+        while t < earliest + within {
+            let q = quiet(level(stem, at: t - offset, beat: beat), reference)
+            if q && previousQuiet { return t }
+            previousQuiet = q
+            t += beat
+        }
+        return nil
+    }
+
+    /// Master time to take a vocal out at, as close to `target` as it
+    /// allows: the first beat of a pause (the line just ended) up to
+    /// `before` seconds earlier, or failing that `after` seconds later.
+    static func lineEnd(_ stem: StemAudio, offset: Double, reference: Float, target: Double, beat: Double,
+                        before: Double, after: Double) -> Double? {
+        func pause(_ t: Double) -> Bool {
+            quiet(level(stem, at: t - offset, beat: beat), reference)
+                && quiet(level(stem, at: t + beat - offset, beat: beat), reference)
+        }
+        var t = target
+        while t >= target - before {
+            if pause(t) { return t }
+            t -= beat
+        }
+        t = target + beat
+        while t <= target + after {
+            if pause(t) { return t }
+            t += beat
+        }
+        return nil
     }
 }
 
@@ -417,13 +505,6 @@ enum SetBuilder {
                                                     preset: plan.preset, bars: plan.bars, semitones: 0, lanes: [])
             edit.entryBar = min(max(edit.entryBar, entryRange.lowerBound), entryRange.upperBound)
             let rate = edit.preset == .echoOut ? 1 : MixMath.rate(a: ga.bpm, b: gb.bpm)
-            if !isEdited {
-                let keysClash = MixMath.keysClash(a.loaded.analysis.key, b.analysis.key)
-                edit.lanes = TransitionBuilder.build(edit.preset, lanes: Lane.allLanes(), start: ga.downbeat(edit.entryBar),
-                                                     barSeconds: ga.barSeconds, bars: edit.bars,
-                                                     vocalBar: plan.placement.vocalHandoff, keysClash: keysClash,
-                                                     lowSwap: plan.placement.lowSwap)
-            }
 
             // Editor time is A's own clock; the set's differs by a constant
             // once A is back at its own tempo.
@@ -447,10 +528,45 @@ enum SetBuilder {
             // Measured on the audio that plays: B's stretched drums against
             // A's. The glide may start a few ms off after the nudge; nobody
             // hears that, while re-stretching would cost a second render.
-            var nudge = 0.0
+            var align = BeatAlign.Result(nudge: 0, lock: 1)
             if span > 0, let drumsA = a.stems[.drums], let drumsB = matched.stems[.drums] {
-                nudge = BeatAlign.nudge(a: drumsA, aOffset: a.offset, b: drumsB, bOffset: offset,
-                                        from: start, to: end)
+                align = BeatAlign.nudge(a: drumsA, aOffset: a.offset, b: drumsB, bOffset: offset, from: start, to: end)
+            }
+            let nudge = align.nudge
+            // Vocals hand over between lines, not mid-word.
+            var vocalIn: Double?, vocalOut: Double?
+            if !isEdited, edit.preset == .echoOut, let vocalsA = a.stems[.vocals],
+               let ref = VocalPhrasing.reference(a.loaded.analysis.structure),
+               let t = VocalPhrasing.lineEnd(vocalsA, offset: a.offset, reference: ref, target: start - ga.barSeconds,
+                                             beat: ga.barSeconds / 4, before: 2 * ga.barSeconds, after: ga.barSeconds) {
+                vocalOut = (t - start) / ga.barSeconds
+            }
+            if !isEdited, span > 0, let vocalsA = a.stems[.vocals], let vocalsB = matched.stems[.vocals] {
+                let n = Double(edit.bars), bar = ga.barSeconds, beat = bar / 4
+                let v = min(n, max(n / 2, Double(plan.placement.vocalHandoff)))
+                let sw = min(n, max(n / 2, Double(plan.placement.lowSwap ?? edit.bars / 2)))
+                if let ref = VocalPhrasing.reference(b.analysis.structure),
+                   let t = VocalPhrasing.lineStart(vocalsB, offset: offset + nudge, reference: ref,
+                                                   earliest: start + v * bar, beat: beat, within: 4 * bar) {
+                    vocalIn = (t - start) / bar
+                }
+                let target = min(vocalIn ?? v, min(v, sw))
+                if let ref = VocalPhrasing.reference(a.loaded.analysis.structure),
+                   let t = VocalPhrasing.lineEnd(vocalsA, offset: a.offset, reference: ref, target: start + target * bar,
+                                                 beat: beat, before: 4 * bar, after: 2 * bar) {
+                    vocalOut = min((t - start) / bar, vocalIn ?? n)
+                }
+            }
+            if !isEdited {
+                // Grooves that won't lock (a swung beat against a straight
+                // one) aren't layered: A's beat plays on and B's drums come
+                // in whole on the swap.
+                let keysClash = MixMath.keysClash(a.loaded.analysis.key, b.analysis.key)
+                edit.lanes = TransitionBuilder.build(edit.preset, lanes: Lane.allLanes(), start: ga.downbeat(edit.entryBar),
+                                                     barSeconds: ga.barSeconds, bars: edit.bars,
+                                                     vocalBar: plan.placement.vocalHandoff, keysClash: keysClash,
+                                                     lowSwap: plan.placement.lowSwap, drumsLayer: align.grooves,
+                                                     vocalIn: vocalIn, vocalOut: vocalOut)
             }
             var incoming = SetMix.Track(url: tracks[k].url, loaded: b, map: map, matched: matched, offset: offset + nudge,
                                         envelopes: [:])
@@ -466,7 +582,9 @@ enum SetBuilder {
             planned.append(incoming)
             transitions.append(.init(from: k - 1, to: k, plan: plan, edit: edit, isEdited: isEdited, start: start,
                                      end: end, settled: settled, barSeconds: ga.barSeconds, delta: delta,
-                                     entryRange: entryRange, nudge: nudge))
+                                     entryRange: entryRange, nudge: nudge, grooveLock: align.lock,
+                                     vocalOut: vocalOut.map { start + $0 * ga.barSeconds },
+                                     vocalIn: vocalIn.map { start + $0 * ga.barSeconds }))
             settledBar = edit.cueBar + span + glideBars
             soloBars = minimumSoloBars
         }

@@ -40,10 +40,9 @@ struct PassableApp: App {
                     .keyboardShortcut("z", modifiers: [.command, .shift])
             }
             CommandMenu("Transport") {
-                // Space and Return live on the transport buttons instead: as
-                // menu key equivalents they'd swallow typing in the search sheet.
+                // Space lives on the transport button instead: as a menu key
+                // equivalent it would swallow typing in the search sheet.
                 Button("Play / Pause") { set.togglePlay() }
-                Button("Cue Transition") { set.cueFocused() }
                 Divider()
                 Button("Next Transition") { set.skipForward() }
                 Button("Back to Song Start") { set.skipBack() }

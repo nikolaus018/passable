@@ -296,7 +296,7 @@ final class Session: ObservableObject {
         return MixMath.rate(a: a, b: b)
     }
 
-    /// The rate B is actually matched at. Echo Out never overlaps the two
+    /// The rate B is actually matched at. Wash Out never layers the two
     /// tracks, so B keeps its own tempo and only its downbeat is lined up.
     var matchRate: Double { preset == .echoOut ? 1 : rate }
 
@@ -323,7 +323,7 @@ final class Session: ObservableObject {
             keyClash = nil
             return shift
         }
-        keyClash = "Keys clash (\(b.key.camelotCode) vs \(a.key.camelotCode)) and fixing it takes a big pitch shift. Echo Out avoids overlap."
+        keyClash = "Keys clash (\(b.key.camelotCode) vs \(a.key.camelotCode)) and fixing it takes a big pitch shift. Wash Out avoids layering them."
         return 0
     }
 
