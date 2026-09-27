@@ -331,10 +331,12 @@ struct TransitionBuilder {
             // whichever comes first: pulled any earlier, it leaves a hole.
             // Clashing keys: nothing of B's in its key (melody, voice)
             // plays over anything of A's (melody, bass line, voice). The
-            // melodies swap with the low end, and A's voice is gone by
-            // half-way or the swap, whichever comes first.
+            // melodies and voices all swap with the low end, so A's voice
+            // sings on until then: nothing of B's in a key is there yet.
             let vin = keysClash ? max(sw, vocalIn ?? v) : vocalIn ?? v
-            let out = min(vin, vocalOut ?? min(v, sw), keysClash ? min(2 * q, sw) : .infinity)
+            // A caller that heard where B's voice really starts singing may
+            // keep A's past the moment B's (still silent) channel opens.
+            let out = vocalOut ?? min(vin, sw)
             echoOutVocal(at: out)
             if keysClash {
                 // A's melody washes out into a reverb tail as B's lands on

@@ -1128,11 +1128,19 @@ enum SetBuilder {
                             && Harmony.fits([a.stems[.other], a.stems[.bass]].compactMap { $0 }, aOffset: aOffset,
                                             [vocalsB], bOffset: offset + nudge,
                                             from: start + n / 2 * bar, to: start + sw * bar)
-                        let first = overA ? n / 2 : max(n / 2, sw)
+                        // Where B takes the low end before half-way (A's own
+                        // beat left early), B has the floor from there: its
+                        // voice may come in on its own beat.
+                        let first = sw < n / 2 ? sw : overA ? n / 2 : max(n / 2, sw)
                         vocalFloor = first
+                        // Aim for the planned handoff while A still sings
+                        // there; where A has nothing to sing (or has had to
+                        // leave on an early swap), B's next line from its floor.
+                        let aSings = a.loaded.analysis.structure?.isActive(.vocals, bar: edit.entryBar + Int(first)) ?? true
+                        let aim = aSings && first >= n / 2 ? max(v, first) : first
                         let earliest = start + first * bar, latest = start + (max(v, first) + 4) * bar
                         if let t = VocalPhrasing.lineStart(vocalsB, offset: offset + nudge, reference: ref,
-                                                           target: start + max(v, first) * bar, earliest: earliest,
+                                                           target: start + aim * bar, earliest: earliest,
                                                            latest: latest, beat: beat) {
                             vocalIn = (t - start) / bar
                             vocalInKind = "breath"
@@ -1145,22 +1153,42 @@ enum SetBuilder {
                     // A's vocal sings on over B's beat until B's own arrives
                     // (an a cappella over the new song: both are heard), if
                     // its notes sit on B's chords there; otherwise it leaves
-                    // as B takes the low end.
-                    let untilB = vocalIn ?? v
+                    // as B takes the low end. Where B's own comes in is
+                    // where it really does: no line found, it opens on the
+                    // bar the builder gives it (never before its floor).
+                    // And not where B's channel opens (a pause) but where it
+                    // really sings: A's voice isn't cut into a silence that
+                    // lasts until B's next line.
+                    var untilB = vocalIn ?? max(v, vocalFloor.rounded(.up))
+                    if vocalIn != nil, let refB = VocalPhrasing.reference(b.analysis.structure) {
+                        var t = start + untilB * bar
+                        while t < start + (untilB + 4) * bar,
+                              !VocalPhrasing.sounding(vocalsB, offset: offset + nudge, reference: refB, at: t, beat: beat) {
+                            t += beat
+                        }
+                        untilB = (t - start) / bar
+                    }
                     // Only over a beat it grooves with: a voice phrased
                     // against another groove sounds off time.
                     let acappella = !keysClash && align.grooves && untilB > sw
                         && Harmony.fits([vocalsA], aOffset: aOffset,
                                         [matched.stems[.other], matched.stems[.bass]].compactMap { $0 }, bOffset: offset + nudge,
                                         from: start + sw * bar, to: start + untilB * bar)
-                    // Clashing keys swap the melodies half-way, and A's
-                    // voice is in A's key as much as its melody: it's gone
-                    // by then too, not singing over B's.
-                    let target = acappella ? untilB : keysClash ? min(untilB, min(n / 2, sw)) : min(untilB, min(v, sw))
+                    // Otherwise A's voice leaves as B's arrives or B takes
+                    // the low end, whichever is first: not at the bar B's
+                    // was planned for when B's has been held back to the
+                    // swap (beats that don't lock, notes that clash), which
+                    // left bars with no voice at all. Clashing keys swap
+                    // melodies and voices on the swap, so A's sings until
+                    // then over nothing of B's in a key. Never past the
+                    // swap unless it's an a cappella (B's beat is under it
+                    // there), never before B has come in.
+                    let target = acappella ? untilB : min(untilB, sw)
                     if let refA, let t = VocalPhrasing.lineEnd(vocalsA, offset: aOffset, reference: refA,
                                                                target: start + target * bar, beat: beat,
-                                                               before: 4 * bar, after: acappella || keysClash ? 0 : 2 * bar) {
-                        vocalOut = min((t - start) / bar, vocalIn ?? n, n)
+                                                               before: min(4, target) * bar,
+                                                               after: acappella || keysClash || target >= sw ? 0 : 2 * bar) {
+                        vocalOut = min((t - start) / bar, untilB, n)
                     }
                 }
             }

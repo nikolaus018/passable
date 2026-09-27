@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0383DC407B85DAC099B9F467 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E90F393D5126D1D1B90167C8 /* ContentView.swift */; };
+		0B0C7608C852F1B02B42C66B /* ChoreographyProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A58C009FFE955C2C4628EFC /* ChoreographyProbe.swift */; };
 		0B304481FCF7C128FDE18908 /* EndToEndTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D383015C45F285B6995AFF4 /* EndToEndTests.swift */; };
 		0BABBE71B89EDA3F694628B6 /* KeyDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FCB06E03A60D917E699FB6A /* KeyDetector.swift */; };
 		0F5CF077D02D833A5F5A1CDD /* TrackProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACD810EF2618C9A11628672 /* TrackProcessor.swift */; };
@@ -69,6 +70,7 @@
 		00A6192091A2A47FED7D0042 /* AnalysisTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisTests.swift; sourceTree = "<group>"; };
 		0D8665AF29BB0D1C52DA8B0B /* SetPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetPlanner.swift; sourceTree = "<group>"; };
 		0D944C20624564CB6056562D /* FFT.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFT.swift; sourceTree = "<group>"; };
+		1A58C009FFE955C2C4628EFC /* ChoreographyProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChoreographyProbe.swift; sourceTree = "<group>"; };
 		1D0E76ECD3BE8D66CBAC9876 /* TransitionLab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransitionLab.swift; sourceTree = "<group>"; };
 		207AD4A7DAD98931C0D36418 /* SetSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetSession.swift; sourceTree = "<group>"; };
 		24A5EFD8292D713991BF390F /* TimeStretcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimeStretcher.swift; sourceTree = "<group>"; };
@@ -250,6 +252,7 @@
 			isa = PBXGroup;
 			children = (
 				00A6192091A2A47FED7D0042 /* AnalysisTests.swift */,
+				1A58C009FFE955C2C4628EFC /* ChoreographyProbe.swift */,
 				6D383015C45F285B6995AFF4 /* EndToEndTests.swift */,
 				E437400E644FE3BB9ABE4583 /* LibraryFetch.swift */,
 				B69520316B09120BB126F804 /* MixTests.swift */,
@@ -366,6 +369,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C121BD7290CFD613DE300266 /* AnalysisTests.swift in Sources */,
+				0B0C7608C852F1B02B42C66B /* ChoreographyProbe.swift in Sources */,
 				0B304481FCF7C128FDE18908 /* EndToEndTests.swift in Sources */,
 				5A6238B318AA288716F24F77 /* LibraryFetch.swift in Sources */,
 				2462BF7F99A015EBCE55C3CC /* MixTests.swift in Sources */,

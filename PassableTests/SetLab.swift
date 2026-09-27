@@ -223,6 +223,24 @@ final class SetLab: XCTestCase {
                 }
             }
             busyBars.append(busy)
+            // A voice taken out where its song still sings, with nobody
+            // singing instead (the longest run of such bars in the blend
+            // and the four after it): A's cut before B's voice arrives, or
+            // B's held back where A has nothing to sing.
+            var vocalGap = 0, heldBack = 0
+            if t.edit.preset != .echoOut, let sa = mix.tracks[t.from].loaded.analysis.structure,
+               let sb = mix.tracks[t.to].loaded.analysis.structure {
+                let lead = Int(((t.start - from) / bar).rounded())
+                var runA = 0, runB = 0
+                for rel in 0..<min(t.edit.bars + 4, all.count - lead) {
+                    let k = lead + rel
+                    let silent = vocA[k] <= -40 && vocB[k] <= -40
+                    runA = silent && sa.isActive(.vocals, bar: t.edit.entryBar + rel) ? runA + 1 : 0
+                    runB = silent && sb.isActive(.vocals, bar: t.edit.cueBar + rel) ? runB + 1 : 0
+                    vocalGap = max(vocalGap, runA)
+                    heldBack = max(heldBack, runB)
+                }
+            }
             // Wash Out never layers the beats.
             let flams = t.edit.preset == .echoOut ? [] : kickOffsets(t, from: from, bars: bars)
             // Typical, not worst: in some windows the two patterns simply
@@ -250,7 +268,7 @@ final class SetLab: XCTestCase {
                 let n = Double(t.edit.bars), p = t.plan.placement
                 let gridIn = t.start + min(n, max(n / 2, Double(p.vocalHandoff))) * t.barSeconds
                 let vin = t.vocalIn ?? gridIn
-                let out = t.vocalOut ?? t.start + min(n, max(n / 2, Double(min(p.vocalHandoff, p.lowSwap ?? t.edit.bars)))) * t.barSeconds
+                let out = t.vocalOut ?? min(vin, t.start + min(n, Double(p.lowSwap ?? t.edit.bars)) * t.barSeconds)
                 // A blended out or B blended in on purpose isn't a cut; B
                 // opening on a word's attack is sounding by design.
                 if !t.vocalOutBlend, sounding(t.from, at: out) { phrasing += " A-CUT" }
@@ -259,13 +277,15 @@ final class SetLab: XCTestCase {
             // A Wash Out never layers two beats: its bridge is the blend.
             if together < min(6, t.edit.bars / 2 + 2), t.edit.preset != .echoOut { phrasing += " STRUNG-TOGETHER" }
             if busy > 2 { phrasing += " CROWDED" }
+            if vocalGap > 2 { phrasing += " VOCAL-GAP" }
             if melx2 > 0, keyClash > Harmony.clashTolerance { phrasing += " KEY-CLASH" }
             let line = String(format: "%2d→%2d at %@  %@  together %d bars  level %.1f → %.1f dB (%+.1f)  dip %.1f  bump %.1f  lowx2 %d  vocx2 %d  flam %.0f ms [%@] nudge %+.0f ms lock %.0f%%%@",
                               t.from + 1, t.to + 1, Theme.time(t.start), t.plan.preset.displayName, together, before, after,
                               after - before, dip, bump, lowx2, vocx2, flam,
                               flams.map { String(format: "%.0f", $0) }.joined(separator: " "), t.nudge * 1000, t.grooveLock * 100, phrasing)
             print(line)
-            print(String(format: "      busy %d bars  melodies together %d bars (clash %.2f)", busy, melx2, keyClash))
+            print(String(format: "      busy %d bars  melodies together %d bars (clash %.2f)  A cut, nobody singing %d bars; B held back, nobody singing %d bars", busy, melx2,
+                         keyClash, vocalGap, heldBack))
             let pp = t.plan.placement
             print("      placement expected together: \(pp.together.map(String.init) ?? "-"), handoff \(pp.vocalHandoff), B's vocal at "
                   + (pp.expectedVocalIn.map { String(format: "%.2f", $0) } ?? "-") + ", switch \(pp.lowSwap.map(String.init) ?? "-"), drop \(pp.dropMoment)")

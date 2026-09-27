@@ -888,16 +888,26 @@ enum AutoPlacement {
                                               drumsLayer: true))
                         }
                         let v = min(n, max(n / 2, handoff))
-                        // Clashing keys: B's voice waits for the swap.
-                        let first = clashHere ? max(n / 2, min(n, sw ?? n)) : n / 2
-                        let usual = echo ? 0 : AutoPlacement.vocalEntry(sb, cue: c, target: Double(max(v, first)),
-                                                                        earliest: Double(first),
-                                                                        latest: Double(max(v, first)) + 4)
+                        // Clashing keys: B's voice waits for the swap. So it
+                        // does where the beats don't lock (the builder only
+                        // lets it sing over A's beat where they do).
+                        // Where B takes the low end before half-way, its voice
+                        // may come in from there, on its own beat.
+                        let early = min(n, sw ?? n) < n / 2 ? sw : nil
+                        let swap = early ?? max(n / 2, min(n, sw ?? n))
+                        // Aimed at the handoff while A sings there, else at
+                        // B's next line from its floor (as the builder does).
+                        func entry(from first: Int) -> Double {
+                            let aim = sa.isActive(.vocals, bar: e + first) && first >= n / 2 ? max(v, first) : first
+                            return echo ? 0 : AutoPlacement.vocalEntry(sb, cue: c, target: Double(aim),
+                                                                       earliest: Double(first), latest: Double(max(v, first)) + 4)
+                        }
+                        let usual = entry(from: clashHere ? swap : early ?? n / 2)
                         plans.append(Plan(vocalBar: v, mashup: false, vin: usual, drumsLayer: true))
                         if preset == .stemSwap {
                             // First: usually the worst, so the rest can be
                             // skipped once the spot can't win.
-                            plans.insert(Plan(vocalBar: v, mashup: false, vin: usual, drumsLayer: false), at: 0)
+                            plans.insert(Plan(vocalBar: v, mashup: false, vin: entry(from: swap), drumsLayer: false), at: 0)
                         }
                         heardVocal = (plans.first { $0.mashup } ?? plans[plans.count - 1]).vin
                         var worstPenalty: Float = 0, fewest = Int.max
@@ -959,10 +969,10 @@ enum AutoPlacement {
                         if s > best.score { best = (e, c, handoff, sw, s); bestHeard = heard; bestVocal = heardVocal }
                         continue
                     }
-                    // A's vocal leaves when B's arrives or B takes the low
-                    // end, whichever is first; anything A sings later is cut.
-                    // Clashing keys: by half-way at the latest, with A's melody.
-                    let out = min(handoff, sw ?? n, clashHere ? n / 2 : n)
+                    // A's vocal leaves when B's arrives (where it will
+                    // really come in) or B takes the low end, whichever is
+                    // first; anything A sings later is cut.
+                    let out = min(Int((heardVocal ?? Double(handoff)).rounded(.down)), sw ?? n)
                     s -= 1.5 * sa.meanActivity(.vocals, bars: (e + out)..<(e + max(out + 1, span)))
                     s -= 0.3 * sa.meanActivity(.vocals, bars: (e + out - 1)..<(e + out))
                     // Best between lines on both sides: a vocal singing
