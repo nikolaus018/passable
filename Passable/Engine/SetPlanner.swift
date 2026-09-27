@@ -158,6 +158,12 @@ struct PairPlan: Equatable {
         // Clashing songs can't blend, only swap: next to each other they
         // sound like two songs in a row.
         if keysClash { cost += 1.2 }
+        // Nor can a blend where placement already knows the two are hardly
+        // heard together (a short one, B's intro too thin under A): as much
+        // two songs in a row as a clash, so priced like one.
+        if preset != .echoOut, let together = placement.together {
+            cost += 0.2 * Double(max(0, min(6, bars / 2 + 2) - together))
+        }
         // A song a semitone off its own key, for all of its time in the
         // set: only worth it where nothing else sits.
         cost += 0.5 * Double(abs(semitones))
@@ -400,6 +406,11 @@ struct SetMix: @unchecked Sendable {
         /// Bars of A the transition may start on: not before A is back at its
         /// own tempo.
         let entryRange: ClosedRange<Int>
+        /// Where the transition itself begins: B's first bar, or where a
+        /// Wash Out's bridge starts taking A's beat away.
+        var begins: Double {
+            start - (edit.preset == .echoOut ? Double(max(1, min(8, edit.bars))) : 0) * barSeconds
+        }
         /// Where to start listening: four bars before anything happens (a
         /// Wash Out begins up to eight bars before B's downbeat).
         var cue: Double {
@@ -561,8 +572,13 @@ enum BeatAlign {
         }
         let half = split.map { min(ea.count, max(0, Int((($0 - from) * sr / hop).rounded()))) } ?? ea.count / 2
         let first = lags(0..<half), second = lags(half..<ea.count)
-        let votes = [consensus(first), consensus(second)].compactMap { $0 }
-        let nudge = votes.isEmpty ? 0 : votes.reduce(0, +) / Double(votes.count)
+        // One nudge moves all of B, and the two halves can each sit at their
+        // own offset (B's intro hats against its main kit): their average
+        // sits under neither, which called beats that lock clearly (26 ms
+        // before the swap, 0 after) a flam throughout. Before the swap is
+        // where both kits play for bars, so it decides; A's drums linger
+        // after it only if they sit at the same nudge there.
+        let nudge = consensus(first) ?? consensus(second) ?? 0
         let all = first + second
         // Before the swap it's A's kit under B's tops, after it the other
         // way round: each half can groove or not on its own.
@@ -1106,7 +1122,11 @@ enum SetBuilder {
                                                          latest: start + window.latest * bar, beat: beat) {
                         if let refA {
                             if let tout = VocalPhrasing.lineEnd(vocalsA, offset: aOffset, reference: refA, target: tin,
-                                                                beat: beat, before: 4 * bar, after: 0), tout <= tin {
+                                                                beat: beat, before: 4 * bar, after: 0), tout <= tin,
+                               // A's line has to end right before B's starts:
+                               // cutting it bars early to fit B in is a hole,
+                               // not a mashup.
+                               tin - tout <= bar {
                                 vocalIn = (tin - start) / bar
                                 vocalOut = (tout - start) / bar
                                 mashup = true
@@ -1134,10 +1154,12 @@ enum SetBuilder {
                         let first = sw < n / 2 ? sw : overA ? n / 2 : max(n / 2, sw)
                         vocalFloor = first
                         // Aim for the planned handoff while A still sings
-                        // there; where A has nothing to sing (or has had to
-                        // leave on an early swap), B's next line from its floor.
+                        // there, but never past the swap: A's voice leaves
+                        // there (bar a cappella), so B's arrives there too.
+                        // Where A has nothing to sing (or has had to leave on
+                        // an early swap), B's next line from its floor.
                         let aSings = a.loaded.analysis.structure?.isActive(.vocals, bar: edit.entryBar + Int(first)) ?? true
-                        let aim = aSings && first >= n / 2 ? max(v, first) : first
+                        let aim = aSings && first >= n / 2 ? min(max(v, first), max(first, sw)) : first
                         let earliest = start + first * bar, latest = start + (max(v, first) + 4) * bar
                         if let t = VocalPhrasing.lineStart(vocalsB, offset: offset + nudge, reference: ref,
                                                            target: start + aim * bar, earliest: earliest,

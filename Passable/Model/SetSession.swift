@@ -425,10 +425,13 @@ final class SetSession: ObservableObject {
         return [0] + mix.transitions.map(\.cue)
     }
 
-    /// Jumps to just before the next transition.
+    /// Where Next lands: right where each transition begins, no lead-in.
+    private var transitionStarts: [Double] { mix?.transitions.map(\.begins) ?? [] }
+
+    /// Jumps straight to the next transition.
     func skipForward() {
         let now = transport.seconds
-        guard let next = cuePoints.first(where: { $0 > now + 0.5 }) else { return }
+        guard let next = transitionStarts.first(where: { $0 > now + 0.5 }) else { return }
         jump(to: next)
     }
 
@@ -445,7 +448,7 @@ final class SetSession: ObservableObject {
         if let i = transitionAt(seconds), i != focused { focus(i, reopen: false) }
     }
 
-    var canSkipForward: Bool { cuePoints.contains { $0 > transport.seconds + 0.5 } }
+    var canSkipForward: Bool { transitionStarts.contains { $0 > transport.seconds + 0.5 } }
 
     /// Four bars before a transition, to audition it.
     func cue(transitionFrom i: Int) {

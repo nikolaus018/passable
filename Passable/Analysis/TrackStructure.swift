@@ -898,7 +898,8 @@ enum AutoPlacement {
                         // Aimed at the handoff while A sings there, else at
                         // B's next line from its floor (as the builder does).
                         func entry(from first: Int) -> Double {
-                            let aim = sa.isActive(.vocals, bar: e + first) && first >= n / 2 ? max(v, first) : first
+                            let aim = sa.isActive(.vocals, bar: e + first) && first >= n / 2
+                                ? min(max(v, first), max(first, min(n, sw ?? n))) : first
                             return echo ? 0 : AutoPlacement.vocalEntry(sb, cue: c, target: Double(aim),
                                                                        earliest: Double(first), latest: Double(max(v, first)) + 4)
                         }
