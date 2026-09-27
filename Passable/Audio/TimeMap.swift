@@ -17,12 +17,18 @@ struct TimeMap: Equatable, Sendable {
         TimeMap(rate: rate, rampStart: .infinity, rampLength: 1)
     }
 
+    /// Rates closer to 1 than this are the same tempo: under a millisecond
+    /// over minutes of music. Aligning a glide to whole frames lengthens it
+    /// by up to 2 / |rate − 1| frames, which for tempos this close would be
+    /// longer than the song (120.00017 against 120.00018 BPM: 230 bars).
+    static let sameTempo = 1e-5
+
     /// A glide back to the original tempo. Its length is stretched by a
     /// fraction of a beat so that afterwards output and source differ by a
     /// whole number of frames: the rest of the track can then be copied from
     /// the source bit for bit instead of being processed at all.
     static func glide(rate: Double, rampStart: Double, rampLength: Double) -> TimeMap {
-        guard abs(rate - 1) > 1e-9 else { return .constant(1) }
+        guard abs(rate - 1) >= sameTempo else { return .constant(1) }
         let y0 = max(0, rampStart)
         // After the glide, source − output = (rate − 1)(y0 + D/2). Round it
         // in the direction that lengthens D rather than shortens it.

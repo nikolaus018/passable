@@ -152,6 +152,26 @@ final class MixTests: XCTestCase {
         }
     }
 
+    /// TiK ToK (120.00017 BPM) into DJ Got Us Fallin' In Love (120.00018):
+    /// aligning the glide to whole frames made it 230 bars long, so the
+    /// song never settled and the set stayed stuck on that transition.
+    func testSameTempoNeverGlidesForever() {
+        let sr = 44_100.0
+        let rate = MixMath.rate(a: 120.00017410332042, b: 120.00018341650201)
+        XCTAssertEqual(rate, 1)
+        XCTAssertFalse(TimeMap.glide(rate: 1 - 7.76e-8, rampStart: 60 * sr, rampLength: 2 * sr).hasGlide)
+        // Just past "the same tempo", the glide is lengthened by seconds at
+        // most, never minutes.
+        for r in [1 + 1.01e-5, 1 - 1.01e-5, 1 + 3e-5, 1.003] {
+            for start in [0.0, 30, 95.3, 200] {
+                let map = TimeMap.glide(rate: r, rampStart: start * sr, rampLength: 2 * sr)
+                XCTAssertGreaterThanOrEqual(map.rampLength, 2 * sr - 1)
+                XCTAssertLessThan(map.rampLength, 2 * sr + 2 / abs(r - 1) + 1, "rate \(r) start \(start)")
+                XCTAssertLessThan(map.rampLength / sr, 7, "rate \(r) start \(start)")
+            }
+        }
+    }
+
     func testPitchShiftKeepsTimingAndChangesPitch() {
         let sr = 44_100.0
         let n = Int(sr * 6)

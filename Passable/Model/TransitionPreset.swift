@@ -314,7 +314,8 @@ struct TransitionBuilder {
             // A's vocal echoes out as B's arrives or B takes the low end,
             // whichever comes first: pulled any earlier, it leaves a hole.
             let vin = vocalIn ?? v
-            let out = min(vin, vocalOut ?? min(v, sw))
+            // Clashing keys: A's voice leaves with its melody.
+            let out = min(vin, vocalOut ?? min(v, sw), keysClash ? 2 * q : .infinity)
             echoOutVocal(at: out)
             if keysClash {
                 // Clashing melodies never overlap: A's washes out into a
@@ -363,7 +364,7 @@ struct TransitionBuilder {
             // A rides its build; on the drop everything flips to B at once.
             let h = n / 2
             let vin = max(h, vocalIn ?? v)
-            let out = min(vin, vocalOut ?? h)
+            let out = min(vin, vocalOut ?? h, keysClash ? h : .infinity)
             if drumsLayer {
                 // B's tops from the first downbeat, opening up like a riser.
                 automate(.b, .drums, .volume, [(0, 0, .hold), (0.001, 1, .linear)])

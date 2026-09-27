@@ -14,10 +14,12 @@ enum MixMath {
         return [0.5, 1, 2].min { abs(log2(a / (b * $0))) < abs(log2(a / (b * $1))) }!
     }
 
-    /// B's rate while it plays under A.
+    /// B's rate while it plays under A: exactly 1 where the tempos are
+    /// the same (see `TimeMap.sameTempo`).
     static func rate(a: Double, b: Double) -> Double {
         guard a > 0, b > 0 else { return 1 }
-        return a / (b * tempoMultiplier(a: a, b: b))
+        let r = a / (b * tempoMultiplier(a: a, b: b))
+        return abs(r - 1) < TimeMap.sameTempo ? 1 : r
     }
 
     /// Beyond this, stretching B is audible even with its tempo matched
@@ -479,8 +481,11 @@ enum BeatAlign {
     /// - Parameters:
     ///   - a, b: the drums as they play (A at its own tempo there, B
     ///     stretched to it), output frame 0 at master `aOffset`/`bOffset`.
+    ///   - split: where the drums change hands (master seconds; nil:
+    ///     half-way). Before it B's tops layer under A's kit, after it A's
+    ///     may linger under B's, and each side is judged on its own.
     static func nudge(a: StemAudio, aOffset: Double, b: StemAudio, bOffset: Double,
-                      from: Double, to: Double) -> Result {
+                      from: Double, to: Double, split: Double? = nil) -> Result {
         let sr = AudioIO.sampleRate, hop = Double(onsetHop)
         let pad = 2 * maxNudge
         let bFrom = from - bOffset - pad
@@ -540,7 +545,7 @@ enum BeatAlign {
             let agreeing = lags.filter { abs($0 - median) <= 0.004 }.count
             return 4 * agreeing >= 3 * lags.count ? median : nil
         }
-        let half = ea.count / 2
+        let half = split.map { min(ea.count, max(0, Int((($0 - from) * sr / hop).rounded()))) } ?? ea.count / 2
         let first = lags(0..<half), second = lags(half..<ea.count)
         let votes = [consensus(first), consensus(second)].compactMap { $0 }
         let nudge = votes.isEmpty ? 0 : votes.reduce(0, +) / Double(votes.count)
@@ -850,6 +855,11 @@ enum SetBuilder {
     /// decides how much longer: as long as the song keeps its power.
     static let minimumSoloBars = 8
 
+    /// Bars past a blend's end in which A may still sound: its vocal (let
+    /// out no later than B's comes in, at most four bars past the end) and
+    /// its melody's dissolve (two bars past a switch on the last bar).
+    static let exitTail = 4
+
     /// - Parameters:
     ///   - edits: hand-shaped transitions, by pair.
     ///   - reuse: renditions from the last build, reused when their plan
@@ -922,16 +932,19 @@ enum SetBuilder {
                 let rate = edit.preset == .echoOut ? 1 : MixMath.rate(a: ga.bpm, b: gb.bpm)
                 let span = edit.preset == .echoOut ? 0 : edit.bars
                 let glideBars = edit.preset == .echoOut ? 0 : MixMath.glideBars(rate: rate)
-                // B glides home from the end of the blend: that far past its
-                // cue bar, in B's own output frames.
+                // B glides home once A is really gone: A's vocal and melody
+                // can sound up to `exitTail` bars past the blend, and at
+                // A's tempo they would drift off B's gliding beat.
+                let tail = span > 0 && abs(rate - 1) > 1e-9 ? exitTail : 0
                 let map = TimeMap.glide(rate: rate,
-                                        rampStart: (Double(span) * ga.barSeconds + gb.scaled(by: rate).downbeat(edit.cueBar)) * sr,
+                                        rampStart: (Double(span + tail) * ga.barSeconds
+                                                    + gb.scaled(by: rate).downbeat(edit.cueBar)) * sr,
                                         rampLength: Double(max(1, glideBars)) * ga.barSeconds * sr)
                 drafts.append(Draft(isEdited: isEdited, skip: skip, plan: plan, entryRange: entryRange,
                                     edit: edit, rate: rate, glideBars: glideBars,
                                     matchPlan: .init(map: map, semitones: edit.semitones)))
                 shifts.append(edit.semitones)
-                settledBar = edit.cueBar + span + glideBars
+                settledBar = edit.cueBar + span + tail + glideBars
                 soloBars = minimumSoloBars
             }
         }
@@ -1006,7 +1019,12 @@ enum SetBuilder {
             // hears that, while re-stretching would cost a second render.
             var align = BeatAlign.Result(nudge: 0, lock: 1)
             if span > 0, let drumsA = a.stems[.drums], let drumsB = matched.stems[.drums] {
-                align = BeatAlign.nudge(a: drumsA, aOffset: aOffset, b: drumsB, bOffset: offset, from: start, to: end)
+                // Where the builder hands the drums over (its `sw`).
+                let n = Double(edit.bars)
+                let handover = edit.preset == .dropSwap ? n / 2
+                    : min(n, max(n / 2, Double(plan.placement.lowSwap ?? edit.bars / 2)))
+                align = BeatAlign.nudge(a: drumsA, aOffset: aOffset, b: drumsB, bOffset: offset, from: start, to: end,
+                                        split: isEdited ? nil : start + handover * ga.barSeconds)
             }
             let nudge = align.nudge
             // Vocals hand over between lines, not mid-word.
@@ -1090,10 +1108,13 @@ enum SetBuilder {
                         && Harmony.fits([vocalsA], aOffset: aOffset,
                                         [matched.stems[.other], matched.stems[.bass]].compactMap { $0 }, bOffset: offset + nudge,
                                         from: start + sw * bar, to: start + untilB * bar)
-                    let target = acappella ? untilB : min(untilB, min(v, sw))
+                    // Clashing keys swap the melodies half-way, and A's
+                    // voice is in A's key as much as its melody: it's gone
+                    // by then too, not singing over B's.
+                    let target = acappella ? untilB : keysClash ? min(untilB, n / 2) : min(untilB, min(v, sw))
                     if let refA, let t = VocalPhrasing.lineEnd(vocalsA, offset: aOffset, reference: refA,
                                                                target: start + target * bar, beat: beat,
-                                                               before: 4 * bar, after: acappella ? 0 : 2 * bar) {
+                                                               before: 4 * bar, after: acappella || keysClash ? 0 : 2 * bar) {
                         vocalOut = min((t - start) / bar, vocalIn ?? n)
                     }
                 }
@@ -1107,10 +1128,11 @@ enum SetBuilder {
                 // one) aren't layered: A's beat plays on and B's drums come
                 // in whole on the swap.
                 // A roll into the drop is a moment only if it isn't every
-                // transition: at most one in three (a Drop Swap is built on
-                // it), and only after a blend long enough to be one.
+                // transition: at most one in three, and only after a blend
+                // long enough to be one. A Drop Swap is built on it, but
+                // never right after another roll: two in a row is a routine.
                 let dropMoment = plan.placement.dropMoment && edit.preset != .echoOut
-                    && (edit.preset == .dropSwap || (edit.bars >= 16 && sinceDrop >= 3))
+                    && (edit.preset == .dropSwap ? sinceDrop >= 1 : edit.bars >= 16 && sinceDrop >= 3)
                 sinceDrop = dropMoment ? 0 : sinceDrop + 1
                 let n = Double(edit.bars)
                 let switchBar = edit.preset == .dropSwap ? n / 2
