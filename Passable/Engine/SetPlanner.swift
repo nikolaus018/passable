@@ -56,7 +56,7 @@ enum MixMath {
     }
 
     /// The most an automatic transition pitches a song to fit the one
-    /// before: two semitones is about what a voice takes unnoticed.
+    /// before. Rarely used: a known song even a semitone off is noticed.
     static let maxKeyShift = 2
 
     /// Tempos this close layer a vocal over the other song's beat without
@@ -89,8 +89,8 @@ struct PairPlan: Equatable {
         let aKey = a.key.transposed(by: aShift)
         // Where the keys clash, B may be pitched into A's key: then the
         // melodies can layer and B can sing over A's beat. The shift stays
-        // on for all of B, so it costs a little of B's own sound, and
-        // placement decides whether what it buys is worth that.
+        // on for all of B, and a song everyone knows sounds wrong off its
+        // key, so it costs a lot: only a much better blend is worth it.
         var shifts = [0]
         if MixMath.keysClash(aKey, b.key),
            let shift = b.key.harmonicShift(toMatch: aKey, limit: MixMath.maxKeyShift), shift != 0 {
@@ -120,7 +120,6 @@ struct PairPlan: Equatable {
         var options = [(preset: preset, bars: preset.defaultBars, prior: preset == .echoOut ? 0 : length(preset.defaultBars))]
         if preset == .stemSwap {
             options.append((.stemSwap, 8, length(8)))
-            if abs(rate - 1) < 0.03 { options.append((.stemSwap, 32, length(32))) }
             options.append((.dropSwap, 16, length(16) - 0.2))
             options.append((.dropSwap, 8, length(8) - 0.2))
         }
@@ -129,7 +128,7 @@ struct PairPlan: Equatable {
         let best = options.flatMap { option in shifts.map { (option, $0) } }
             .map { option, shift in
                 (preset: option.preset, bars: option.bars, shift: shift, placement: place(option.preset, option.bars, shift),
-                 prior: option.prior - 0.35 * Float(abs(shift)))
+                 prior: option.prior - 1.0 * Float(abs(shift)))
             }
             .max { $0.placement.score + $0.prior < $1.placement.score + $1.prior }!
         return PairPlan(preset: best.preset, bars: best.bars, rate: best.preset == .echoOut ? 1 : rate,
@@ -151,7 +150,9 @@ struct PairPlan: Equatable {
         // Clashing songs can't blend, only swap: next to each other they
         // sound like two songs in a row.
         if keysClash { cost += 1.2 }
-        cost += 0.15 * Double(abs(semitones))
+        // A song a semitone off its own key, for all of its time in the
+        // set: only worth it where nothing else sits.
+        cost += 0.5 * Double(abs(semitones))
         let drop = SetOrdering.energy(a) - SetOrdering.energy(b)
         cost += drop > 0 ? 2.0 * drop : 0.2 * -drop
         cost -= 0.3 * Double(placement.score)
@@ -182,7 +183,12 @@ enum SetOrdering {
             DispatchQueue.concurrentPerform(iterations: n * n) { k in
                 let i = k / n, j = k % n
                 guard i != j else { return }
-                out[k] = PairPlan.make(a: analyses[i], b: analyses[j]).cost(a: analyses[i], b: analyses[j])
+                // As the set will play it: A has the floor from about a
+                // quarter in (after its own transition in), and leaves
+                // paced for a crowd, not wherever suits this pair best.
+                let a = analyses[i], soloFrom = a.grid.barCount(duration: a.duration) / 4
+                out[k] = PairPlan.make(a: a, b: analyses[j], entryRange: (soloFrom + SetBuilder.minimumSoloBars)...Int.max,
+                                       soloFrom: soloFrom).cost(a: a, b: analyses[j])
             }
         }
         return (0..<n).map { Array(flat[($0 * n)..<($0 * n + n)]) }
@@ -696,27 +702,27 @@ enum Harmony {
 
     /// B's pitch shift chosen from the notes that will actually overlap
     /// (a quarter to three quarters into the blend, A as it's heard), not
-    /// from the songs' overall keys: `preferred` if it fits, else the
-    /// smallest shift up to `MixMath.maxKeyShift` that does. nil: none fits
-    /// (or nothing to compare).
+    /// from the songs' overall keys. A shift stays on for all of B, and a
+    /// song everyone knows a semitone off sounds wrong, so B keeps its own
+    /// key wherever that sits; it moves only where it clearly clashes and
+    /// a shift (the key estimate's, or a semitone) clearly fixes that.
+    /// Where nothing fits, the melodies are swapped anyway: no shift.
     static func bestShift(a: TrackProcessor.Loaded, aShift: Int, entryBar: Int,
-                          b: TrackProcessor.Loaded, cueBar: Int, bars n: Int, preferred: Int) -> Int? {
+                          b: TrackProcessor.Loaded, cueBar: Int, bars n: Int, preferred: Int) -> Int {
         let ga = a.analysis.grid, gb = b.analysis.grid, q = Double(n) / 4
         let aFrom = ga.downbeat(entryBar) + q * ga.barSeconds, bFrom = gb.downbeat(cueBar) + q * gb.barSeconds
         guard let ca = chroma([a.stems[.other], a.stems[.bass]].compactMap { $0 }, offset: 0,
                               from: aFrom, to: aFrom + 2 * q * ga.barSeconds),
               let cb = chroma([b.stems[.other]].compactMap { $0 }, offset: 0,
-                              from: bFrom, to: bFrom + 2 * q * gb.barSeconds) else { return nil }
+                              from: bFrom, to: bFrom + 2 * q * gb.barSeconds) else { return 0 }
         let heard = transposed(ca, by: aShift)
-        // A DJ shifts sparingly (a known voice a tone off gets noticed):
-        // the key estimate's own shift, none, or a semitone.
-        let candidates = [preferred] + [0, 1, -1].filter { $0 != preferred }
-        // The one that sits best; the key estimate's, none, then a
-        // semitone where they're about as good.
-        let clashes = candidates.map { clash(heard, transposed(cb, by: $0)) }
-        let least = clashes.min()!
-        guard least <= 0.08 else { return nil }
-        return candidates[clashes.firstIndex { $0 <= least + 0.02 }!]
+        let own = clash(heard, cb)
+        guard own > clashTolerance else { return 0 }
+        let candidates = ([preferred, 1, -1] as [Int]).filter { $0 != 0 && abs($0) <= MixMath.maxKeyShift }
+        guard let best = candidates.min(by: { clash(heard, transposed(cb, by: $0)) < clash(heard, transposed(cb, by: $1)) })
+        else { return 0 }
+        let shifted = clash(heard, transposed(cb, by: best))
+        return shifted <= 0.08 && own - shifted >= 0.04 ? best : 0
     }
 
     /// `fits`, when both sides have notes to compare; nothing to clash
@@ -923,13 +929,17 @@ enum SetBuilder {
                 var edit = edits[key] ?? TransitionEdit(entryBar: plan.placement.entryBar, cueBar: plan.placement.cueBar,
                                                         preset: plan.preset, bars: plan.bars, semitones: plan.semitones,
                                                         lanes: [])
-                edit.entryBar = min(max(edit.entryBar, entryRange.lowerBound), entryRange.upperBound)
+                // A Wash Out's bridge starts before its entry: not inside
+                // A's own way in.
+                let bridge = edit.preset == .echoOut ? max(1, min(8, edit.bars)) : 0
+                edit.entryBar = min(max(edit.entryBar, min(entryRange.lowerBound + bridge, entryRange.upperBound)),
+                                    entryRange.upperBound)
                 // The key estimate proposes B's shift; where it hears a clash,
                 // the notes that will overlap decide the shift.
-                if !isEdited, edit.preset != .echoOut, plan.keysClash || plan.semitones != 0,
-                   let shift = Harmony.bestShift(a: a, aShift: shifts[k - 1], entryBar: edit.entryBar, b: b,
-                                                 cueBar: edit.cueBar, bars: edit.bars, preferred: edit.semitones) {
-                    edit.semitones = shift
+                if !isEdited {
+                    edit.semitones = edit.preset == .echoOut || !(plan.keysClash || plan.semitones != 0) ? 0
+                        : Harmony.bestShift(a: a, aShift: shifts[k - 1], entryBar: edit.entryBar, b: b,
+                                            cueBar: edit.cueBar, bars: edit.bars, preferred: edit.semitones)
                 }
                 let rate = edit.preset == .echoOut ? 1 : MixMath.rate(a: ga.bpm, b: gb.bpm)
                 let span = edit.preset == .echoOut ? 0 : edit.bars

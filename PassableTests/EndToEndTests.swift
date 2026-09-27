@@ -43,7 +43,10 @@ final class EndToEndTests: XCTestCase {
         XCTAssertEqual(gridA.firstDownbeat, 0.5, accuracy: 0.02)
         XCTAssertEqual(gridB.firstDownbeat, 0.3, accuracy: 0.02)
         XCTAssertEqual(session.rate, 124.0 / 118.0, accuracy: 0.002)
-        XCTAssertEqual(session.semitones, -2, "B was written two semitones above A")
+        // B was written two semitones above A: it keeps its own key, and
+        // the panel offers the shift that would let the melodies layer.
+        XCTAssertEqual(session.semitones, 0, "a song keeps its own key")
+        XCTAssertTrue(session.keyClash?.contains("-2 st") ?? false, session.keyClash ?? "no clash noted")
 
         // Matched B is as long as its time map says: A's tempo through the
         // blend, then its own.

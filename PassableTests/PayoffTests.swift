@@ -199,7 +199,7 @@ final class PayoffTests: XCTestCase {
         // bass and voice stay), about 0.55 dB per dB of EQ.
         XCTAssertEqual(room(-13), 0, "three parts of B are already within reach")
         XCTAssertEqual(room(-14), 4)
-        XCTAssertEqual(room(-20), 8, "at most 8 dB")
+        XCTAssertEqual(room(-20), 12, "at most 12 dB of EQ")
         XCTAssertEqual(room(-100), 0, "nothing to make room for")
     }
 

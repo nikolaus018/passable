@@ -323,15 +323,21 @@ final class Session: ObservableObject {
 
     var keyAfterShift: MusicalKey? { deckB.analysis?.key.transposed(by: semitones) }
 
-    /// Nil when the keys clash and no shift of ±2 or less fixes it.
+    /// Nil when the keys sit together; otherwise why the melodies swap.
     @Published private(set) var keyClash: String?
 
+    /// Songs keep their own key: a known song even a semitone off sounds
+    /// wrong for all of its time. Where the keys clash the melodies swap
+    /// rather than layer, and the panel says which shift would let them
+    /// layer, for the user to choose.
     private func autoShift(a: TrackAnalysis, b: TrackAnalysis) -> Int {
-        if let shift = b.key.harmonicShift(toMatch: a.key, limit: 2) {
+        if b.key.harmonicShift(toMatch: a.key, limit: 0) != nil {
             keyClash = nil
-            return shift
+        } else if let shift = b.key.harmonicShift(toMatch: a.key, limit: 2) {
+            keyClash = "Keys clash (\(b.key.camelotCode) vs \(a.key.camelotCode)): the melodies swap instead of layering. Shifting B by \(shift > 0 ? "+" : "")\(shift) st would let them layer."
+        } else {
+            keyClash = "Keys clash (\(b.key.camelotCode) vs \(a.key.camelotCode)) and fixing it takes a big pitch shift. The melodies swap instead of layering."
         }
-        keyClash = "Keys clash (\(b.key.camelotCode) vs \(a.key.camelotCode)) and fixing it takes a big pitch shift. Wash Out avoids layering them."
         return 0
     }
 

@@ -154,7 +154,9 @@ final class SetLab: XCTestCase {
             let after = all[(all.count - 8)...].reduce(0, +) / 8
             // The bar before a drop goes quiet on purpose (roll, bass out,
             // half a beat of silence): not a hole.
-            let dropBar = t.dropAt.map { Int((($0 - from) / bar).rounded()) - 1 }
+            // A Wash Out stops for half a beat before B's downbeat by design.
+            let dropBar = t.edit.preset == .echoOut ? Int(((t.start - from) / bar).rounded()) - 1
+                : t.dropAt.map { Int((($0 - from) / bar).rounded()) - 1 }
             let middle = all[8..<(all.count - 8)]
             // Nor is a break of a bar or two a song has of its own (the gap
             // before its drop or chorus): that's the record, not the
@@ -227,13 +229,16 @@ final class SetLab: XCTestCase {
                 if !t.vocalOutBlend, sounding(t.from, at: out) { phrasing += " A-CUT" }
                 if t.vocalInKind == "grid", sounding(t.to, at: vin) { phrasing += " B-MIDLINE" }
             }
-            if together < 6 { phrasing += " STRUNG-TOGETHER" }
+            // A Wash Out never layers two beats: its bridge is the blend.
+            if together < 6, t.edit.preset != .echoOut { phrasing += " STRUNG-TOGETHER" }
             let line = String(format: "%2d→%2d at %@  %@  together %d bars  level %.1f → %.1f dB (%+.1f)  dip %.1f  bump %.1f  lowx2 %d  vocx2 %d  flam %.0f ms [%@] nudge %+.0f ms lock %.0f%%%@",
                               t.from + 1, t.to + 1, Theme.time(t.start), t.plan.preset.displayName, together, before, after,
                               after - before, dip, bump, lowx2, vocx2, flam,
                               flams.map { String(format: "%.0f", $0) }.joined(separator: " "), t.nudge * 1000, t.grooveLock * 100, phrasing)
             print(line)
-            print("      placement expected together: \(t.plan.placement.together.map(String.init) ?? "-")")
+            let pp = t.plan.placement
+            print("      placement expected together: \(pp.together.map(String.init) ?? "-"), handoff \(pp.vocalHandoff), B's vocal at "
+                  + (pp.expectedVocalIn.map { String(format: "%.2f", $0) } ?? "-") + ", switch \(pp.lowSwap.map(String.init) ?? "-"), drop \(pp.dropMoment)")
             if t.edit.preset != .echoOut {
                 print(String(format: "      room %.0f dB  layered %@  lags ", t.room,
                              t.drumsLayered ? (t.drumsLinger ? "yes" : "before the swap") : "no")
@@ -307,6 +312,10 @@ final class SetLab: XCTestCase {
         print("Flagged:\n" + (worst.isEmpty ? "  none" : worst.joined(separator: "\n")))
         print("Bars both songs are heard: " + togetherBars.map(String.init).joined(separator: " ")
               + "  (under 6: \(togetherBars.filter { $0 < 6 }.count))")
+        let shifted = mix.transitions.filter { $0.edit.semitones != 0 }.count
+        let stretches = mix.transitions.filter { $0.edit.preset != .echoOut }.map { abs($0.plan.rate - 1) * 100 }
+        print(String(format: "Songs pitch-shifted: %d of %d;  stretch over 4%%: %d, largest %.1f%%", shifted,
+                     mix.transitions.count, stretches.filter { $0 > 4 }.count, stretches.max() ?? 0))
         print("Payoffs over \(mix.transitions.count) transitions: "
               + payoffCounts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
 

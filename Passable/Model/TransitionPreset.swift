@@ -205,7 +205,7 @@ struct TransitionBuilder {
     /// on over the new beat instead of vanishing with its bass.
     private mutating func makeRoom(at at: Double, until: Double, melody: Bool) {
         guard room > 0.25, at > 0, until > at else { return }
-        let cut = 0.5 - min(room, 8) / 80
+        let cut = 0.5 - min(room, 12) / 80
         for stem in melody ? [StemKind.drums, .other] : [.drums] {
             for band in [LaneParameter.mid, .high] {
                 automate(.a, stem, band, [(at - 0.25, 0.5, .sCurve), (at, cut, .hold), (until, 0.5, .hold)])
@@ -466,8 +466,11 @@ struct TransitionBuilder {
                 automate(.a, stem, .volume, [(-e, 1, .logarithmic), (-half, 0, .linear)])
             }
             automate(.a, .drums, .delay, [(-half - 1, 0, .exponential), (-half - 0.25, 0.6, .hold), (-half + 0.5, 0, .linear)])
+            // A's melody floats on into a reverb wash, whole, until the
+            // music stops for half a beat before B's downbeat (a fade from
+            // a bar out left two near-silent bars).
             automate(.a, .other, .reverb, [(-half, 0, .linear), (-0.5, 0.75, .hold), (0.001, 0, .linear)])
-            automate(.a, .other, .volume, [(-1, 1, .logarithmic), (0, 0, .linear)])
+            automate(.a, .other, .volume, [(-0.125, 1, .hold), (-0.124, 0, .linear)])
             let out = max(-e, min(0, vocalOut ?? -1))
             echoOutVocal(at: out, send: 0.85, tail: 2)
             // Clashing keys: B's melody only takes the last bar, after A's

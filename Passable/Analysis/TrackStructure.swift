@@ -393,7 +393,7 @@ struct TransitionShape {
 
     private struct Key: Hashable {
         let preset: TransitionPreset, bars: Int, vocalBar: Int?, keysClash: Bool, lowSwap: Int?, mashup: Bool
-        let room: Double, dropMoment: Bool, vocalIn: Double?
+        let room: Double, dropMoment: Bool, vocalIn: Double?, drumsLayer: Bool
     }
     private final class Cache: @unchecked Sendable {
         let lock = NSLock()
@@ -405,14 +405,16 @@ struct TransitionShape {
     /// alone, not on the songs, and placement asks for the same few
     /// thousand over and over (every pair, every spot).
     static func cached(_ preset: TransitionPreset, bars n: Int, vocalBar: Int?, keysClash: Bool, lowSwap: Int?,
-                       mashup: Bool, room: Double, dropMoment: Bool, vocalIn: Double?) -> TransitionShape {
+                       mashup: Bool, room: Double, dropMoment: Bool, vocalIn: Double?,
+                       drumsLayer: Bool = true) -> TransitionShape {
         let key = Key(preset: preset, bars: n, vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap, mashup: mashup,
-                      room: room, dropMoment: dropMoment, vocalIn: vocalIn)
+                      room: room, dropMoment: dropMoment, vocalIn: vocalIn, drumsLayer: drumsLayer)
         cache.lock.lock()
         if let shape = cache.shapes[key] { cache.lock.unlock(); return shape }
         cache.lock.unlock()
         let shape = TransitionShape(preset, bars: n, vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap,
-                                    mashup: mashup, room: room, dropMoment: dropMoment, vocalIn: vocalIn)
+                                    mashup: mashup, drumsLayer: drumsLayer, room: room, dropMoment: dropMoment,
+                                    vocalIn: vocalIn)
         cache.lock.lock()
         cache.shapes[key] = shape
         cache.lock.unlock()
@@ -499,7 +501,10 @@ extension TransitionShape {
                 side[i] += (gains[s]?[stem]?[k - first].high ?? 1) * levels[bar].high
             }
         }
-        return min(side[0], side[1]) >= 0.158 * (side[0] + side[1])
+        // Within 6 dB of each other: a little inside the 8 dB of the two
+        // together that makes a part heard, so the plan holds up where
+        // the level estimates are a dB or two off.
+        return min(side[0], side[1]) >= 0.2 * (side[0] + side[1])
     }
 }
 
@@ -555,8 +560,9 @@ enum AutoPlacement {
     /// above 150 Hz, as `shape` (written without room) lets it through,
     /// within 5 dB of everything of A there. A's voice isn't cut, so where
     /// it carries A that takes more off the rest. A DJ doesn't bury the
-    /// new song 10 dB under the old one, nor push it over. Whole dB, at
-    /// most 8 (past that A's beat thins into a shadow of itself).
+    /// new song 10 dB under the old one, nor push it over. Whole dB of
+    /// EQ, at most 12 (about 6.5 dB off A's drums and melody; past that
+    /// A's beat thins into a shadow of itself).
     static func room(_ shape: TransitionShape, a: [StemKind: [TransitionShape.Gains]], e: Int,
                      b: [StemKind: [TransitionShape.Gains]], c: Int, from: Int, to: Int) -> Double {
         guard to > from else { return 0 }
@@ -573,7 +579,7 @@ enum AutoPlacement {
         guard cuttable > 0, pb > 1e-3 * (cuttable + kept) else { return 0 }
         let within: Float = pow(10, -5 / 10)
         // The EQ takes about 0.55 dB off a part per dB cut (see `TransitionShape`).
-        return Double((0...8).first { r in pb >= within * (kept + cuttable * pow(10, -0.055 * Float(r))) } ?? 8)
+        return Double((0...12).first { r in pb >= within * (kept + cuttable * pow(10, -0.055 * Float(r))) } ?? 12)
     }
 
     /// Where the builder will open B's vocal (bars from B's entry), found
@@ -624,8 +630,10 @@ enum AutoPlacement {
         var dropMoment = false
         /// What makes this transition more than a crossfade, in words.
         var payoff: [String] = []
-        /// Bars the simulation expects both songs to be clearly heard in.
+        /// Bars the simulation expects both songs to be clearly heard in,
+        /// and where it expects B's vocal to come in (bars from B's entry).
         var together: Int?
+        var expectedVocalIn: Double?
     }
 
     /// - Parameters:
@@ -733,7 +741,7 @@ enum AutoPlacement {
 
         var best = (entry: entries.last ?? max(0, barsA - n), cue: cues.first ?? 0, handoff: vocalIn,
                     lowSwap: lowSwap(entry: entries.last ?? 0, cue: cues.first ?? 0), score: -Float.infinity)
-        var bestHeard: Int?
+        var bestHeard: Int?, bestVocal: Double?
         for e in entries.isEmpty ? [max(0, latest)] : entries {
             // A side: beat under the first half, energy before and during.
             let drumsA = min(1.2, sa.meanActivity(.drums, bars: e..<(e + max(1, span / 2))))
@@ -816,6 +824,7 @@ enum AutoPlacement {
                 for handoff in options {
                     var s = score + (handoff == vocalIn ? 0.15 : 0)
                     var heard: Int?
+                    var heardVocal: Double?
                     if handoff == mash {
                         // B singing over A's beat is the moment, best with
                         // its hook.
@@ -829,56 +838,85 @@ enum AutoPlacement {
                     // in the middle, no pile-up either, and no lull right
                     // after the swap or B dropping into its breakdown as
                     // soon as it has the floor.
+                    // The simulation below adds at most two (eight bars of
+                    // both songs), and everything after it only takes
+                    // away: a spot that can't beat the best even so isn't
+                    // worth simulating.
+                    if s + 2 <= best.score { continue }
                     if let powerA, let powerB {
                         // B's vocal where the builder will find its line.
-                        let vin: Double = {
-                            guard !echo else { return 0 }
-                            if handoff == mash {
-                                let w = TransitionBuilder.mashupWindow(bars: n)
-                                return AutoPlacement.vocalEntry(sb, cue: c, target: w.earliest, earliest: w.earliest,
-                                                                latest: w.latest)
+                        // A mashup only happens if it works as it plays
+                        // (grooves lock, B's voice sits on A's chords, a line
+                        // starts clean in time); otherwise B's vocal comes
+                        // in from half-way as usual. The spot has to work
+                        // either way: a mashup is the bonus, not the blend.
+                        // Likewise B's drums only layer under A's where the
+                        // two grooves lock, which is measured on the audio
+                        // later: the blend has to hold with B's melody,
+                        // bass and voice alone too.
+                        struct Plan { let vocalBar: Int, mashup: Bool, vin: Double, drumsLayer: Bool }
+                        var plans: [Plan] = []
+                        if !echo, handoff == mash {
+                            let w = TransitionBuilder.mashupWindow(bars: n)
+                            plans.append(Plan(vocalBar: handoff, mashup: true,
+                                              vin: AutoPlacement.vocalEntry(sb, cue: c, target: w.earliest,
+                                                                            earliest: w.earliest, latest: w.latest),
+                                              drumsLayer: true))
+                        }
+                        let v = min(n, max(n / 2, handoff))
+                        let usual = echo ? 0 : AutoPlacement.vocalEntry(sb, cue: c, target: Double(v), earliest: Double(n) / 2,
+                                                                        latest: Double(v) + 4)
+                        plans.append(Plan(vocalBar: v, mashup: false, vin: usual, drumsLayer: true))
+                        if preset == .stemSwap {
+                            // First: usually the worst, so the rest can be
+                            // skipped once the spot can't win.
+                            plans.insert(Plan(vocalBar: v, mashup: false, vin: usual, drumsLayer: false), at: 0)
+                        }
+                        heardVocal = (plans.first { $0.mashup } ?? plans[plans.count - 1]).vin
+                        var worstPenalty: Float = 0, fewest = Int.max
+                        for plan in plans {
+                            func shape(room: Double) -> TransitionShape {
+                                TransitionShape.cached(preset, bars: n, vocalBar: plan.vocalBar, keysClash: keysClash,
+                                                       lowSwap: sw, mashup: plan.mashup, room: room, dropMoment: drop,
+                                                       vocalIn: echo ? nil : plan.vin, drumsLayer: plan.drumsLayer)
                             }
-                            let v = Double(min(n, max(n / 2, handoff)))
-                            return AutoPlacement.vocalEntry(sb, cue: c, target: v, earliest: Double(n) / 2, latest: v + 4)
-                        }()
-                        func shape(room: Double) -> TransitionShape {
-                            TransitionShape.cached(preset, bars: n, vocalBar: handoff, keysClash: keysClash, lowSwap: sw,
-                                                   mashup: handoff == mash, room: room, dropMoment: drop,
-                                                   vocalIn: echo ? nil : vin)
+                            let flat = shape(room: 0)
+                            let room = preset == .stemSwap
+                                ? AutoPlacement.room(flat, a: powerA, e: e, b: powerB, c: c, from: step,
+                                                     to: max(step + 1, sw ?? n))
+                                : 0
+                            let shape = room == 0 ? flat : shape(room: room)
+                            // The floor is A's energy: B landing in its own
+                            // breakdown is as much a hole as a gap in the
+                            // blend. Per bar, so short and long blends
+                            // compete fairly. Measured from A at full power,
+                            // not from whatever A played last: after a
+                            // breakdown that would call a dead floor level.
+                            let floor = max(preA, refA - 4) - 2.5, ceiling = max(preA, postB) + 2.5
+                            let bars = shape.first..<(shape.last + 8)
+                            var penalty: Float = 0
+                            for k in bars {
+                                let level = shape.mixLevel(k, a: powerA, e: e, b: powerB, c: c)
+                                let hole = max(0, floor - level)
+                                penalty += 0.1 * hole + 0.02 * hole * hole + 0.04 * max(0, level - ceiling)
+                            }
+                            worstPenalty = max(worstPenalty, penalty * 24 / Float(bars.count))
+                            // A transition, not two songs in a row: both
+                            // clearly heard for a while.
+                            fewest = min(fewest, (shape.first..<shape.last).filter {
+                                shape.together($0, a: powerA, e: e, b: powerB, c: c)
+                            }.count)
+                            // The worst plan so far already sinks it.
+                            if s - worstPenalty + 0.25 * Float(min(fewest, 8)) - (echo ? 0 : 0.5 * Float(max(0, 8 - fewest)))
+                                <= best.score { break }
                         }
-                        let flat = shape(room: 0)
-                        let room = preset == .stemSwap
-                            ? AutoPlacement.room(flat, a: powerA, e: e, b: powerB, c: c, from: step, to: max(step + 1, sw ?? n))
-                            : 0
-                        let shape = room == 0 ? flat : shape(room: room)
-                        // The floor is A's energy: B landing in its own
-                        // breakdown is as much a hole as a gap in the blend.
-                        // Per bar, so short and long blends compete fairly.
-                        // Measured from A at full power, not from whatever
-                        // A played last: after a breakdown that would call a
-                        // dead floor level.
-                        let floor = max(preA, refA - 4) - 2.5, ceiling = max(preA, postB) + 2.5
-                        let bars = shape.first..<(shape.last + 8)
-                        var penalty: Float = 0
-                        for k in bars {
-                            let level = shape.mixLevel(k, a: powerA, e: e, b: powerB, c: c)
-                            let hole = max(0, floor - level)
-                            penalty += 0.1 * hole + 0.02 * hole * hole + 0.04 * max(0, level - ceiling)
-                        }
-                        s -= penalty * 24 / Float(bars.count)
-                        // A transition, not two songs in a row: both clearly
-                        // heard for a while. Six to eight bars of that is
-                        // a blend; more is just a longer one. Fewer than
-                        // four is two songs in a row, whatever else it has.
-                        let both = (shape.first..<shape.last).filter {
-                            shape.together($0, a: powerA, e: e, b: powerB, c: c)
-                        }.count
+                        s -= worstPenalty
+                        let both = fewest
                         s += 0.25 * Float(min(both, 8))
                         // Under six is two songs in a row, whatever else
                         // it has: a hook on the switch doesn't make up for
-                        // it. Aim for eight: this estimate runs a bar or
-                        // two over what plays where vocals move to their
-                        // lines.
+                        // it. Aim for eight: the level estimates run a dB
+                        // or two either way.
                         if !echo && both < 8 { s -= 0.5 * Float(8 - both) }
                         heard = both
                     }
@@ -888,7 +926,7 @@ enum AutoPlacement {
                         // in the bridge's last bars.
                         if let pausesB, !(pausesB.isQuiet(4 * c - 1) || pausesB.isQuiet(4 * c)) { s -= 0.8 }
                         if let pausesA, !pausesA.hasPause(in: (4 * (e - 3))...(4 * e)) { s -= 0.3 }
-                        if s > best.score { best = (e, c, handoff, sw, s); bestHeard = heard }
+                        if s > best.score { best = (e, c, handoff, sw, s); bestHeard = heard; bestVocal = heardVocal }
                         continue
                     }
                     // A's vocal leaves when B's arrives or B takes the low
@@ -909,7 +947,7 @@ enum AutoPlacement {
                     let window = handoff == mash ? (handoff, n / 2) : (n / 2, min(n, max(n / 2, handoff)) + 4)
                     if let pausesB, !pausesB.hasPause(in: (4 * (c + window.0))...(4 * (c + window.1))) { s -= 0.8 }
                     if let pausesA, !pausesA.hasPause(in: (4 * (e + out - 4))...(4 * (e + out + 2))) { s -= 0.3 }
-                    if s > best.score { best = (e, c, handoff, sw, s); bestHeard = heard }
+                    if s > best.score { best = (e, c, handoff, sw, s); bestHeard = heard; bestVocal = heardVocal }
                 }
             }
         }
@@ -942,6 +980,6 @@ enum AutoPlacement {
         notes.insert(contentsOf: payoff, at: 0)
         return Result(entryBar: best.entry, cueBar: best.cue, vocalHandoff: handoff, lowSwap: best.lowSwap,
                       reason: notes.joined(separator: " · "), score: best.score, mashup: isMashup,
-                      dropMoment: drops, payoff: payoff, together: bestHeard)
+                      dropMoment: drops, payoff: payoff, together: bestHeard, expectedVocalIn: bestVocal)
     }
 }
