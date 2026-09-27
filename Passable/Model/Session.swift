@@ -359,7 +359,10 @@ final class Session: ObservableObject {
     private var desiredPlan: TrackProcessor.MatchPlan? {
         guard deckA.loaded != nil, deckB.loaded != nil, let g = masterGrid else { return nil }
         let sr = AudioIO.sampleRate
-        let map = TimeMap.glide(rate: matchRate, rampStart: (transitionEnd - offsetB) * sr,
+        // As in a set: B glides home once A's melody has dissolved.
+        let tail = preset == .stemSwap
+            ? SetBuilder.exitTail(bars: transitionBars, lowSwap: lowSwap.flatMap { $0 <= transitionBars ? $0 : nil }) : 0
+        let map = TimeMap.glide(rate: matchRate, rampStart: (transitionEnd + Double(tail) * g.barSeconds - offsetB) * sr,
                                 rampLength: Double(glideBars) * g.barSeconds * sr)
         return .init(map: map, semitones: semitones)
     }

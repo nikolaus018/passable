@@ -213,6 +213,17 @@ struct TransitionBuilder {
         }
     }
 
+    /// The low end has one owner, voices included: a DJ's low knob works
+    /// on the whole channel, and a deep voice carries as much under 150 Hz
+    /// as a bass line's upper notes. B's vocal is low-cut until bar `at`,
+    /// A's from then on.
+    private mutating func handOverVocalLows(at: Double) {
+        automate(.b, .vocals, .low, [(at, 0, .hold), (at + 0.001, 0.5, .linear)])
+        if at < Double(bars) {
+            automate(.a, .vocals, .low, [(at, 0.5, .hold), (at + 0.001, 0, .linear)])
+        }
+    }
+
     /// A's vocal is gone at bar `out`: its last words are thrown into the
     /// echo, and the channel cuts there (or blends out over the bars
     /// before, if it's still singing), so the echo carries it away.
@@ -287,7 +298,8 @@ struct TransitionBuilder {
         switch preset {
         case .stemSwap:
             let q = n / 4
-            let sw = min(n, max(2 * q, Double(lowSwap ?? Int(2 * q))))
+            // Half-way or later, unless A's own low end left earlier.
+            let sw = min(n, max(1, Double(lowSwap ?? Int(2 * q))))
             // The low end has one owner at a time: A's kick and bass until the
             // half-way downbeat, B's from there. B's drums come in with their
             // lows killed (hats, snares, percussion) and take the kick over in
@@ -296,7 +308,7 @@ struct TransitionBuilder {
                 // B's hats, snares and percussion in on the first downbeat
                 // (the low kill keeps its kick out), a light high-pass
                 // opening up as the switch nears.
-                bringIn(.drums, at: 0, filter: 0.64, open: 2 * q)
+                bringIn(.drums, at: 0, filter: 0.64, open: min(2 * q, sw))
             } else {
                 automate(.b, .drums, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
             }
@@ -308,9 +320,19 @@ struct TransitionBuilder {
                     automate(.a, stem, .low, [(sw, 0.5, .hold), (sw + 0.001, 0, .linear)])
                 }
             }
-            // Hard bass swap on the same downbeat.
+            // Hard bass swap on the same downbeat: the low end, that is. As
+            // on a DJ mixer, B's bass channel is up from the start with its
+            // lows killed, so its line is heard (what makes many a song
+            // itself) without a second sub under A's; it rises with B's
+            // melody. Clashing keys keep it out, since it carries the key.
             automate(.a, .bass, .volume, [(sw, 1, .hold), (sw + 0.001, 0, .linear)])
-            automate(.b, .bass, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
+            if keysClash {
+                automate(.b, .bass, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
+            } else {
+                bringIn(.bass, at: 0, filter: 0.7, open: q)
+                automate(.b, .bass, .low, [(sw, 0, .hold), (sw + 0.001, 0.5, .linear)])
+            }
+            handOverVocalLows(at: sw)
             // A's vocal echoes out as B's arrives or B takes the low end,
             // whichever comes first: pulled any earlier, it leaves a hole.
             let vin = vocalIn ?? v
@@ -324,12 +346,14 @@ struct TransitionBuilder {
                 automate(.a, .other, .volume, [(2 * q, 1, .hold), (2 * q + 0.001, 0, .linear)])
                 automate(.b, .other, .volume, [(2 * q, 0, .hold), (2 * q + 0.001, 1, .linear)])
             } else if sw < n && !dropMoment {
-                // B melody follows the drums. A's plays on with it after B
+                // B's melody rises with its drums, a high-pass opening over
+                // the first quarter (a DJ's filter sweep, not a fader). A's
+                // plays on with it after B
                 // takes the low end (the keys fit: both are heard, which is
                 // what makes it a blend), then dissolves: low-pass sweep and
                 // a fade into a reverb wash. A melody never flams, so this
                 // holds whether or not the two beats groove.
-                bringIn(.other, at: q, filter: 0.7, open: q + 1)
+                bringIn(.other, at: 0, filter: 0.7, open: q)
                 let dissolve = max(sw, 3 * q)
                 automate(.a, .other, .filter, [(dissolve, 0.5, .sCurve), (4 * q, 0.14, .linear)])
                 automate(.a, .other, .reverb, [(3 * q, 0, .linear), (4 * q - 0.5, 0.7, .linear), (4 * q + 2, 0, .linear)])
@@ -337,10 +361,11 @@ struct TransitionBuilder {
             } else {
                 // B is still building or drops at the switch: A drives up
                 // to it and its melody dissolves under B over two bars.
-                // B's melody comes in a quarter in either way: only drums
-                // that won't groove would flam, a melody over A's beat
-                // doesn't, and it's what makes both songs heard.
-                bringIn(.other, at: q, filter: 0.7, open: q + 1)
+                // B's melody is in from the start either way, thin under a
+                // high-pass that opens by a quarter in: only drums that
+                // won't groove would flam, a melody over A's beat doesn't,
+                // and it's what makes both songs heard.
+                bringIn(.other, at: 0, filter: 0.7, open: q)
                 dissolveMelody(from: sw)
             }
             if drumsLayer && drumsLinger && sw < n && !dropMoment {
@@ -374,6 +399,7 @@ struct TransitionBuilder {
             }
             // No second kick before the drop.
             automate(.b, .drums, .low, [(h, 0, .hold), (h + 0.001, 0.5, .linear)])
+            handOverVocalLows(at: h)
             automate(.b, .bass, .volume, [(h, 0, .hold), (h + 0.001, 1, .linear)])
             if keysClash {
                 automate(.b, .other, .volume, [(h, 0, .hold), (h + 0.001, 1, .linear)])
@@ -408,6 +434,7 @@ struct TransitionBuilder {
             automate(.b, .drums, .low, [(2 * q, 0, .hold), (2 * q + 0.001, 0.5, .linear)])
             automate(.a, .bass, .low, [(2 * q, 0.5, .hold), (2 * q + 0.001, 0, .linear)])
             automate(.a, .drums, .low, [(2 * q, 0.5, .hold), (2 * q + 0.001, 0, .linear)])
+            handOverVocalLows(at: 2 * q)
             // B comes in whole on the first downbeat, its low end killed.
             for stem in [StemKind.drums, .bass] {
                 automate(.b, stem, .volume, [(0, 0, .hold), (0.001, 1, .linear)])

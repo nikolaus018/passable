@@ -57,6 +57,8 @@ final class SetLab: XCTestCase {
             renderer.setPositionImmediately(Int(from * sr))
             var lp = Biquad()
             lp.set(.lowPass(frequency: 150, q: 0.707), sampleRate: sr)
+            var lp2 = Biquad()
+            lp2.set(.lowPass(frequency: 150, q: 0.707), sampleRate: sr)
             var hp = Biquad()
             hp.set(.highPass(frequency: 150, q: 0.707), sampleRate: sr)
             var out: [Double] = []
@@ -67,7 +69,10 @@ final class SetLab: XCTestCase {
                 carry = exact - Double(n)
                 var l = [Float](repeating: 0, count: n), r = l
                 renderer.render(left: &l, right: &r, count: n)
-                if lowPass { lp.process(&l, &r, count: n) }
+                // Twice: the kick and bass, not the body of a melody or a
+                // voice just above them (a 12 dB/octave slope let 250 Hz
+                // count as low end).
+                if lowPass { lp.process(&l, &r, count: n); lp2.process(&l, &r, count: n) }
                 if highPass { hp.process(&l, &r, count: n) }
                 var e = 0.0
                 for k in 0..<n { e += Double(l[k] * l[k] + r[k] * r[k]) }
@@ -136,8 +141,9 @@ final class SetLab: XCTestCase {
             let bar = t.barSeconds
             // A Wash Out happens in the bars before B's downbeat.
             let from = t.start - Double(8 + (t.edit.preset == .echoOut ? min(8, t.edit.bars) : 0)) * bar
-            let glideEnd = mix.tracks[t.to].offset + mix.tracks[t.to].map.rampEnd / sr
-            let until = max(t.end, glideEnd.isFinite ? glideEnd : t.end) + 8 * bar
+            // "After" is B's first eight bars on its own: what the blend
+            // hands over, not wherever B's own song goes next.
+            let until = t.end + 8 * bar
             let bars = Int(((until - from) / bar).rounded(.up))
             let all = levels(from: from, seconds: Double(bars) * bar, step: bar) { _, _ in true }
             let lowA = levels(from: from, seconds: Double(bars) * bar, step: bar, lowPass: true) { i, _ in i == t.from }
@@ -150,7 +156,25 @@ final class SetLab: XCTestCase {
             // half a beat of silence): not a hole.
             let dropBar = t.dropAt.map { Int((($0 - from) / bar).rounded()) - 1 }
             let middle = all[8..<(all.count - 8)]
-            let judged = (8..<(all.count - 8)).filter { $0 != dropBar }.map { all[$0] }
+            // Nor is a break of a bar or two a song has of its own (the gap
+            // before its drop or chorus): that's the record, not the
+            // transition.
+            let lead = Int(((t.start - from) / bar).rounded())
+            func ownBreak(_ k: Int) -> Bool {
+                let sides = [(mix.tracks[t.from].loaded.analysis.structure?.loudness, t.edit.entryBar),
+                             (mix.tracks[t.to].loaded.analysis.structure?.loudness, t.edit.cueBar)]
+                return sides.contains { loud, first in
+                    guard let loud else { return false }
+                    let x = first + k - lead
+                    func notch(_ from: Int, _ to: Int) -> Bool {
+                        guard from > 0, to + 1 < loud.count else { return false }
+                        let deepest = loud[from...to].max()!
+                        return deepest <= loud[from - 1] - 3 && deepest <= loud[to + 1] - 3
+                    }
+                    return notch(x, x) || notch(x - 1, x) || notch(x, x + 1)
+                }
+            }
+            let judged = (8..<(all.count - 8)).filter { $0 != dropBar && !ownBreak($0) }.map { all[$0] }
             let dip = judged.isEmpty ? 0 : min(before, after) - judged.min()!
             let bump = middle.isEmpty ? 0 : middle.max()! - max(before, after)
             // A transition, not two songs in a row: bars where both are
@@ -162,7 +186,13 @@ final class SetLab: XCTestCase {
             let onlyB = levels(from: from, seconds: Double(bars) * bar, step: bar, highPass: true) { i, _ in i == t.to }
             let together = (0..<all.count).filter { onlyA[$0] > highs[$0] - 8 && onlyB[$0] > highs[$0] - 8 }.count
             togetherBars.append(together)
-            let lowx2 = (0..<all.count).filter { lowA[$0] > -38 && lowB[$0] > -38 && abs(lowA[$0] - lowB[$0]) < 10 }.count
+            // Two low ends heard as two: both close to what a full low end
+            // plays at here, not a breakdown's rumble against the other's
+            // leftovers.
+            let fullLow = max(lowA.max() ?? -120, lowB.max() ?? -120)
+            let lowx2 = (0..<all.count).filter {
+                min(lowA[$0], lowB[$0]) > fullLow - 12 && abs(lowA[$0] - lowB[$0]) < 10
+            }.count
             let vocx2 = (0..<all.count).filter { vocA[$0] > -40 && vocB[$0] > -40 && abs(vocA[$0] - vocB[$0]) < 12 }.count
             // Wash Out never layers the beats.
             let flams = t.edit.preset == .echoOut ? [] : kickOffsets(t, from: from, bars: bars)
@@ -203,6 +233,7 @@ final class SetLab: XCTestCase {
                               after - before, dip, bump, lowx2, vocx2, flam,
                               flams.map { String(format: "%.0f", $0) }.joined(separator: " "), t.nudge * 1000, t.grooveLock * 100, phrasing)
             print(line)
+            print("      placement expected together: \(t.plan.placement.together.map(String.init) ?? "-")")
             if t.edit.preset != .echoOut {
                 print(String(format: "      room %.0f dB  layered %@  lags ", t.room,
                              t.drumsLayered ? (t.drumsLinger ? "yes" : "before the swap") : "no")

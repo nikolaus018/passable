@@ -855,10 +855,12 @@ enum SetBuilder {
     /// decides how much longer: as long as the song keeps its power.
     static let minimumSoloBars = 8
 
-    /// Bars past a blend's end in which A may still sound: its vocal (let
-    /// out no later than B's comes in, at most four bars past the end) and
-    /// its melody's dissolve (two bars past a switch on the last bar).
-    static let exitTail = 4
+    /// Bars past a blend's end in which A may still sound: its melody's
+    /// dissolve after a switch on the blend's last bar. (A's vocal is out
+    /// by the end: past it, at A's tempo, it would drift off B's glide.)
+    static func exitTail(bars n: Int, lowSwap: Int?) -> Int {
+        min(n, max(1, lowSwap ?? n / 2)) >= n ? 2 : 0
+    }
 
     /// - Parameters:
     ///   - edits: hand-shaped transitions, by pair.
@@ -932,10 +934,11 @@ enum SetBuilder {
                 let rate = edit.preset == .echoOut ? 1 : MixMath.rate(a: ga.bpm, b: gb.bpm)
                 let span = edit.preset == .echoOut ? 0 : edit.bars
                 let glideBars = edit.preset == .echoOut ? 0 : MixMath.glideBars(rate: rate)
-                // B glides home once A is really gone: A's vocal and melody
-                // can sound up to `exitTail` bars past the blend, and at
-                // A's tempo they would drift off B's gliding beat.
-                let tail = span > 0 && abs(rate - 1) > 1e-9 ? exitTail : 0
+                // B glides home once A is really gone: A's melody can
+                // dissolve up to `exitTail` bars past the blend, and at
+                // A's tempo it would drift off B's gliding beat.
+                let tail = span > 0 && edit.preset == .stemSwap && abs(rate - 1) > 1e-9
+                    ? exitTail(bars: edit.bars, lowSwap: plan.placement.lowSwap) : 0
                 let map = TimeMap.glide(rate: rate,
                                         rampStart: (Double(span + tail) * ga.barSeconds
                                                     + gb.scaled(by: rate).downbeat(edit.cueBar)) * sr,
@@ -1022,7 +1025,7 @@ enum SetBuilder {
                 // Where the builder hands the drums over (its `sw`).
                 let n = Double(edit.bars)
                 let handover = edit.preset == .dropSwap ? n / 2
-                    : min(n, max(n / 2, Double(plan.placement.lowSwap ?? edit.bars / 2)))
+                    : min(n, max(1, Double(plan.placement.lowSwap ?? edit.bars / 2)))
                 align = BeatAlign.nudge(a: drumsA, aOffset: aOffset, b: drumsB, bOffset: offset, from: start, to: end,
                                         split: isEdited ? nil : start + handover * ga.barSeconds)
             }
@@ -1053,7 +1056,7 @@ enum SetBuilder {
             if !isEdited, span > 0, let vocalsA = a.stems[.vocals], let vocalsB = matched.stems[.vocals] {
                 let n = Double(edit.bars), bar = ga.barSeconds, beat = bar / 4
                 let v = min(n, max(n / 2, Double(plan.placement.vocalHandoff)))
-                let sw = min(n, max(n / 2, Double(plan.placement.lowSwap ?? edit.bars / 2)))
+                let sw = min(n, max(1, Double(plan.placement.lowSwap ?? edit.bars / 2)))
                 let refA = VocalPhrasing.reference(a.loaded.analysis.structure)
                 // A mashup moment: B's vocal sings over A's beat from early
                 // in the blend, where placement found it pays off. Only if
@@ -1115,7 +1118,7 @@ enum SetBuilder {
                     if let refA, let t = VocalPhrasing.lineEnd(vocalsA, offset: aOffset, reference: refA,
                                                                target: start + target * bar, beat: beat,
                                                                before: 4 * bar, after: acappella || keysClash ? 0 : 2 * bar) {
-                        vocalOut = min((t - start) / bar, vocalIn ?? n)
+                        vocalOut = min((t - start) / bar, vocalIn ?? n, n)
                     }
                 }
             }
@@ -1136,7 +1139,7 @@ enum SetBuilder {
                 sinceDrop = dropMoment ? 0 : sinceDrop + 1
                 let n = Double(edit.bars)
                 let switchBar = edit.preset == .dropSwap ? n / 2
-                    : min(n, max(n / 2, Double(plan.placement.lowSwap ?? edit.bars / 2)))
+                    : min(n, max(1, Double(plan.placement.lowSwap ?? edit.bars / 2)))
                 let rollBeat = dropMoment ? a.stems[.drums].flatMap {
                     BeatAlign.snareBeat($0, offset: aOffset, barStart: start + (switchBar - 1) * ga.barSeconds,
                                         beat: ga.barSeconds / 4)
@@ -1174,9 +1177,16 @@ enum SetBuilder {
                 // half a bar.
                 let bar = ga.barSeconds, beat = bar / 4
                 var outFade = 0.0, inFade = 0.0
+                // Right at the cut, on both sides: a word that runs a few
+                // hundred ms past the downbeat is cut in two, even if the
+                // beat after it is mostly quiet.
                 if let exit = made.vocalExit, let vocalsA = a.stems[.vocals],
                    let ref = VocalPhrasing.reference(a.loaded.analysis.structure),
-                   VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: ref, at: start + exit * bar, beat: beat) {
+                   VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: ref, at: start + exit * bar, beat: beat)
+                    || (VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: ref, at: start + exit * bar - beat / 2,
+                                               beat: beat / 2)
+                        && VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: ref, at: start + exit * bar,
+                                                  beat: beat / 2)) {
                     outFade = 1
                 }
                 if vocalIn == nil, let entry = made.vocalEntry, let vocalsB = matched.stems[.vocals],

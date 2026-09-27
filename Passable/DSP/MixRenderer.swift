@@ -65,7 +65,7 @@ final class MixRenderer: @unchecked Sendable {
     let sampleRate = AudioIO.sampleRate
 
     private struct LaneDSP {
-        var hp = Biquad(), lp = Biquad(), low = Biquad(), mid = Biquad(), high = Biquad()
+        var hp = Biquad(), lp = Biquad(), low = Biquad(), low2 = Biquad(), low3 = Biquad(), mid = Biquad(), high = Biquad()
         var filterValue = -1.0, lowValue = -1.0, midValue = -1.0, highValue = -1.0
     }
 
@@ -232,6 +232,8 @@ final class MixRenderer: @unchecked Sendable {
                 lanes[i].hp.process(ll, lr, count: n)
                 lanes[i].lp.process(ll, lr, count: n)
                 lanes[i].low.process(ll, lr, count: n)
+                lanes[i].low2.process(ll, lr, count: n)
+                lanes[i].low3.process(ll, lr, count: n)
                 lanes[i].mid.process(ll, lr, count: n)
                 lanes[i].high.process(ll, lr, count: n)
 
@@ -328,17 +330,42 @@ final class MixRenderer: @unchecked Sendable {
         // Where a DJ mixer's low knob sits: a kill takes the kick and the
         // bass line (what only one song may own at a time) and leaves the
         // body of everything else, so a song under the other still sounds
-        // like itself rather than a thin shadow.
-        Self.updateBand(&dsp.low, cached: &dsp.lowValue, value(envelopes, .low, t), sr) {
-            .lowShelf(frequency: 120, gainDB: $0)
+        // like itself rather than a thin shadow. A shelf deep enough to
+        // kill 50 Hz also takes 10 dB off 200 Hz, so a kill is an
+        // isolator's steep high-pass instead, at the 150 Hz where the
+        // planner splits low from high (6th-order Butterworth: −52 dB at
+        // 55, −33 at 80, −21 at 100, −0.6 at 175, −0.1 at 200); cuts
+        // short of that and boosts are the shelf.
+        let low = value(envelopes, .low, t)
+        if abs(low - dsp.lowValue) > 1e-5 {
+            dsp.lowValue = low
+            let db = LaneParameter.eqDecibels(low)
+            if db <= Self.killDB {
+                dsp.low.set(.highPass(frequency: 150, q: 0.5176), sampleRate: sr)
+                dsp.low2.set(.highPass(frequency: 150, q: 0.7071), sampleRate: sr)
+                dsp.low3.set(.highPass(frequency: 150, q: 1.9319), sampleRate: sr)
+            } else if abs(db) < 0.05 {
+                dsp.low.bypass()
+                dsp.low2.bypass()
+                dsp.low3.bypass()
+            } else {
+                dsp.low.set(.lowShelf(frequency: 120, gainDB: db), sampleRate: sr)
+                dsp.low2.bypass()
+                dsp.low3.bypass()
+            }
         }
         Self.updateBand(&dsp.mid, cached: &dsp.midValue, value(envelopes, .mid, t), sr) {
-            .peak(frequency: 1_200, q: 0.7, gainDB: $0)
+            // Broad, like a DJ mixer's mid: from the low mids to the
+            // presence, where a song's body and hooks sit.
+            .peak(frequency: 800, q: 0.5, gainDB: $0)
         }
         Self.updateBand(&dsp.high, cached: &dsp.highValue, value(envelopes, .high, t), sr) {
             .highShelf(frequency: 3_500, gainDB: $0)
         }
     }
+
+    /// A low band this far down is a kill (see `updateFilters`).
+    static let killDB = -24.0
 
     @inline(__always)
     private static func updateBand(_ filter: inout Biquad, cached: inout Double, _ v: Double, _ sr: Double,
