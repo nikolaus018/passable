@@ -737,6 +737,27 @@ enum AutoPlacement {
                 || (bound(boundB, c + switchAt) >= 0.5 && rise >= 3)
         }
         let powerA = AutoPlacement.powers(sa, trim: trimA), powerB = AutoPlacement.powers(sb, trim: trimB)
+        /// Whether the melodies clash at this spot, heard in the notes both
+        /// songs play where they'd overlap (as the builder will judge it on
+        /// the audio), not only guessed from the two keys. Where they do,
+        /// B's melody and voice wait for the swap, and the spot is judged
+        /// as that: planned as a blend, it would play as A alone.
+        let chromaA = sa.barChroma, chromaB = sb.barChroma
+        func notesClash(e: Int, c: Int, sw: Int?) -> Bool {
+            guard !echo, let chromaA, let chromaB else { return keysClash }
+            let q = n / 4, s = preset == .dropSwap ? n / 2 : min(n, max(1, sw ?? n / 2))
+            let until = min(max(s, q + 2), max(q + 2, n / 2)) + 2
+            func sum(_ x: [[Float]], _ r: Range<Int>) -> [Float]? {
+                let bars = r.clamped(to: 0..<x.count)
+                guard !bars.isEmpty else { return nil }
+                var out = [Float](repeating: 0, count: 12)
+                for b in bars { for p in 0..<12 { out[p] += x[b][p] } }
+                return out.contains { $0 > 0 } ? out : nil
+            }
+            guard let a = sum(chromaA, (e + q)..<(e + until)), let b = sum(chromaB, (c + q)..<(c + until))
+            else { return keysClash }
+            return !Harmony.fits(a, b, tolerance: keysClash ? Harmony.keysClashTolerance : Harmony.clashTolerance)
+        }
         let pausesA = sa.vocalQuietBeats, pausesB = sb.vocalQuietBeats
 
         var best = (entry: entries.last ?? max(0, barsA - n), cue: cues.first ?? 0, handoff: vocalIn,
@@ -790,6 +811,7 @@ enum AutoPlacement {
                 score += 0.4 * bound(boundB, c) + 0.8 * bound(boundB, c + span)
                 score -= 0.4 * Float(c) / Float(max(1, barsB))
                 let sw = lowSwap(entry: e, cue: c)
+                let clashHere = notesClash(e: e, c: c, sw: sw)
                 // The payoff: B's hook lands right as B takes over (a Wash
                 // Out drops straight into it), or B has a real drop there.
                 let switchAt = switchBar(sw)
@@ -822,6 +844,8 @@ enum AutoPlacement {
                 // landing there isn't muted until the end of the blend.
                 let options = sw.map { $0 > n / 2 && $0 < n && !handoffs.contains($0) ? handoffs + [$0] : handoffs } ?? handoffs
                 for handoff in options {
+                    // No mashup over notes that clash.
+                    if clashHere && handoff == mash { continue }
                     var s = score + (handoff == vocalIn ? 0.15 : 0)
                     var heard: Int?
                     var heardVocal: Double?
@@ -864,8 +888,11 @@ enum AutoPlacement {
                                               drumsLayer: true))
                         }
                         let v = min(n, max(n / 2, handoff))
-                        let usual = echo ? 0 : AutoPlacement.vocalEntry(sb, cue: c, target: Double(v), earliest: Double(n) / 2,
-                                                                        latest: Double(v) + 4)
+                        // Clashing keys: B's voice waits for the swap.
+                        let first = clashHere ? max(n / 2, min(n, sw ?? n)) : n / 2
+                        let usual = echo ? 0 : AutoPlacement.vocalEntry(sb, cue: c, target: Double(max(v, first)),
+                                                                        earliest: Double(first),
+                                                                        latest: Double(max(v, first)) + 4)
                         plans.append(Plan(vocalBar: v, mashup: false, vin: usual, drumsLayer: true))
                         if preset == .stemSwap {
                             // First: usually the worst, so the rest can be
@@ -874,9 +901,10 @@ enum AutoPlacement {
                         }
                         heardVocal = (plans.first { $0.mashup } ?? plans[plans.count - 1]).vin
                         var worstPenalty: Float = 0, fewest = Int.max
+                        let aim = min(8, n / 2 + 2)
                         for plan in plans {
                             func shape(room: Double) -> TransitionShape {
-                                TransitionShape.cached(preset, bars: n, vocalBar: plan.vocalBar, keysClash: keysClash,
+                                TransitionShape.cached(preset, bars: n, vocalBar: plan.vocalBar, keysClash: clashHere,
                                                        lowSwap: sw, mashup: plan.mashup, room: room, dropMoment: drop,
                                                        vocalIn: echo ? nil : plan.vin, drumsLayer: plan.drumsLayer)
                             }
@@ -907,17 +935,19 @@ enum AutoPlacement {
                                 shape.together($0, a: powerA, e: e, b: powerB, c: c)
                             }.count)
                             // The worst plan so far already sinks it.
-                            if s - worstPenalty + 0.25 * Float(min(fewest, 8)) - (echo ? 0 : 0.5 * Float(max(0, 8 - fewest)))
+                            if s - worstPenalty + 0.25 * Float(min(fewest, aim)) - (echo ? 0 : 0.5 * Float(max(0, aim - fewest)))
                                 <= best.score { break }
                         }
                         s -= worstPenalty
                         let both = fewest
-                        s += 0.25 * Float(min(both, 8))
+                        s += 0.25 * Float(min(both, aim))
                         // Under six is two songs in a row, whatever else
                         // it has: a hook on the switch doesn't make up for
-                        // it. Aim for eight: the level estimates run a dB
-                        // or two either way.
-                        if !echo && both < 8 { s -= 0.5 * Float(8 - both) }
+                        // it. Aim for eight in a long blend (the level
+                        // estimates run a dB or two either way), fewer in a
+                        // quick one: B's parts come in one at a time, and
+                        // more than that is piling up, not blending.
+                        if !echo && both < aim { s -= 0.5 * Float(aim - both) }
                         heard = both
                     }
                     guard !echo else {
@@ -931,7 +961,8 @@ enum AutoPlacement {
                     }
                     // A's vocal leaves when B's arrives or B takes the low
                     // end, whichever is first; anything A sings later is cut.
-                    let out = min(handoff, sw ?? n)
+                    // Clashing keys: by half-way at the latest, with A's melody.
+                    let out = min(handoff, sw ?? n, clashHere ? n / 2 : n)
                     s -= 1.5 * sa.meanActivity(.vocals, bars: (e + out)..<(e + max(out + 1, span)))
                     s -= 0.3 * sa.meanActivity(.vocals, bars: (e + out - 1)..<(e + out))
                     // Best between lines on both sides: a vocal singing
@@ -944,7 +975,9 @@ enum AutoPlacement {
                     // builder will look for one (half-way to four bars past
                     // the handoff), a line end for A's near its exit.
                     // Without one, B's voice has to fade in mid-sentence.
-                    let window = handoff == mash ? (handoff, n / 2) : (n / 2, min(n, max(n / 2, handoff)) + 4)
+                    let window = handoff == mash ? (handoff, n / 2)
+                        : clashHere ? (max(n / 2, min(n, sw ?? n)), max(min(n, max(n / 2, handoff)), min(n, sw ?? n)) + 4)
+                        : (n / 2, min(n, max(n / 2, handoff)) + 4)
                     if let pausesB, !pausesB.hasPause(in: (4 * (c + window.0))...(4 * (c + window.1))) { s -= 0.8 }
                     if let pausesA, !pausesA.hasPause(in: (4 * (e + out - 4))...(4 * (e + out + 2))) { s -= 0.3 }
                     if s > best.score { best = (e, c, handoff, sw, s); bestHeard = heard; bestVocal = heardVocal }

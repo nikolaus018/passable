@@ -137,6 +137,7 @@ final class SetLab: XCTestCase {
         var worst: [String] = []
         var payoffCounts: [String: Int] = [:]
         var togetherBars: [Int] = []
+        var busyBars: [Int] = []
         for t in mix.transitions {
             let bar = t.barSeconds
             // A Wash Out happens in the bars before B's downbeat.
@@ -196,6 +197,32 @@ final class SetLab: XCTestCase {
                 min(lowA[$0], lowB[$0]) > fullLow - 12 && abs(lowA[$0] - lowB[$0]) < 10
             }.count
             let vocx2 = (0..<all.count).filter { vocA[$0] > -40 && vocB[$0] > -40 && abs(vocA[$0] - vocB[$0]) < 12 }.count
+            // Too much at once: bars where three or more of the four tonal
+            // parts (each song's melody and voice) are clearly heard, and
+            // bars where both melodies are.
+            let melA = levels(from: from, seconds: Double(bars) * bar, step: bar, highPass: true) { i, s in
+                i == t.from && s == .other
+            }
+            let melB = levels(from: from, seconds: Double(bars) * bar, step: bar, highPass: true) { i, s in
+                i == t.to && s == .other
+            }
+            func heard(_ x: [Double], _ k: Int) -> Bool { x[k] > -45 && x[k] > highs[k] - 10 }
+            let busy = (0..<all.count).filter { k in [melA, vocA, melB, vocB].filter { heard($0, k) }.count >= 3 }.count
+            let melodyBars = (0..<all.count).filter { heard(melA, $0) && heard(melB, $0) }
+            let melx2 = melodyBars.count
+            // Whether the melodies that do overlap sit in one key, heard on
+            // the stems (A's melody and bass line against B's melody).
+            var keyClash: Float = 0
+            if let k0 = melodyBars.first, let k1 = melodyBars.last {
+                let ta = mix.tracks[t.from], tb = mix.tracks[t.to]
+                let f = from + Double(k0) * bar, u = from + Double(k1 + 1) * bar
+                if let ca = Harmony.chroma([ta.stems[.other], ta.stems[.bass]].compactMap { $0 }, offset: ta.stemOffset(at: f),
+                                           from: f, to: u),
+                   let cb = Harmony.chroma([tb.stems[.other]].compactMap { $0 }, offset: tb.stemOffset(at: f), from: f, to: u) {
+                    keyClash = Harmony.clash(ca, cb)
+                }
+            }
+            busyBars.append(busy)
             // Wash Out never layers the beats.
             let flams = t.edit.preset == .echoOut ? [] : kickOffsets(t, from: from, bars: bars)
             // Typical, not worst: in some windows the two patterns simply
@@ -230,12 +257,15 @@ final class SetLab: XCTestCase {
                 if t.vocalInKind == "grid", sounding(t.to, at: vin) { phrasing += " B-MIDLINE" }
             }
             // A Wash Out never layers two beats: its bridge is the blend.
-            if together < 6, t.edit.preset != .echoOut { phrasing += " STRUNG-TOGETHER" }
+            if together < min(6, t.edit.bars / 2 + 2), t.edit.preset != .echoOut { phrasing += " STRUNG-TOGETHER" }
+            if busy > 2 { phrasing += " CROWDED" }
+            if melx2 > 0, keyClash > Harmony.clashTolerance { phrasing += " KEY-CLASH" }
             let line = String(format: "%2d→%2d at %@  %@  together %d bars  level %.1f → %.1f dB (%+.1f)  dip %.1f  bump %.1f  lowx2 %d  vocx2 %d  flam %.0f ms [%@] nudge %+.0f ms lock %.0f%%%@",
                               t.from + 1, t.to + 1, Theme.time(t.start), t.plan.preset.displayName, together, before, after,
                               after - before, dip, bump, lowx2, vocx2, flam,
                               flams.map { String(format: "%.0f", $0) }.joined(separator: " "), t.nudge * 1000, t.grooveLock * 100, phrasing)
             print(line)
+            print(String(format: "      busy %d bars  melodies together %d bars (clash %.2f)", busy, melx2, keyClash))
             let pp = t.plan.placement
             print("      placement expected together: \(pp.together.map(String.init) ?? "-"), handoff \(pp.vocalHandoff), B's vocal at "
                   + (pp.expectedVocalIn.map { String(format: "%.2f", $0) } ?? "-") + ", switch \(pp.lowSwap.map(String.init) ?? "-"), drop \(pp.dropMoment)")
@@ -312,6 +342,7 @@ final class SetLab: XCTestCase {
         print("Flagged:\n" + (worst.isEmpty ? "  none" : worst.joined(separator: "\n")))
         print("Bars both songs are heard: " + togetherBars.map(String.init).joined(separator: " ")
               + "  (under 6: \(togetherBars.filter { $0 < 6 }.count))")
+        print("Crowded bars (3+ of the melodies and voices at once): " + busyBars.map(String.init).joined(separator: " "))
         let shifted = mix.transitions.filter { $0.edit.semitones != 0 }.count
         let stretches = mix.transitions.filter { $0.edit.preset != .echoOut }.map { abs($0.plan.rate - 1) * 100 }
         print(String(format: "Songs pitch-shifted: %d of %d;  stretch over 4%%: %d, largest %.1f%%", shifted,

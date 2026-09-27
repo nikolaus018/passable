@@ -72,12 +72,14 @@ final class PayoffTests: XCTestCase {
         XCTAssertEqual(value(plain.lanes, .a, .bass, bar: 7.95), 1)
     }
 
-    /// A Wash Out keeps going into B's drop: no stop that sounds like the
-    /// song ended.
+    /// A Wash Out keeps going into B's drop (A's melody carries the bridge
+    /// right up to it: no stop that sounds like the song ended), and B's
+    /// melody never plays over A's at another tempo.
     func testWashOutRunsStraightIntoTheDrop() {
         let lanes = TransitionBuilder.build(.echoOut, lanes: Lane.allLanes(), start: 60, barSeconds: 2, bars: 8)
-        XCTAssertGreaterThan(value(lanes, .b, .other, bar: -0.05, start: 60), 0.5)
-        XCTAssertGreaterThan(value(lanes, .b, .other, bar: -0.25, start: 60), 0.3)
+        XCTAssertEqual(value(lanes, .a, .other, bar: -0.25, start: 60), 1)
+        XCTAssertEqual(value(lanes, .b, .other, bar: -0.25, start: 60), 0)
+        XCTAssertEqual(value(lanes, .b, .other, bar: -2, start: 60), 0)
         XCTAssertEqual(value(lanes, .b, .drums, bar: 0.05, start: 60), 1)
         XCTAssertEqual(value(lanes, .b, .other, bar: 0.05, start: 60), 1)
     }
@@ -150,12 +152,17 @@ final class PayoffTests: XCTestCase {
         let drums = lanes.first { $0.side == .b && $0.stem == .drums }!
         XCTAssertGreaterThan(drums.value(.filter, at: 0.02), 0.6, "B's drums start with a light high-pass")
         XCTAssertEqual(drums.value(.filter, at: 16.1), 0.5, accuracy: 1e-9)
-        // B's melody is in from the first downbeat, thin under a high-pass
-        // that has opened by a quarter in.
-        XCTAssertEqual(value(lanes, .b, .other, bar: 0.01), 1)
+        // One part of B at a time: its melody a quarter in, thin under a
+        // high-pass that has opened two bars on; its bass line only on
+        // the swap; A's melody gone two bars after it.
+        XCTAssertEqual(value(lanes, .b, .other, bar: 3.9), 0)
+        XCTAssertEqual(value(lanes, .b, .other, bar: 4.01), 1)
         let other = lanes.first { $0.side == .b && $0.stem == .other }!
-        XCTAssertGreaterThan(other.value(.filter, at: 0.02), 0.6)
-        XCTAssertEqual(other.value(.filter, at: 2 * 4.01), 0.5, accuracy: 1e-9)
+        XCTAssertGreaterThan(other.value(.filter, at: 2 * 4.02), 0.6)
+        XCTAssertEqual(other.value(.filter, at: 2 * 6.01), 0.5, accuracy: 1e-9)
+        XCTAssertEqual(value(lanes, .b, .bass, bar: 7.9), 0)
+        XCTAssertEqual(value(lanes, .b, .bass, bar: 8.01), 1)
+        XCTAssertEqual(value(lanes, .a, .other, bar: 10.01), 0, accuracy: 1e-6)
         XCTAssertEqual(value(lanes, .a, .vocals, bar: 7.9), 1, "A's vocal isn't faded under the echo")
         XCTAssertEqual(value(lanes, .a, .vocals, bar: 8.01), 0)
         let vocals = lanes.first { $0.side == .a && $0.stem == .vocals }!
@@ -194,11 +201,11 @@ final class PayoffTests: XCTestCase {
         let shape = TransitionShape(.stemSwap, bars: 16, vocalBar: 16, keysClash: false, lowSwap: 8)
         func room(_ b: Float) -> Double { AutoPlacement.room(shape, a: song(-10), e: 0, b: song(b), c: 0, from: 5, to: 8) }
         XCTAssertEqual(room(-10), 0, "as loud: nothing to do")
-        // B's drums, melody and bass line are heard (lows killed, half a
-        // dB off their highs); only A's drums and melody give way (its
-        // bass and voice stay), about 0.55 dB per dB of EQ.
-        XCTAssertEqual(room(-13), 0, "three parts of B are already within reach")
-        XCTAssertEqual(room(-14), 4)
+        // B's drums and melody are heard (its bass line waits for the
+        // swap); only A's drums and melody give way (its bass and voice
+        // stay), about 0.55 dB per dB of EQ.
+        XCTAssertEqual(room(-11), 0, "two parts of B are already within reach")
+        XCTAssertEqual(room(-13), 7)
         XCTAssertEqual(room(-20), 12, "at most 12 dB of EQ")
         XCTAssertEqual(room(-100), 0, "nothing to make room for")
     }

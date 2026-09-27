@@ -199,16 +199,17 @@ struct TransitionBuilder {
     }
 
     /// A's drums (and melody, where the keys let B's layer) turn their mids
-    /// and highs down by `room` dB over the beat before bar `at`, and back
-    /// up on the switch at bar `until`, as A hands B the low end: a DJ's EQ
-    /// making space for the incoming song, then letting the old one sing
-    /// on over the new beat instead of vanishing with its bass.
+    /// and highs down by `room` dB over the beat before bar `at`, as B's
+    /// melody comes in: a DJ's EQ making space for the incoming song. The
+    /// cut stays while A's parts leave (lifting it on the switch pushed A
+    /// back up just as B's beat landed) and resets once they're gone.
     private mutating func makeRoom(at at: Double, until: Double, melody: Bool) {
         guard room > 0.25, at > 0, until > at else { return }
         let cut = 0.5 - min(room, 12) / 80
+        let reset = Double(bars) + 4
         for stem in melody ? [StemKind.drums, .other] : [.drums] {
             for band in [LaneParameter.mid, .high] {
-                automate(.a, stem, band, [(at - 0.25, 0.5, .sCurve), (at, cut, .hold), (until, 0.5, .hold)])
+                automate(.a, stem, band, [(at - 0.25, 0.5, .sCurve), (at, cut, .hold), (reset, 0.5, .hold)])
             }
         }
     }
@@ -320,53 +321,43 @@ struct TransitionBuilder {
                     automate(.a, stem, .low, [(sw, 0.5, .hold), (sw + 0.001, 0, .linear)])
                 }
             }
-            // Hard bass swap on the same downbeat: the low end, that is. As
-            // on a DJ mixer, B's bass channel is up from the start with its
-            // lows killed, so its line is heard (what makes many a song
-            // itself) without a second sub under A's; it rises with B's
-            // melody. Clashing keys keep it out, since it carries the key.
+            // Hard bass swap on the same downbeat. One bass line at a time,
+            // lows or not: two lines moving at once (each in its own key and
+            // rhythm) are mud, not a blend.
             automate(.a, .bass, .volume, [(sw, 1, .hold), (sw + 0.001, 0, .linear)])
-            if keysClash {
-                automate(.b, .bass, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
-            } else {
-                bringIn(.bass, at: 0, filter: 0.7, open: q)
-                automate(.b, .bass, .low, [(sw, 0, .hold), (sw + 0.001, 0.5, .linear)])
-            }
+            automate(.b, .bass, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
             handOverVocalLows(at: sw)
             // A's vocal echoes out as B's arrives or B takes the low end,
             // whichever comes first: pulled any earlier, it leaves a hole.
-            let vin = vocalIn ?? v
-            // Clashing keys: A's voice leaves with its melody.
-            let out = min(vin, vocalOut ?? min(v, sw), keysClash ? 2 * q : .infinity)
+            // Clashing keys: nothing of B's in its key (melody, voice)
+            // plays over anything of A's (melody, bass line, voice). The
+            // melodies swap with the low end, and A's voice is gone by
+            // half-way or the swap, whichever comes first.
+            let vin = keysClash ? max(sw, vocalIn ?? v) : vocalIn ?? v
+            let out = min(vin, vocalOut ?? min(v, sw), keysClash ? min(2 * q, sw) : .infinity)
             echoOutVocal(at: out)
             if keysClash {
-                // Clashing melodies never overlap: A's washes out into a
-                // reverb tail as B's lands on the swap.
-                automate(.a, .other, .reverb, [(2 * q - 1, 0, .linear), (2 * q, 0.8, .hold), (2 * q + 0.001, 0, .linear)])
-                automate(.a, .other, .volume, [(2 * q, 1, .hold), (2 * q + 0.001, 0, .linear)])
-                automate(.b, .other, .volume, [(2 * q, 0, .hold), (2 * q + 0.001, 1, .linear)])
-            } else if sw < n && !dropMoment {
-                // B's melody rises with its drums, a high-pass opening over
-                // the first quarter (a DJ's filter sweep, not a fader). A's
-                // plays on with it after B
-                // takes the low end (the keys fit: both are heard, which is
-                // what makes it a blend), then dissolves: low-pass sweep and
-                // a fade into a reverb wash. A melody never flams, so this
-                // holds whether or not the two beats groove.
-                bringIn(.other, at: 0, filter: 0.7, open: q)
-                let dissolve = max(sw, 3 * q)
-                automate(.a, .other, .filter, [(dissolve, 0.5, .sCurve), (4 * q, 0.14, .linear)])
-                automate(.a, .other, .reverb, [(3 * q, 0, .linear), (4 * q - 0.5, 0.7, .linear), (4 * q + 2, 0, .linear)])
-                automate(.a, .other, .volume, [(3 * q, 1, .logarithmic), (4 * q, 0, .linear)])
-            } else {
-                // B is still building or drops at the switch: A drives up
-                // to it and its melody dissolves under B over two bars.
-                // B's melody is in from the start either way, thin under a
-                // high-pass that opens by a quarter in: only drums that
-                // won't groove would flam, a melody over A's beat doesn't,
-                // and it's what makes both songs heard.
-                bringIn(.other, at: 0, filter: 0.7, open: q)
+                // A's melody washes out into a reverb tail as B's lands on
+                // the swap.
+                automate(.a, .other, .reverb, [(sw - 1, 0, .linear), (sw, 0.8, .hold), (sw + 0.001, 0, .linear)])
+                automate(.a, .other, .volume, [(sw, 1, .hold), (sw + 0.001, 0, .linear)])
+                automate(.b, .other, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
+            } else if mashup {
+                // B's voice is the thing heard over A's beat: its melody
+                // waits for the swap, and A's dissolves under it.
+                automate(.b, .other, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
                 dissolveMelody(from: sw)
+            } else {
+                // One part of B at a time, as a DJ brings them in: its tops
+                // first, its melody a quarter in under a high-pass that
+                // opens over the next eighth. The two melodies share at
+                // most the bars from there to two past the swap, or past
+                // half-way where B is still building up to a late swap (A's
+                // beat and bass carry it there, not two melodies); A's then
+                // dissolves (low-pass sweep into a reverb wash), so there's
+                // never more than one song's harmony for long.
+                bringIn(.other, at: q, filter: 0.7, open: q + max(1, q / 2))
+                dissolveMelody(from: min(max(sw, q + 2), max(q + 2, 2 * q)))
             }
             if drumsLayer && drumsLinger && sw < n && !dropMoment {
                 // A's tops thin out and hand over.
@@ -435,10 +426,10 @@ struct TransitionBuilder {
             automate(.a, .bass, .low, [(2 * q, 0.5, .hold), (2 * q + 0.001, 0, .linear)])
             automate(.a, .drums, .low, [(2 * q, 0.5, .hold), (2 * q + 0.001, 0, .linear)])
             handOverVocalLows(at: 2 * q)
-            // B comes in whole on the first downbeat, its low end killed.
-            for stem in [StemKind.drums, .bass] {
-                automate(.b, stem, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
-            }
+            // B's drums come in whole on the first downbeat, their low end
+            // killed; its bass line on the swap (one line at a time).
+            automate(.b, .drums, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
+            automate(.b, .bass, .volume, [(2 * q, 0, .hold), (2 * q + 0.001, 1, .linear)])
             echoOutVocal(at: 2 * q)
             if keysClash {
                 automate(.a, .other, .reverb, [(2 * q - 1, 0, .linear), (2 * q, 0.8, .hold), (2 * q + 0.001, 0, .linear)])
@@ -471,14 +462,14 @@ struct TransitionBuilder {
             // a bar out left two near-silent bars).
             automate(.a, .other, .reverb, [(-half, 0, .linear), (-0.5, 0.75, .hold), (0.001, 0, .linear)])
             automate(.a, .other, .volume, [(-0.125, 1, .hold), (-0.124, 0, .linear)])
+            // The echo is timed to A's tempo: its send closes by B's
+            // downbeat, so no more than its last repeats ring over B's beat.
             let out = max(-e, min(0, vocalOut ?? -1))
-            echoOutVocal(at: out, send: 0.85, tail: 2)
-            // Clashing keys: B's melody only takes the last bar, after A's
-            // has washed away.
-            let rise = keysClash ? min(1, half) : half
-            automate(.b, .other, .volume, [(-rise, 0, .exponential), (0, 1, .linear)])
-            automate(.b, .other, .filter, [(-rise, 0.72, .sCurve), (0, 0.5, .linear)])
-            for stem in [StemKind.drums, .bass] {
+            echoOutVocal(at: out, send: 0.85, tail: max(0.25, min(2, -out)))
+            // The tempos differ: B's melody never plays over A's (two
+            // rhythms that can't line up). It lands with B's beat, as A's
+            // is washing away.
+            for stem in [StemKind.drums, .bass, .other] {
                 automate(.b, stem, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
             }
             bringInVocal(at: 0)

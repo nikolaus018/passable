@@ -30,6 +30,14 @@ enum MixMath {
         abs(rate - 1) > maxStretch ? .echoOut : .stemSwap
     }
 
+    /// As above, from the two tempos. Songs detected at half or double
+    /// time of each other have bars of different lengths on their grids
+    /// (one's bar is two of the other's, or half), so their downbeats and
+    /// phrases can't be lined up bar for bar: never a beat blend.
+    static func recommendedPreset(a: Double, b: Double) -> TransitionPreset {
+        tempoMultiplier(a: a, b: b) != 1 ? .echoOut : recommendedPreset(rate: rate(a: a, b: b))
+    }
+
     /// Bars B takes to glide from A's tempo back to its own once A is gone:
     /// about 1.5 % per bar, so the change is felt as a lift, not heard as a
     /// wobble.
@@ -85,7 +93,7 @@ struct PairPlan: Equatable {
     static func make(a: TrackAnalysis, b: TrackAnalysis, entryRange: ClosedRange<Int>? = nil, aShift: Int = 0,
                      soloFrom: Int? = nil, skip: Range<Int>? = nil) -> PairPlan {
         let rate = MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)
-        let preset = MixMath.recommendedPreset(rate: rate)
+        let preset = MixMath.recommendedPreset(a: a.grid.bpm, b: b.grid.bpm)
         let aKey = a.key.transposed(by: aShift)
         // Where the keys clash, B may be pitched into A's key: then the
         // melodies can layer and B can sing over A's beat. The shift stays
@@ -202,7 +210,7 @@ enum SetOrdering {
     /// Which ordered pairs can only be a Wash Out (tempos too far apart).
     static func washOuts(_ analyses: [TrackAnalysis]) -> [[Bool]] {
         analyses.map { a in
-            analyses.map { b in MixMath.recommendedPreset(rate: MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)) == .echoOut }
+            analyses.map { b in MixMath.recommendedPreset(a: a.grid.bpm, b: b.grid.bpm) == .echoOut }
         }
     }
 
@@ -584,9 +592,9 @@ enum BeatAlign {
         /// vote. Of the windows that do, a clear majority has to sit
         /// together: half the blend flamming is still a flam. B's tops
         /// layer under A's kit if the first half grooves.
-        var grooves: Bool { lockBefore >= 0.6 }
+        var grooves: Bool { lockBefore >= 0.75 }
         /// A's drums play on under B's after the swap.
-        var groovesAfter: Bool { grooves && lockAfter >= 0.6 }
+        var groovesAfter: Bool { grooves && lockAfter >= 0.75 }
     }
 
     /// Samples per onset frame: a millisecond. The tempo detector's 10 ms
@@ -717,7 +725,7 @@ enum Harmony {
                               from: bFrom, to: bFrom + 2 * q * gb.barSeconds) else { return 0 }
         let heard = transposed(ca, by: aShift)
         let own = clash(heard, cb)
-        guard own > clashTolerance else { return 0 }
+        guard own > shiftTolerance else { return 0 }
         let candidates = ([preferred, 1, -1] as [Int]).filter { $0 != 0 && abs($0) <= MixMath.maxKeyShift }
         guard let best = candidates.min(by: { clash(heard, transposed(cb, by: $0)) < clash(heard, transposed(cb, by: $1)) })
         else { return 0 }
@@ -737,8 +745,14 @@ enum Harmony {
     /// Where the key estimates agree, only a clear clash heard in the notes
     /// breaks up a blend; where they say the keys clash, the notes have to
     /// show clearly that they don't.
-    static let clashTolerance: Float = 0.10
+    /// Neighbours on the key wheel (a fifth) layer; anything further
+    /// (a whole tone, ≈ 0.13 on clean scales, less on real mixes) is two
+    /// melodies fighting, not a blend.
+    static let clashTolerance: Float = 0.08
     static let keysClashTolerance: Float = 0.04
+    /// B is pitched only where its notes clash worse than this: a song off
+    /// its own key is noticed, so layering is given up long before that.
+    static let shiftTolerance: Float = 0.10
 }
 
 extension BeatAlign {
@@ -1045,17 +1059,23 @@ enum SetBuilder {
                                                  b.analysis.key.transposed(by: edit.semitones))
             var keysClash = keysDisagree
             // Whether the melodies can layer is heard, not guessed from the
-            // keys: the notes that will actually overlap (a quarter to three
-            // quarters in, B as shifted) decide, where there are any.
+            // keys: the notes that will actually overlap (from B's melody
+            // coming in a quarter in until A's has dissolved two bars past
+            // the swap, B as shifted, its bass line included since it plays
+            // under A's melody from the swap) decide, where there are any.
             if !isEdited, span > 0, let otherA = a.stems[.other], let otherB = matched.stems[.other] {
                 let n = Double(edit.bars), bar = ga.barSeconds
+                let sw = edit.preset == .dropSwap ? n / 2 : min(n, max(1, Double(plan.placement.lowSwap ?? edit.bars / 2)))
+                let until = min(max(sw, n / 4 + 2), max(n / 4 + 2, n / 2)) + 2
                 keysClash = !Harmony.fits([otherA] + [a.stems[.bass]].compactMap { $0 }, aOffset: aOffset,
-                                          [otherB], bOffset: offset + nudge,
-                                          from: start + n / 4 * bar, to: start + 3 * n / 4 * bar,
+                                          [otherB] + [matched.stems[.bass]].compactMap { $0 }, bOffset: offset + nudge,
+                                          from: start + n / 4 * bar, to: start + until * bar,
                                           tolerance: keysDisagree ? Harmony.keysClashTolerance : Harmony.clashTolerance)
             }
             var vocalIn: Double?, vocalOut: Double?
             var mashup = false
+            // Bar (from B's entry) before which B's vocal stays out.
+            var vocalFloor = 0.0
             var vocalInKind: String?
             if !isEdited, edit.preset == .echoOut, let vocalsA = a.stems[.vocals],
                let ref = VocalPhrasing.reference(a.loaded.analysis.structure),
@@ -1100,9 +1120,19 @@ enum SetBuilder {
                 }
                 if !mashup {
                     if let ref = VocalPhrasing.reference(b.analysis.structure) {
-                        let earliest = start + n / 2 * bar, latest = start + (v + 4) * bar
+                        // Before the swap B's voice sings over A's beat and
+                        // bass line: only where the grooves lock and it sits
+                        // on A's chords (as a mashup must). Otherwise, and
+                        // on clashing keys, it waits for the swap.
+                        let overA = !keysClash && align.grooves && sw > n / 2
+                            && Harmony.fits([a.stems[.other], a.stems[.bass]].compactMap { $0 }, aOffset: aOffset,
+                                            [vocalsB], bOffset: offset + nudge,
+                                            from: start + n / 2 * bar, to: start + sw * bar)
+                        let first = overA ? n / 2 : max(n / 2, sw)
+                        vocalFloor = first
+                        let earliest = start + first * bar, latest = start + (max(v, first) + 4) * bar
                         if let t = VocalPhrasing.lineStart(vocalsB, offset: offset + nudge, reference: ref,
-                                                           target: start + v * bar, earliest: earliest,
+                                                           target: start + max(v, first) * bar, earliest: earliest,
                                                            latest: latest, beat: beat) {
                             vocalIn = (t - start) / bar
                             vocalInKind = "breath"
@@ -1117,14 +1147,16 @@ enum SetBuilder {
                     // its notes sit on B's chords there; otherwise it leaves
                     // as B takes the low end.
                     let untilB = vocalIn ?? v
-                    let acappella = !keysClash && untilB > sw
+                    // Only over a beat it grooves with: a voice phrased
+                    // against another groove sounds off time.
+                    let acappella = !keysClash && align.grooves && untilB > sw
                         && Harmony.fits([vocalsA], aOffset: aOffset,
                                         [matched.stems[.other], matched.stems[.bass]].compactMap { $0 }, bOffset: offset + nudge,
                                         from: start + sw * bar, to: start + untilB * bar)
                     // Clashing keys swap the melodies half-way, and A's
                     // voice is in A's key as much as its melody: it's gone
                     // by then too, not singing over B's.
-                    let target = acappella ? untilB : keysClash ? min(untilB, n / 2) : min(untilB, min(v, sw))
+                    let target = acappella ? untilB : keysClash ? min(untilB, min(n / 2, sw)) : min(untilB, min(v, sw))
                     if let refA, let t = VocalPhrasing.lineEnd(vocalsA, offset: aOffset, reference: refA,
                                                                target: start + target * bar, beat: beat,
                                                                before: 4 * bar, after: acappella || keysClash ? 0 : 2 * bar) {
@@ -1159,7 +1191,7 @@ enum SetBuilder {
                     TransitionBuilder.make(edit.preset, lanes: Lane.allLanes(), start: start ?? ga.downbeat(edit.entryBar),
                                            barSeconds: barSeconds ?? ga.barSeconds, bars: edit.bars,
                                            vocalBar: mashup ? plan.placement.vocalHandoff
-                                               : max(edit.bars / 2, plan.placement.vocalHandoff),
+                                               : max(edit.bars / 2, plan.placement.vocalHandoff, Int(vocalFloor.rounded(.up))),
                                            keysClash: keysClash, lowSwap: plan.placement.lowSwap,
                                            drumsLayer: align.grooves, drumsLinger: align.groovesAfter,
                                            vocalIn: vocalIn, vocalOut: vocalOut,

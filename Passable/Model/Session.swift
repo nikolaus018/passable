@@ -347,7 +347,9 @@ final class Session: ObservableObject {
         return b.harmonicShift(toMatch: a, limit: 0) == nil
     }
 
-    var recommendedPreset: TransitionPreset { MixMath.recommendedPreset(rate: rate) }
+    var recommendedPreset: TransitionPreset {
+        tempoMultiplier != 1 ? .echoOut : MixMath.recommendedPreset(rate: rate)
+    }
 
     func setSemitones(_ value: Int, auto: Bool = false) {
         autoKey = auto
