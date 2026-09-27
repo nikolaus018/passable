@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Find songs on YouTube (yt-dlp) and add them to the set. Downloads run in
+/// Find songs on YouTube Music and YouTube (yt-dlp) and add them to the set. Downloads run in
 /// the background, several at once, and land in ~/Music/Passable; a song
 /// downloaded before is added straight away.
 struct SearchSheet: View {
@@ -24,7 +24,7 @@ struct SearchSheet: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Find Songs Online").font(.title3.bold())
-                    Text("Search YouTube and add songs to your set. Downloads are saved to ~/Music/Passable.")
+                    Text("Search YouTube Music and add songs to your set. Downloads are saved to ~/Music/Passable.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -74,7 +74,8 @@ struct SearchSheet: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(SongTitle.clean(result.title)).lineLimit(1)
-                Text([result.uploader, result.duration.map { Theme.time($0) }].compactMap { $0 }.joined(separator: " · "))
+                Text(([result.artist, result.album, result.duration.map { Theme.time($0) }]
+                        + [result.isOfficialAudio ? nil : "YouTube video"]).compactMap { $0 }.joined(separator: " · "))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()

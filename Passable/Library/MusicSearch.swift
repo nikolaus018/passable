@@ -1,10 +1,14 @@
 import Foundation
 
-struct MusicSearchResult: Decodable, Identifiable, Equatable {
+struct MusicSearchResult: Identifiable, Equatable {
     let id: String
     let title: String
-    let uploader: String?
+    let artist: String?
+    let album: String?
     let duration: Double?
+    /// A YouTube Music song: the label-delivered album master, as opposed
+    /// to a video upload (edits, skits, re-uploads).
+    let isOfficialAudio: Bool
 }
 
 /// Search and download via yt-dlp + ffmpeg (Homebrew), ported from SyncUp.
@@ -50,26 +54,106 @@ enum MusicTools {
         return try Data(contentsOf: output)
     }
 
+    /// YouTube Music songs first (official album audio), then the top
+    /// YouTube videos for remixes and edits that only exist as uploads.
     static func search(_ query: String) throws -> [MusicSearchResult] {
-        let data = try run(["--flat-playlist", "--dump-single-json", "--", "ytsearch8:\(query)"])
-        struct Response: Decodable { let entries: [MusicSearchResult] }
-        return try JSONDecoder().decode(Response.self, from: data).entries
+        var songs: Result<[MusicSearchResult], Error> = .success([])
+        var videos: Result<[MusicSearchResult], Error> = .success([])
+        DispatchQueue.concurrentPerform(iterations: 2) { i in
+            if i == 0 { songs = Result { try songSearch(query) } } else { videos = Result { try videoSearch(query) } }
+        }
+        let found = Array(((try? songs.get()) ?? []).prefix(10))
+        guard let more = try? videos.get() else {
+            if found.isEmpty { _ = try videos.get() }
+            return found
+        }
+        let ids = Set(found.map(\.id))
+        return found + more.filter { !ids.contains($0.id) }.prefix(found.isEmpty ? 8 : 4)
     }
 
-    /// Downloads the song's audio as YouTube serves it (AAC in M4A), without
-    /// re-encoding: YouTube audio is lossy, so WAV would only make it eight
-    /// times bigger, never better. YouTube sometimes refuses its M4A stream
-    /// (HTTP 403); after a retry, the best other stream (Opus) is converted
-    /// to 256 kbps AAC, which is transparent. Returns the file's URL in the
-    /// library folder.
-    static func download(_ result: MusicSearchResult, folder: URL = libraryFolder) throws -> URL {
-        let attempts: [[String]] = [
-            ["-f", "bestaudio[ext=m4a]", "-x", "--audio-format", "m4a"],
-            ["-f", "bestaudio[ext=m4a]", "-x", "--audio-format", "m4a"],
-            ["-f", "bestaudio/best", "-x", "--audio-format", "m4a", "--audio-quality", "256K"],
+    private static func videoSearch(_ query: String) throws -> [MusicSearchResult] {
+        let data = try run(["--flat-playlist", "--dump-single-json", "--", "ytsearch8:\(query)"])
+        struct Entry: Decodable { let id: String; let title: String; let uploader: String?; let duration: Double? }
+        struct Response: Decodable { let entries: [Entry] }
+        return try JSONDecoder().decode(Response.self, from: data).entries.map {
+            MusicSearchResult(id: $0.id, title: $0.title, artist: $0.uploader, album: nil, duration: $0.duration, isOfficialAudio: false)
+        }
+    }
+
+    /// YouTube Music's own search, filtered to songs. yt-dlp's version of it
+    /// returns titles only, so this asks the web client's API directly.
+    private static func songSearch(_ query: String) throws -> [MusicSearchResult] {
+        var request = URLRequest(url: URL(string: "https://music.youtube.com/youtubei/v1/search?prettyPrint=false")!, timeoutInterval: 20)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("https://music.youtube.com", forHTTPHeaderField: "Origin")
+        let body: [String: Any] = [
+            "context": ["client": ["clientName": "WEB_REMIX", "clientVersion": "1.20250101.01.00", "hl": "en"]],
+            "query": query,
+            "params": "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D",  // filter: songs
         ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        var reply: Result<Data, Error> = .failure(PassableError.message("YouTube Music did not answer."))
+        let done = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let data, (response as? HTTPURLResponse)?.statusCode == 200 {
+                reply = .success(data)
+            } else if let error {
+                reply = .failure(error)
+            }
+            done.signal()
+        }.resume()
+        done.wait()
+        return parseSongs(try JSONSerialization.jsonObject(with: try reply.get()))
+    }
+
+    /// Each song row is a `musicResponsiveListItemRenderer`: column one is
+    /// the title, column two "Artist • Album • 3:20".
+    static func parseSongs(_ json: Any) -> [MusicSearchResult] {
+        var rows: [[String: Any]] = []
+        func walk(_ node: Any) {
+            if let dict = node as? [String: Any] {
+                if let row = dict["musicResponsiveListItemRenderer"] as? [String: Any] { rows.append(row); return }
+                dict.values.forEach(walk)
+            } else if let list = node as? [Any] {
+                list.forEach(walk)
+            }
+        }
+        walk(json)
+        return rows.compactMap { row in
+            guard let id = (row["playlistItemData"] as? [String: Any])?["videoId"] as? String,
+                  let columns = row["flexColumns"] as? [[String: Any]], columns.count >= 2 else { return nil }
+            let text = columns.map { column -> String in
+                let renderer = column["musicResponsiveListItemFlexColumnRenderer"] as? [String: Any]
+                let runs = (renderer?["text"] as? [String: Any])?["runs"] as? [[String: Any]] ?? []
+                return runs.compactMap { $0["text"] as? String }.joined()
+            }
+            var parts = text[1].components(separatedBy: " • ")
+            var duration: Double?
+            if let last = parts.last, let seconds = seconds(last) { duration = seconds; parts.removeLast() }
+            guard !text[0].isEmpty, !parts.isEmpty else { return nil }
+            return MusicSearchResult(id: id, title: text[0], artist: parts[0], album: parts.count > 1 ? parts[1] : nil,
+                                     duration: duration, isOfficialAudio: true)
+        }
+    }
+
+    private static func seconds(_ clock: String) -> Double? {
+        let fields = clock.split(separator: ":").map { Int($0) }
+        guard (2...3).contains(fields.count), !fields.contains(nil) else { return nil }
+        return Double(fields.reduce(0) { $0 * 60 + $1! })
+    }
+
+    /// Downloads the song exactly as YouTube stores it, never re-encoded:
+    /// the Opus stream (itag 251, the best YouTube offers without Premium)
+    /// saved as an Ogg `.opus` file, which Core Audio decodes natively and
+    /// with its peaks above full scale intact. "drc" streams are YouTube's
+    /// dynamic-range-compressed copies and are never picked. If YouTube
+    /// refuses Opus twice, its AAC stream (itag 140) is kept as it is.
+    static func download(_ result: MusicSearchResult, folder: URL = libraryFolder) throws -> URL {
+        let opus = "251/bestaudio[acodec=opus][format_id!*=drc]"
+        let aac = "140/bestaudio[ext=m4a][format_id!*=drc]"
         var lastError: Error?
-        for format in attempts {
+        for format in [opus, opus, aac] {
             do {
                 return try download(result, format: format, folder: folder)
             } catch {
@@ -79,18 +163,26 @@ enum MusicTools {
         throw lastError!
     }
 
-    private static func download(_ result: MusicSearchResult, format: [String], folder: URL) throws -> URL {
+    private static func download(_ result: MusicSearchResult, format: String, folder: URL) throws -> URL {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let ffmpeg = try executable("ffmpeg")
         // Stage downloads outside the library: nothing should ever load a partial file.
         let staging = folder.appendingPathComponent(".downloads/\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: staging) }
-        _ = try run(["--no-playlist", "--no-progress"] + format + [
-            "--ffmpeg-location", ffmpeg.path, "-P", staging.path,
-            "-o", "%(title).150B [%(id)s].%(ext)s", "--", "https://www.youtube.com/watch?v=\(result.id)"])
+        // Songs are named "Artist - Title"; a video's title already says who it is.
+        var name = "%(title).150B [%(id)s].%(ext)s"
+        if result.isOfficialAudio, let artist = result.artist {
+            let literal = String(artist.prefix(80)).replacingOccurrences(of: "%", with: "%%")
+                .replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+            name = "\(literal) - \(name)"
+        }
+        // -x without --audio-format keeps the codec and only swaps the container.
+        _ = try run(["--no-playlist", "--no-progress", "-f", format, "-x",
+                     "--ffmpeg-location", ffmpeg.path, "-P", staging.path,
+                     "-o", name, "--", "https://www.youtube.com/watch?v=\(result.id)"])
         let files = try FileManager.default.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil)
-        guard let audio = files.first(where: { $0.pathExtension.lowercased() == "m4a" }) else {
+        guard let audio = files.first(where: { ["opus", "m4a"].contains($0.pathExtension.lowercased()) }) else {
             throw PassableError.message("The download did not produce an audio file.")
         }
         let destination = folder.appendingPathComponent(audio.lastPathComponent)
@@ -105,7 +197,7 @@ enum MusicTools {
         let fm = FileManager.default
         guard let urls = try? fm.contentsOfDirectory(at: libraryFolder, includingPropertiesForKeys: [.contentModificationDateKey],
                                                      options: [.skipsHiddenFiles]) else { return [] }
-        let audio = urls.filter { ["wav", "aif", "aiff", "caf", "flac", "mp3", "m4a"].contains($0.pathExtension.lowercased()) }
+        let audio = urls.filter { ["wav", "aif", "aiff", "caf", "flac", "mp3", "m4a", "opus"].contains($0.pathExtension.lowercased()) }
         func date(_ u: URL) -> Date { (try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }
         return audio.sorted { date($0) > date($1) }
     }

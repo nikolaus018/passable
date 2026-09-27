@@ -60,6 +60,9 @@ enum AudioIO {
         guard let converter = AVAudioConverter(from: inFormat, to: outFormat) else {
             throw PassableError.message("Can't convert \(url.lastPathComponent) to 44.1 kHz stereo.")
         }
+        // YouTube's Opus is 48 kHz: resample with Apple's best filter.
+        converter.sampleRateConverterAlgorithm = AVSampleRateConverterAlgorithm_Mastering
+        converter.sampleRateConverterQuality = AVAudioQuality.max.rawValue
         if inFormat.channelCount == 1 {
             converter.channelMap = [0, 0]
         } else if inFormat.channelCount > 2 {

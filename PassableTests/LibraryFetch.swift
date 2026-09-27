@@ -13,7 +13,7 @@ final class LibraryFetch: XCTestCase {
         for query in list.split(separator: "\n").map(String.init) where !query.isEmpty {
             do {
                 let results = try MusicTools.search(query)
-                guard let pick = best(results) else { print("FETCH none: \(query)"); continue }
+                guard let pick = best(results, for: query) else { print("FETCH none: \(query)"); continue }
                 let url = try MusicTools.download(pick)
                 print("FETCH ok: \(query) → \(url.lastPathComponent)")
             } catch {
@@ -22,16 +22,26 @@ final class LibraryFetch: XCTestCase {
         }
     }
 
-    /// The studio version: official audio beats a lyric upload beats a music
-    /// video (spoken intros, skits); never live, remixed, sped up or covered.
-    private func best(_ results: [MusicSearchResult]) -> MusicSearchResult? {
+    /// The studio version: a YouTube Music song (the album master) beats
+    /// official audio beats a lyric upload beats a music video (spoken
+    /// intros, skits); never live, remixed, sped up or covered.
+    private func best(_ results: [MusicSearchResult], for query: String) -> MusicSearchResult? {
+        // Search order shifts between requests, so the title has to match.
+        func words(_ s: String) -> String {
+            s.lowercased().folding(options: .diacriticInsensitive, locale: nil)
+                .components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }.joined(separator: " ")
+        }
+        let wanted = words(query.components(separatedBy: " - ").last ?? query)
+        let artist = words(query.components(separatedBy: " - ").first ?? "").split(separator: " ").first.map(String.init) ?? ""
         let banned = ["live", "remix", "slowed", "sped up", "speed up", "nightcore", "8d", "karaoke", "instrumental",
                       "reaction", "cover", "acoustic", "extended", "1 hour", "mashup", "bass boosted", "tutorial"]
         func score(_ r: MusicSearchResult) -> Int? {
             let t = r.title.lowercased()
-            if banned.contains(where: { t.contains($0) }) { return nil }
+            if banned.contains(where: { t.contains($0) || (r.artist ?? "").lowercased().contains($0) }) { return nil }
+            guard (" " + words(r.title) + " ").contains(" \(wanted) "),
+                  (" " + words((r.artist ?? "") + " " + r.title) + " ").contains(" \(artist) ") else { return nil }
             if let d = r.duration, d < 140 || d > 360 { return nil }
-            var s = 0
+            var s = r.isOfficialAudio ? 100 : 0
             if t.contains("official audio") { s += 30 } else if t.contains("audio") { s += 20 }
             if t.contains("lyric") { s += 10 }
             if t.contains("official") { s += 5 }
