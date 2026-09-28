@@ -268,7 +268,8 @@ final class SetLab: XCTestCase {
                 let n = Double(t.edit.bars), p = t.plan.placement
                 let gridIn = t.start + min(n, max(n / 2, Double(p.vocalHandoff))) * t.barSeconds
                 let vin = t.vocalIn ?? gridIn
-                let out = t.vocalOut ?? min(vin, t.start + min(n, Double(p.lowSwap ?? t.edit.bars)) * t.barSeconds)
+                let sw = TransitionBuilder.switchBar(t.edit.preset, bars: t.edit.bars, lowSwap: p.lowSwap)
+                let out = t.vocalOut ?? min(vin, t.start + sw * t.barSeconds)
                 // A blended out or B blended in on purpose isn't a cut; B
                 // opening on a word's attack is sounding by design.
                 if !t.vocalOutBlend, sounding(t.from, at: out) { phrasing += " A-CUT" }

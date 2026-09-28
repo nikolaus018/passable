@@ -54,7 +54,7 @@ final class ChoreographyProbe: XCTestCase {
 
     private func swapBar(_ tag: String, n: Int) -> Double {
         let sw = tag.components(separatedBy: " ").first { $0.hasPrefix("sw=") }!.dropFirst(3)
-        return min(Double(n), max(1, Double(Int(sw) ?? n / 2)))
+        return TransitionBuilder.switchBar(.stemSwap, bars: n, lowSwap: Int(sw))
     }
 
     private func check(_ made: TransitionBuilder.Made, preset: TransitionPreset, n: Int, tag: String,
@@ -94,6 +94,13 @@ final class ChoreographyProbe: XCTestCase {
             // One bass line at a time.
             if heard(.a, .bass, t) && heard(.b, .bass, t) && lowsOn(.a, .bass, t) && lowsOn(.b, .bass, t) {
                 once("two bass lines at once")
+            }
+            // Nor a melody's low end (synth bass, 808s) under the other's.
+            if heard(.a, .other, t) && heard(.b, .bass, t) && lowsOn(.a, .other, t) && lowsOn(.b, .bass, t) {
+                once("A's melody lows under B's bass line")
+            }
+            if heard(.b, .other, t) && heard(.a, .bass, t) && lowsOn(.b, .other, t) && lowsOn(.a, .bass, t) {
+                once("B's melody lows under A's bass line")
             }
             // One kick at a time.
             if heard(.a, .drums, t) && heard(.b, .drums, t) && lowsOn(.a, .drums, t) && lowsOn(.b, .drums, t) {

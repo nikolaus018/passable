@@ -169,6 +169,38 @@ final class PayoffTests: XCTestCase {
         XCTAssertGreaterThan(vocals.value(.delay, at: 2 * 7.8), 0.5)
     }
 
+    /// A melody stem carries low end too (synth bass, 808s): wherever the
+    /// bass lines change hands, A's melody gives up its lows with them, so
+    /// it never rumbles under B's bass line while it dissolves.
+    func testMelodyLowsChangeHandsWithTheBass() {
+        func low(_ lanes: [Lane], _ side: DeckSide, bar: Double) -> Double {
+            LaneParameter.eqDecibels(lanes.first { $0.side == side && $0.stem == .other }!.value(.low, at: bar * 2))
+        }
+        for preset in [TransitionPreset.stemSwap, .dropSwap, .longBlend] {
+            let lanes = TransitionBuilder.build(preset, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16, lowSwap: 8)
+            XCTAssertEqual(TransitionBuilder.switchBar(preset, bars: 16, lowSwap: 8), 8)
+            XCTAssertEqual(value(lanes, .b, .bass, bar: 8.01), 1, "\(preset)")
+            XCTAssertGreaterThan(value(lanes, .a, .other, bar: 8.01), 0.1, "\(preset): A's melody still dissolving")
+            XCTAssertEqual(low(lanes, .a, bar: 7.9), 0, accuracy: 0.01, "\(preset)")
+            XCTAssertLessThanOrEqual(low(lanes, .a, bar: 8.01), MixRenderer.killDB, "\(preset)")
+        }
+    }
+
+    /// Where the caller heard B's voice really start singing after its
+    /// channel opens, a Drop Swap keeps A's on until then, as a Stem Swap
+    /// does; clashing keys still take it out on the drop.
+    func testDropSwapKeepsAsVoiceUntilBsSings() {
+        let made = TransitionBuilder.make(.dropSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 8,
+                                          vocalIn: 4.5, vocalOut: 5)
+        XCTAssertEqual(made.vocalExit, 5)
+        XCTAssertEqual(made.vocalEntry, 4.5)
+        let clash = TransitionBuilder.make(.dropSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 8,
+                                           keysClash: true, vocalIn: 4.5, vocalOut: 5)
+        XCTAssertEqual(clash.vocalExit, 4)
+        let plain = TransitionBuilder.make(.dropSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 8)
+        XCTAssertEqual(plain.vocalExit, 4)
+    }
+
     /// Once B's melody is in, A's drums and melody turn their mids and
     /// highs down (EQ, not the fader) so both songs are heard; where the
     /// keys clash only A's drums do, and without room nothing changes.

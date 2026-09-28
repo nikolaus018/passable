@@ -136,7 +136,8 @@ final class Session: ObservableObject {
 
     /// Shows one transition of a set, exactly as the set plays it.
     func open(title: String, a: Deck, b: Deck, edit: TransitionEdit, isEdited: Bool, matched: TrackProcessor.Matched?,
-              placement: AutoPlacement.Result, entryRange: ClosedRange<Int>, offset: Double) {
+              placement: AutoPlacement.Result, placedAs: (preset: TransitionPreset, bars: Int),
+              entryRange: ClosedRange<Int>, offset: Double) {
         isOpening = true
         isRestoring = true
         defer { isOpening = false; isRestoring = false }
@@ -157,7 +158,7 @@ final class Session: ObservableObject {
         cueBar = edit.cueBar
         entryBar = edit.entryBar
         vocalHandoff = placement.vocalHandoff
-        lowSwap = placement.lowSwap
+        lowSwap = LowSwap(preset: placedAs.preset, bars: placedAs.bars, bar: placement.lowSwap)
         placedFor = isEdited ? nil : Placed(preset: edit.preset, bars: edit.bars, mashup: placement.mashup,
                                             dropMoment: placement.dropMoment)
         placementNote = isEdited || placement.reason.isEmpty ? nil : placement.reason
@@ -369,7 +370,7 @@ final class Session: ObservableObject {
         let sr = AudioIO.sampleRate
         // As in a set: B glides home once A's melody has dissolved.
         let tail = preset == .stemSwap
-            ? SetBuilder.exitTail(bars: transitionBars, lowSwap: lowSwap.flatMap { $0 <= transitionBars ? $0 : nil }) : 0
+            ? SetBuilder.exitTail(bars: transitionBars, lowSwap: lowSwapHere) : 0
         let map = TimeMap.glide(rate: matchRate, rampStart: (transitionEnd + Double(tail) * g.barSeconds - offsetB) * sr,
                                 rampLength: Double(glideBars) * g.barSeconds * sr)
         return .init(map: map, semitones: semitones)
@@ -476,8 +477,18 @@ final class Session: ObservableObject {
 
     /// Bars after B's entry where its vocal comes in (from auto placement).
     private var vocalHandoff: Int?
-    /// Bars after B's entry where the low end changes hands (auto placement).
-    private var lowSwap: Int?
+    /// Bars after B's entry where the low end changes hands (auto
+    /// placement), for the preset and length it was placed for.
+    private struct LowSwap {
+        let preset: TransitionPreset, bars: Int, bar: Int?
+    }
+    private var lowSwap: LowSwap?
+    /// `lowSwap`, if it was placed for the preset and length in use: a
+    /// Drop Swap's half-way (bar 4 of 8) is a quarter into a 16-bar Stem
+    /// Swap, and a 16-bar blend's half-way a quarter into a 32-bar one.
+    private var lowSwapHere: Int? {
+        lowSwap.flatMap { $0.preset == preset && $0.bars == transitionBars ? $0.bar : nil }
+    }
     /// What auto placement found worth doing, for the preset and length it
     /// placed: a mashup, a roll into the drop.
     private struct Placed {
@@ -497,7 +508,7 @@ final class Session: ObservableObject {
                                          trimA: Float(trimDB(.a)), trimB: Float(trimDB(.b)), keysClash: keysIncompatible,
                                          mashup: !keysIncompatible && abs(matchRate - 1) < MixMath.mashupStretch)
         vocalHandoff = result.vocalHandoff
-        lowSwap = result.lowSwap
+        lowSwap = LowSwap(preset: preset, bars: transitionBars, bar: result.lowSwap)
         placedFor = Placed(preset: preset, bars: transitionBars, mashup: result.mashup, dropMoment: result.dropMoment)
         isPlacing = true
         defer { isPlacing = false }
@@ -544,7 +555,7 @@ final class Session: ObservableObject {
         let made = TransitionBuilder.make(preset, lanes: lanes, start: g.downbeat(entryBar),
                                           barSeconds: g.barSeconds, bars: transitionBars, vocalBar: vocalHandoff,
                                           keysClash: keysIncompatible,
-                                          lowSwap: lowSwap.flatMap { $0 <= transitionBars ? $0 : nil },
+                                          lowSwap: lowSwapHere,
                                           mashup: placed?.mashup ?? false, dropMoment: placed?.dropMoment ?? false,
                                           vocalOutFade: vocalFade(.a), vocalInFade: vocalFade(.b) / 2)
         rolls = made.rolls
@@ -559,7 +570,7 @@ final class Session: ObservableObject {
               let ref = VocalPhrasing.reference(deck(side).analysis?.structure) else { return 1 }
         let probe = TransitionBuilder.make(preset, lanes: Lane.allLanes(), start: g.downbeat(entryBar), barSeconds: g.barSeconds,
                                            bars: transitionBars, vocalBar: vocalHandoff, keysClash: keysIncompatible,
-                                           lowSwap: lowSwap.flatMap { $0 <= transitionBars ? $0 : nil },
+                                           lowSwap: lowSwapHere,
                                            mashup: placedHere?.mashup ?? false)
         let beat = g.barSeconds / 4
         if side == .a, let exit = probe.vocalExit {

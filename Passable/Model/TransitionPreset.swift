@@ -153,6 +153,31 @@ struct TransitionBuilder {
         (Double(n) / 4, Double(n) / 2)
     }
 
+    /// Bar (from B's entry) where B takes over: kick and bass change hands
+    /// (a Stem Swap's low swap, half-way or where A's own low end left; a
+    /// Drop Swap's drop; a Long Blend's half-way), or 0 for a Wash Out,
+    /// which drops B's beat on its first bar. The planner, placement and
+    /// the builder all ask here, so they never disagree.
+    static func switchBar(_ preset: TransitionPreset, bars: Int, lowSwap: Int?) -> Double {
+        let n = Double(bars)
+        switch preset {
+        case .echoOut: return 0
+        case .dropSwap, .longBlend: return n / 2
+        case .stemSwap: return min(n, max(1, Double(lowSwap ?? bars / 2)))
+        }
+    }
+
+    /// Bar (from B's entry) where A's melody starts to dissolve (over two
+    /// bars) under B's where the two layer: at the switch, or past half-way
+    /// only where B is still building up to a late one (A's beat and bass
+    /// carry it there, not two melodies), and never before B's has been in
+    /// for two bars. A Drop Swap's goes on its drop.
+    static func melodyDissolve(_ preset: TransitionPreset, bars: Int, switchAt sw: Double) -> Double {
+        guard preset == .stemSwap else { return sw }
+        let q = Double(bars) / 4
+        return min(max(sw, q + 2), max(q + 2, 2 * q))
+    }
+
     private mutating func clearAll() {
         for i in lanes.indices {
             for p in LaneParameter.allCases { lanes[i][p].removeAll() }
@@ -300,7 +325,7 @@ struct TransitionBuilder {
         case .stemSwap:
             let q = n / 4
             // Half-way or later, unless A's own low end left earlier.
-            let sw = min(n, max(1, Double(lowSwap ?? Int(2 * q))))
+            let sw = Self.switchBar(preset, bars: bars, lowSwap: lowSwap)
             // The low end has one owner at a time: A's kick and bass until the
             // half-way downbeat, B's from there. B's drums come in with their
             // lows killed (hats, snares, percussion) and take the kick over in
@@ -359,7 +384,7 @@ struct TransitionBuilder {
                 // dissolves (low-pass sweep into a reverb wash), so there's
                 // never more than one song's harmony for long.
                 bringIn(.other, at: q, filter: 0.7, open: q + max(1, q / 2))
-                dissolveMelody(from: min(max(sw, q + 2), max(q + 2, 2 * q)))
+                dissolveMelody(from: Self.melodyDissolve(preset, bars: bars, switchAt: sw))
             }
             if drumsLayer && drumsLinger && sw < n && !dropMoment {
                 // A's tops thin out and hand over.
@@ -380,9 +405,11 @@ struct TransitionBuilder {
 
         case .dropSwap:
             // A rides its build; on the drop everything flips to B at once.
-            let h = n / 2
+            let h = Self.switchBar(preset, bars: bars, lowSwap: lowSwap)
             let vin = max(h, vocalIn ?? v)
-            let out = min(vin, vocalOut ?? h, keysClash ? h : .infinity)
+            // A caller that heard where B's voice really starts singing may
+            // keep A's past the moment B's (still silent) channel opens.
+            let out = min(vocalOut ?? min(vin, h), keysClash ? h : .infinity)
             if drumsLayer {
                 // B's tops from the first downbeat, opening up like a riser.
                 automate(.b, .drums, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
@@ -406,6 +433,9 @@ struct TransitionBuilder {
             for stem in [StemKind.drums, .bass] {
                 automate(.a, stem, .volume, [(h, 1, .hold), (h + 0.001, 0, .linear)])
             }
+            // A's melody carries low end too (synth bass, 808s): it goes on
+            // the drop, under B's bass line, while the rest of it dissolves.
+            automate(.a, .other, .low, [(h, 0.5, .hold), (h + 0.001, 0, .linear)])
             if keysClash {
                 automate(.a, .other, .reverb, [(h - 1, 0, .linear), (h, 0.8, .hold), (h + 0.001, 0, .linear)])
                 automate(.a, .other, .volume, [(h, 1, .hold), (h + 0.001, 0, .linear)])
@@ -427,6 +457,9 @@ struct TransitionBuilder {
             automate(.b, .drums, .low, [(2 * q, 0, .hold), (2 * q + 0.001, 0.5, .linear)])
             automate(.a, .bass, .low, [(2 * q, 0.5, .hold), (2 * q + 0.001, 0, .linear)])
             automate(.a, .drums, .low, [(2 * q, 0.5, .hold), (2 * q + 0.001, 0, .linear)])
+            // Melody stems carry low end too: theirs trade places with the rest.
+            automate(.b, .other, .low, [(2 * q, 0, .hold), (2 * q + 0.001, 0.5, .linear)])
+            automate(.a, .other, .low, [(2 * q, 0.5, .hold), (2 * q + 0.001, 0, .linear)])
             handOverVocalLows(at: 2 * q)
             // B's drums come in whole on the first downbeat, their low end
             // killed; its bass line on the swap (one line at a time).

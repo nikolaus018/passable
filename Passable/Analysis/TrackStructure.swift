@@ -702,8 +702,9 @@ enum AutoPlacement {
         let step = max(1, n / 4)
         func lowSwap(entry e: Int, cue c: Int) -> Int? {
             guard !echo else { return nil }
-            // A Drop Swap flips everything half-way, low end included.
-            if preset == .dropSwap { return n / 2 }
+            // A Drop Swap flips everything half-way, low end included; a
+            // Long Blend trades the lows half-way.
+            if preset != .stemSwap { return Int(TransitionBuilder.switchBar(preset, bars: n, lowSwap: nil)) }
             let ready = stride(from: n / 2, to: n, by: step).first { k in
                 let r = (c + k)..<(c + k + 4)
                 return sb.meanActivity(.bass, bars: r) > 0.5 && sb.meanActivity(.drums, bars: r) > 0.5
@@ -717,7 +718,7 @@ enum AutoPlacement {
         }
         /// Bar (from B's entry) where B takes over: its beat drops or the
         /// low end changes hands.
-        func switchBar(_ sw: Int?) -> Int { echo ? 0 : preset == .dropSwap ? n / 2 : sw ?? n }
+        func switchBar(_ sw: Int?) -> Int { Int(TransitionBuilder.switchBar(preset, bars: n, lowSwap: sw)) }
 
         /// Worth building into (roll, silence, drop) at bar `switchAt`: B's
         /// hook or a real lift of B there, with A's beat there to roll, and
@@ -745,8 +746,8 @@ enum AutoPlacement {
         let chromaA = sa.barChroma, chromaB = sb.barChroma
         func notesClash(e: Int, c: Int, sw: Int?) -> Bool {
             guard !echo, let chromaA, let chromaB else { return keysClash }
-            let q = n / 4, s = preset == .dropSwap ? n / 2 : min(n, max(1, sw ?? n / 2))
-            let until = min(max(s, q + 2), max(q + 2, n / 2)) + 2
+            let q = n / 4, s = TransitionBuilder.switchBar(preset, bars: n, lowSwap: sw)
+            let until = Int(TransitionBuilder.melodyDissolve(preset, bars: n, switchAt: s)) + 2
             func sum(_ x: [[Float]], _ r: Range<Int>) -> [Float]? {
                 let bars = r.clamped(to: 0..<x.count)
                 guard !bars.isEmpty else { return nil }

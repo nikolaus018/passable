@@ -1063,9 +1063,7 @@ enum SetBuilder {
             var align = BeatAlign.Result(nudge: 0, lock: 1)
             if span > 0, let drumsA = a.stems[.drums], let drumsB = matched.stems[.drums] {
                 // Where the builder hands the drums over (its `sw`).
-                let n = Double(edit.bars)
-                let handover = edit.preset == .dropSwap ? n / 2
-                    : min(n, max(1, Double(plan.placement.lowSwap ?? edit.bars / 2)))
+                let handover = TransitionBuilder.switchBar(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
                 align = BeatAlign.nudge(a: drumsA, aOffset: aOffset, b: drumsB, bOffset: offset, from: start, to: end,
                                         split: isEdited ? nil : start + handover * ga.barSeconds)
             }
@@ -1081,8 +1079,8 @@ enum SetBuilder {
             // under A's melody from the swap) decide, where there are any.
             if !isEdited, span > 0, let otherA = a.stems[.other], let otherB = matched.stems[.other] {
                 let n = Double(edit.bars), bar = ga.barSeconds
-                let sw = edit.preset == .dropSwap ? n / 2 : min(n, max(1, Double(plan.placement.lowSwap ?? edit.bars / 2)))
-                let until = min(max(sw, n / 4 + 2), max(n / 4 + 2, n / 2)) + 2
+                let sw = TransitionBuilder.switchBar(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
+                let until = TransitionBuilder.melodyDissolve(edit.preset, bars: edit.bars, switchAt: sw) + 2
                 keysClash = !Harmony.fits([otherA] + [a.stems[.bass]].compactMap { $0 }, aOffset: aOffset,
                                           [otherB] + [matched.stems[.bass]].compactMap { $0 }, bOffset: offset + nudge,
                                           from: start + n / 4 * bar, to: start + until * bar,
@@ -1102,7 +1100,7 @@ enum SetBuilder {
             if !isEdited, span > 0, let vocalsA = a.stems[.vocals], let vocalsB = matched.stems[.vocals] {
                 let n = Double(edit.bars), bar = ga.barSeconds, beat = bar / 4
                 let v = min(n, max(n / 2, Double(plan.placement.vocalHandoff)))
-                let sw = min(n, max(1, Double(plan.placement.lowSwap ?? edit.bars / 2)))
+                let sw = TransitionBuilder.switchBar(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
                 let refA = VocalPhrasing.reference(a.loaded.analysis.structure)
                 // A mashup moment: B's vocal sings over A's beat from early
                 // in the blend, where placement found it pays off. Only if
@@ -1229,9 +1227,7 @@ enum SetBuilder {
                 let dropMoment = plan.placement.dropMoment && edit.preset != .echoOut
                     && (edit.preset == .dropSwap ? sinceDrop >= 1 : edit.bars >= 16 && sinceDrop >= 3)
                 sinceDrop = dropMoment ? 0 : sinceDrop + 1
-                let n = Double(edit.bars)
-                let switchBar = edit.preset == .dropSwap ? n / 2
-                    : min(n, max(1, Double(plan.placement.lowSwap ?? edit.bars / 2)))
+                let switchBar = TransitionBuilder.switchBar(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
                 let rollBeat = dropMoment ? a.stems[.drums].flatMap {
                     BeatAlign.snareBeat($0, offset: aOffset, barStart: start + (switchBar - 1) * ga.barSeconds,
                                         beat: ga.barSeconds / 4)

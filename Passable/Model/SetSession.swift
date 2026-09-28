@@ -318,7 +318,7 @@ final class SetSession: ObservableObject {
                     a: Deck(url: a.url, status: .ready, loaded: a.loaded),
                     b: Deck(url: b.url, status: .ready, loaded: b.loaded),
                     edit: t.edit, isEdited: t.isEdited, matched: b.matched, placement: played(t),
-                    entryRange: t.entryRange, offset: t.delta)
+                    placedAs: (t.plan.preset, t.plan.bars), entryRange: t.entryRange, offset: t.delta)
     }
 
     /// The plan's placement as the set really plays it: a mashup only where
