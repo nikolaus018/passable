@@ -4,7 +4,9 @@ A native macOS app that mixes songs like a DJ, stem by stem. Add songs to a set,
 
 ## Set tab
 
-1. Add songs: drop files onto the window, **Add Files…** (⌘O), or **Find Online…**, which downloads to `~/Music/Passable` via `yt-dlp` and `ffmpeg`. Downloads keep YouTube's own AAC stream as `.m4a`, without re-encoding: YouTube audio is lossy, so WAV would be eight times bigger and no better. The sheet stays open, so you can add several.
+1. Add songs: drop files onto the window, **Add Files…** (⌘O), or **Find Online…**, which downloads to `~/Music/Passable`. The sheet stays open, so you can add several. It searches one of two places:
+   - **YouTube** (via `yt-dlp` and `ffmpeg`): downloads keep YouTube's own Opus stream (AAC if Opus is refused), without re-encoding. It's lossy, so a WAV would be bigger and no better.
+   - **Soulseek**, for lossless files: FLAC, WAV and AIFF, or 320 kbps MP3 where that's all there is. Nothing worse than YouTube is listed. Results are ranked by quality, then by sharers who can send right away. Soulseek goes through [slskd](https://github.com/slskd/slskd), which runs on your Mac with your own Soulseek account: download it from its releases page and start it with an API key of your own (16 characters or more), e.g. `slskd --slsk-username NAME --slsk-password PASSWORD --api-key KEY`. Then enter its address (`http://localhost:5030`) and the key under the ⚙ in the sheet. The key is kept in your keychain. Finished files are copied from slskd's downloads folder. If slskd runs in Docker, enter the folder its downloads are mounted from. A sharer who hasn't started sending after 90 seconds is given up on: pick another result.
 2. Each song is split into **vocals, melody, drums and bass** by HTDemucs v4, running locally through Core ML. Passable then finds its tempo, beat 1, key, and bar-by-bar structure and loudness.
 3. When all songs are ready, Passable orders them. It minimises tempo stretch, prefers compatible keys, keeps the energy building, and favours pairs whose sections line up. **Auto-Order** re-runs this; drag rows to override.
 4. Every transition is planned from the two songs alone:
@@ -20,7 +22,7 @@ Shows the transition that's playing, or the one you picked with **Edit**: both s
 
 Any change goes straight into the set and unticks **Automatic**. Tick it again to return to the automatic transition. Undo and redo (⌘Z / ⇧⌘Z) cover your edits. Mute and solo apply to the set's playback.
 
-One transport serves both tabs: **Space** plays or pauses, holding **M** mutes the playing song's vocal (let the crowd sing the chorus) and holding **S** leaves only that vocal, for as long as the key is down, **⌘→** (or the keyboard's ⏭ key) jumps to just before the next transition, **⌘←** (⏮) goes back to the start of the current song's transition, and twice quickly to the one before. The ⏯ ⏮ ⏭ keys, headphone buttons and Control Center work while Passable is in the background. **Render** writes the whole set, or just this transition, as an AAC `.m4a` (256 kbps): the songs are already AAC, so a WAV would be ten times bigger and sound the same. Type a `.wav` name to get a 24-bit, 44.1 kHz WAV for other software. The set and your edits are remembered between launches.
+One transport serves both tabs: **Space** plays or pauses, holding **M** mutes the playing song's vocal (let the crowd sing the chorus) and holding **S** leaves only that vocal, for as long as the key is down, **⌘→** (or the keyboard's ⏭ key) jumps to where the next transition begins, **⌘←** (⏮) goes back to the start of the current song's transition, and twice quickly to the one before. The ⏯ ⏮ ⏭ keys, headphone buttons and Control Center work while Passable is in the background. **Render** writes the whole set, or just this transition, as an AAC `.m4a` (256 kbps), which is plenty for songs from YouTube. Type a `.wav` name to get a 24-bit, 44.1 kHz WAV, lossless for songs from Soulseek or your own files, or for other software. The set and your edits are remembered between launches.
 
 ## Set files (.passable)
 
@@ -54,6 +56,7 @@ The tests compare the result against PyTorch: stems match at over 110 dB SNR. Th
 | `Passable/Audio` | decoding/resampling, mmap'd stems, time map + sample-exact stretcher (phase vocoder, transient copy, sinc resampler) |
 | `Passable/DSP` | mixer, biquads, Freeverb, ping-pong delay, limiter: shared by preview and render |
 | `Passable/Model` | automation envelopes, presets, session |
+| `Passable/Library` | online search and download: YouTube (yt-dlp), Soulseek (slskd) |
 | `Passable/UI` | SwiftUI: decks, transition panel, timeline, search |
 
 Measurement harnesses (skipped unless their variable is set; `xcodebuild` only passes variables prefixed with `TEST_RUNNER_`), each taking a file with one path per line:

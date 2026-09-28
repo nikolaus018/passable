@@ -287,7 +287,9 @@ enum SetOrdering {
     private static func greedy(_ costs: [[Double]], from start: Int) -> [Int] {
         var path = [start]
         var left = Set(0..<costs.count).subtracting([start])
-        while let next = left.min(by: { costs[path.last!][$0] < costs[path.last!][$1] }) {
+        // Ties go to the lower index: a Set's order changes from launch to
+        // launch, and the same songs should always give the same set.
+        while let next = left.sorted().min(by: { costs[path.last!][$0] < costs[path.last!][$1] }) {
             path.append(next)
             left.remove(next)
         }
@@ -1296,6 +1298,10 @@ enum SetBuilder {
                 if mashup { payoff.append("mashup: B sings over A's beat") }
                 if dropMoment { payoff.append("roll into the drop") }
                 if dropMoment { dropAt = start + switchBar * ga.barSeconds }
+            } else {
+                // A hand-shaped transition's roll counts too: the next
+                // automatic one isn't a second in a row.
+                sinceDrop = edit.rolls.isEmpty ? sinceDrop + 1 : 0
             }
             var incoming = SetMix.Track(url: tracks[k].url, loaded: b, map: map, matched: matched, offset: offset + nudge,
                                         envelopes: [:])

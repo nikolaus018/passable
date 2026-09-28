@@ -13,6 +13,7 @@
 		0BABBE71B89EDA3F694628B6 /* KeyDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FCB06E03A60D917E699FB6A /* KeyDetector.swift */; };
 		0F5CF077D02D833A5F5A1CDD /* TrackProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = BACD810EF2618C9A11628672 /* TrackProcessor.swift */; };
 		169F97F9E7B84D19A05973BD /* MusicSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D473E11FD02BC9A9CE22BEC /* MusicSearch.swift */; };
+		BDD0E8D08E36700D2A293073 /* Soulseek.swift in Sources */ = {isa = PBXBuildFile; fileRef = 523646A6E174C5F4561B3693 /* Soulseek.swift */; };
 		18042952A5891F94F59F8100 /* TimeMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 585BD18984346E9050218FBD /* TimeMap.swift */; };
 		183D43BDE2FC084100B75AAA /* MixRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63FAB67B2900CD6257C1D17A /* MixRenderer.swift */; };
 		1A5250BAF693CC4631755DBA /* Effects.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAFAFB3D6E02981D209981A4 /* Effects.swift */; };
@@ -29,6 +30,7 @@
 		4C63F614F9CEAE87D30892BD /* TransitionPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E1FA045141AEACB4C04FDF3 /* TransitionPanel.swift */; };
 		573288BB14DF37B676355955 /* PayoffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EEC2588B36CA71986AC14E9 /* PayoffTests.swift */; };
 		5A6238B318AA288716F24F77 /* LibraryFetch.swift in Sources */ = {isa = PBXBuildFile; fileRef = E437400E644FE3BB9ABE4583 /* LibraryFetch.swift */; };
+		CF0BD2F250E24F40421ADEFE /* SoulseekTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47002BB7B93DD3063A9CB65D /* SoulseekTests.swift */; };
 		5E0484FA52AD89AFD03BE96C /* PassableFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFA185FD99CE45F4F53A78AA /* PassableFile.swift */; };
 		6A87BFA23CB053EBC96C6F40 /* RealTrackProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 683C023C0AB1CCF3B368AA0D /* RealTrackProbe.swift */; };
 		7BC1E725829A8BFA8D01C4F8 /* SearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7DA88A707CD72420E5A9DB5 /* SearchSheet.swift */; };
@@ -97,6 +99,7 @@
 		7D1E4B99E816199B410C51BC /* TempoEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TempoEstimator.swift; sourceTree = "<group>"; };
 		89FBE76BD00B59CFC56A844E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		8D473E11FD02BC9A9CE22BEC /* MusicSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicSearch.swift; sourceTree = "<group>"; };
+		523646A6E174C5F4561B3693 /* Soulseek.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Soulseek.swift; sourceTree = "<group>"; };
 		8E503B0A96E3D4D392019409 /* AudioIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioIO.swift; sourceTree = "<group>"; };
 		8FB901899286FC7C54821A07 /* Passable.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Passable.entitlements; sourceTree = "<group>"; };
 		977700D9FDD4CAB06C13E6D9 /* StemSeparator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StemSeparator.swift; sourceTree = "<group>"; };
@@ -112,6 +115,7 @@
 		D3A3F1C6209FE99261C4C268 /* Biquad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Biquad.swift; sourceTree = "<group>"; };
 		DBE8701944F6FE295DC98B92 /* PassableFileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassableFileTests.swift; sourceTree = "<group>"; };
 		E437400E644FE3BB9ABE4583 /* LibraryFetch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryFetch.swift; sourceTree = "<group>"; };
+		47002BB7B93DD3063A9CB65D /* SoulseekTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoulseekTests.swift; sourceTree = "<group>"; };
 		E498312F53D40FD534860992 /* PerfLab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfLab.swift; sourceTree = "<group>"; };
 		E7DA88A707CD72420E5A9DB5 /* SearchSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchSheet.swift; sourceTree = "<group>"; };
 		E90F393D5126D1D1B90167C8 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -194,6 +198,7 @@
 			isa = PBXGroup;
 			children = (
 				8D473E11FD02BC9A9CE22BEC /* MusicSearch.swift */,
+				523646A6E174C5F4561B3693 /* Soulseek.swift */,
 			);
 			path = Library;
 			sourceTree = "<group>";
@@ -255,6 +260,7 @@
 				1A58C009FFE955C2C4628EFC /* ChoreographyProbe.swift */,
 				6D383015C45F285B6995AFF4 /* EndToEndTests.swift */,
 				E437400E644FE3BB9ABE4583 /* LibraryFetch.swift */,
+				47002BB7B93DD3063A9CB65D /* SoulseekTests.swift */,
 				B69520316B09120BB126F804 /* MixTests.swift */,
 				DBE8701944F6FE295DC98B92 /* PassableFileTests.swift */,
 				4EEC2588B36CA71986AC14E9 /* PayoffTests.swift */,
@@ -372,6 +378,7 @@
 				0B0C7608C852F1B02B42C66B /* ChoreographyProbe.swift in Sources */,
 				0B304481FCF7C128FDE18908 /* EndToEndTests.swift in Sources */,
 				5A6238B318AA288716F24F77 /* LibraryFetch.swift in Sources */,
+				CF0BD2F250E24F40421ADEFE /* SoulseekTests.swift in Sources */,
 				2462BF7F99A015EBCE55C3CC /* MixTests.swift in Sources */,
 				E5D0D6C73A4657C63AAB32A7 /* PassableFileTests.swift in Sources */,
 				573288BB14DF37B676355955 /* PayoffTests.swift in Sources */,
@@ -401,6 +408,7 @@
 				BDF596A70818C20E9B6BC2EC /* MappedAudio.swift in Sources */,
 				183D43BDE2FC084100B75AAA /* MixRenderer.swift in Sources */,
 				169F97F9E7B84D19A05973BD /* MusicSearch.swift in Sources */,
+				BDD0E8D08E36700D2A293073 /* Soulseek.swift in Sources */,
 				47D6C330665303CF2A8FA78B /* PassableApp.swift in Sources */,
 				5E0484FA52AD89AFD03BE96C /* PassableFile.swift in Sources */,
 				EAA394F310B918302B0286D3 /* PlaybackEngine.swift in Sources */,

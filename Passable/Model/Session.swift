@@ -157,10 +157,14 @@ final class Session: ObservableObject {
         transitionBars = edit.bars
         cueBar = edit.cueBar
         entryBar = edit.entryBar
-        vocalHandoff = placement.vocalHandoff
-        lowSwap = LowSwap(preset: placedAs.preset, bars: placedAs.bars, bar: placement.lowSwap)
-        placedFor = isEdited ? nil : Placed(preset: edit.preset, bars: edit.bars, mashup: placement.mashup,
-                                            dropMoment: placement.dropMoment)
+        // What placement found holds where it placed: the plan's preset
+        // and length, its entry and cue. A hand edit keeps where vocals and
+        // lows change hands, not a mashup or roll it may no longer suit.
+        placedFor = Placed(preset: placedAs.preset, bars: placedAs.bars,
+                           entryBar: isEdited ? placement.entryBar : edit.entryBar,
+                           cueBar: isEdited ? placement.cueBar : edit.cueBar,
+                           mashup: !isEdited && placement.mashup, dropMoment: !isEdited && placement.dropMoment,
+                           lowSwap: placement.lowSwap, vocalHandoff: placement.vocalHandoff)
         placementNote = isEdited || placement.reason.isEmpty ? nil : placement.reason
         self.matched = matched
         rolls = edit.rolls
@@ -370,7 +374,7 @@ final class Session: ObservableObject {
         let sr = AudioIO.sampleRate
         // As in a set: B glides home once A's melody has dissolved.
         let tail = preset == .stemSwap
-            ? SetBuilder.exitTail(bars: transitionBars, lowSwap: lowSwapHere) : 0
+            ? SetBuilder.exitTail(bars: transitionBars, lowSwap: placedHere?.lowSwap) : 0
         let map = TimeMap.glide(rate: matchRate, rampStart: (transitionEnd + Double(tail) * g.barSeconds - offsetB) * sr,
                                 rampLength: Double(glideBars) * g.barSeconds * sr)
         return .init(map: map, semitones: semitones)
@@ -475,29 +479,23 @@ final class Session: ObservableObject {
         scheduleRematch()
     }
 
-    /// Bars after B's entry where its vocal comes in (from auto placement).
-    private var vocalHandoff: Int?
-    /// Bars after B's entry where the low end changes hands (auto
-    /// placement), for the preset and length it was placed for.
-    private struct LowSwap {
-        let preset: TransitionPreset, bars: Int, bar: Int?
-    }
-    private var lowSwap: LowSwap?
-    /// `lowSwap`, if it was placed for the preset and length in use: a
-    /// Drop Swap's half-way (bar 4 of 8) is a quarter into a 16-bar Stem
-    /// Swap, and a 16-bar blend's half-way a quarter into a 32-bar one.
-    private var lowSwapHere: Int? {
-        lowSwap.flatMap { $0.preset == preset && $0.bars == transitionBars ? $0.bar : nil }
-    }
-    /// What auto placement found worth doing, for the preset and length it
-    /// placed: a mashup, a roll into the drop.
+    /// What auto placement found, for the preset, length and spot it
+    /// placed: a mashup, a roll into the drop, and the bars (from B's
+    /// entry) where B's vocal comes in and the low end changes hands.
     private struct Placed {
-        let preset: TransitionPreset, bars: Int, mashup: Bool, dropMoment: Bool
+        let preset: TransitionPreset, bars: Int, entryBar: Int, cueBar: Int
+        let mashup: Bool, dropMoment: Bool
+        let lowSwap: Int?, vocalHandoff: Int?
     }
     private var placedFor: Placed?
-    /// `placedFor`, if it was placed for the preset and length in use.
+    /// `placedFor`, if it was placed for the preset, length and spot in
+    /// use. Anywhere else it's another song's bars: a Drop Swap's half-way
+    /// (bar 4 of 8) is a quarter into a 16-bar Stem Swap, and a low swap
+    /// on B's drop lands in B's verse once B is moved.
     private var placedHere: Placed? {
-        placedFor.flatMap { $0.preset == preset && $0.bars == transitionBars ? $0 : nil }
+        placedFor.flatMap {
+            $0.preset == preset && $0.bars == transitionBars && $0.entryBar == entryBar && $0.cueBar == cueBar ? $0 : nil
+        }
     }
 
     /// Why the automatic placement chose what it did, shown in the panel.
@@ -507,9 +505,9 @@ final class Session: ObservableObject {
         let result = AutoPlacement.place(a: a, b: b, bars: transitionBars, preset: preset,
                                          trimA: Float(trimDB(.a)), trimB: Float(trimDB(.b)), keysClash: keysIncompatible,
                                          mashup: !keysIncompatible && abs(matchRate - 1) < MixMath.mashupStretch)
-        vocalHandoff = result.vocalHandoff
-        lowSwap = LowSwap(preset: preset, bars: transitionBars, bar: result.lowSwap)
-        placedFor = Placed(preset: preset, bars: transitionBars, mashup: result.mashup, dropMoment: result.dropMoment)
+        placedFor = Placed(preset: preset, bars: transitionBars, entryBar: result.entryBar, cueBar: result.cueBar,
+                           mashup: result.mashup, dropMoment: result.dropMoment, lowSwap: result.lowSwap,
+                           vocalHandoff: result.vocalHandoff)
         isPlacing = true
         defer { isPlacing = false }
         cueBar = result.cueBar
@@ -553,9 +551,9 @@ final class Session: ObservableObject {
         guard let g = masterGrid else { return }
         let placed = placedHere
         let made = TransitionBuilder.make(preset, lanes: lanes, start: g.downbeat(entryBar),
-                                          barSeconds: g.barSeconds, bars: transitionBars, vocalBar: vocalHandoff,
+                                          barSeconds: g.barSeconds, bars: transitionBars, vocalBar: placed?.vocalHandoff,
                                           keysClash: keysIncompatible,
-                                          lowSwap: lowSwapHere,
+                                          lowSwap: placed?.lowSwap,
                                           mashup: placed?.mashup ?? false, dropMoment: placed?.dropMoment ?? false,
                                           vocalOutFade: vocalFade(.a), vocalInFade: vocalFade(.b) / 2)
         rolls = made.rolls
@@ -569,9 +567,9 @@ final class Session: ObservableObject {
         guard let g = masterGrid, let stem = side == .a ? deckA.loaded?.stems[.vocals] : matched?.stems[.vocals],
               let ref = VocalPhrasing.reference(deck(side).analysis?.structure) else { return 1 }
         let probe = TransitionBuilder.make(preset, lanes: Lane.allLanes(), start: g.downbeat(entryBar), barSeconds: g.barSeconds,
-                                           bars: transitionBars, vocalBar: vocalHandoff, keysClash: keysIncompatible,
-                                           lowSwap: lowSwapHere,
-                                           mashup: placedHere?.mashup ?? false)
+                                           bars: transitionBars, vocalBar: placedHere?.vocalHandoff,
+                                           keysClash: keysIncompatible, lowSwap: placedHere?.lowSwap,
+                                           mashup: placedHere?.mashup ?? false, dropMoment: placedHere?.dropMoment ?? false)
         let beat = g.barSeconds / 4
         if side == .a, let exit = probe.vocalExit {
             let t = g.downbeat(entryBar) + exit * g.barSeconds
