@@ -54,20 +54,24 @@ enum Soulseek {
     static func search(_ query: String, settings: Settings = .current) throws -> [MusicSearchResult] {
         let id = UUID().uuidString.lowercased()
         // slskd's docs say the timeout is in seconds, but it hands it to
-        // Soulseek.NET as is, which counts milliseconds: 8 ended every
-        // search after 8 ms with nothing. Ten seconds from the last answer
-        // (and if slskd ever reads it as seconds, the 20 s cap below).
-        let body: [String: Any] = ["id": id, "searchText": query, "searchTimeout": 10_000, "responseLimit": 200,
+        // Soulseek.NET as is, which counts milliseconds (8 ended every
+        // search after 8 ms). Answers from sharers who can't reach this Mac
+        // directly (no port forwarded to slskd) go round through the
+        // server and take 20 s or more to arrive, so it waits 30 s from
+        // the last one; if slskd ever reads it as seconds, the cap below.
+        let body: [String: Any] = ["id": id, "searchText": query, "searchTimeout": 30_000, "responseLimit": 200,
                                    "fileLimit": 5000, "filterResponses": true]
         try expect(call("POST", ["searches"], body: body, settings: settings), 200, 201)
         defer { _ = try? call("DELETE", ["searches", id], settings: settings) }
-        // Answers keep trickling in for a while; a search is done when
-        // slskd says so, or after 20 s with what's there by then.
-        let deadline = Date().addingTimeInterval(20)
+        // A search is done when slskd says so, when 60 sharers have
+        // answered (plenty to pick the best file from), or after 45 s with
+        // what's there by then.
+        let deadline = Date().addingTimeInterval(45)
         while Date() < deadline {
             Thread.sleep(forTimeInterval: 1)
             let state = try expect(call("GET", ["searches", id], settings: settings), 200)
-            if (try? JSONSerialization.jsonObject(with: state) as? [String: Any])?["isComplete"] as? Bool == true { break }
+            let json = try? JSONSerialization.jsonObject(with: state) as? [String: Any]
+            if json?["isComplete"] as? Bool == true || (json?["responseCount"] as? Int ?? 0) >= 60 { break }
         }
         _ = try? call("PUT", ["searches", id], settings: settings)
         let responses = try expect(call("GET", ["searches", id, "responses"], settings: settings), 200)

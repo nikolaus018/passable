@@ -77,7 +77,9 @@ struct SearchSheet: View {
         if source == .soulseek && (showSettings || !soulseek.isConfigured) {
             soulseekSettings
         } else if isSearching {
-            centered { ProgressView("Searching…") }
+            centered {
+                ProgressView(source == .soulseek ? "Searching Soulseek… answers take up to 45 seconds." : "Searching…")
+            }
         } else if let message {
             centered { Text(message).foregroundStyle(.secondary).multilineTextAlignment(.center) }
         } else if results.isEmpty {
