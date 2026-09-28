@@ -53,7 +53,11 @@ enum Soulseek {
     /// from sharers who can send them now.
     static func search(_ query: String, settings: Settings = .current) throws -> [MusicSearchResult] {
         let id = UUID().uuidString.lowercased()
-        let body: [String: Any] = ["id": id, "searchText": query, "searchTimeout": 8, "responseLimit": 200,
+        // slskd's docs say the timeout is in seconds, but it hands it to
+        // Soulseek.NET as is, which counts milliseconds: 8 ended every
+        // search after 8 ms with nothing. Ten seconds from the last answer
+        // (and if slskd ever reads it as seconds, the 20 s cap below).
+        let body: [String: Any] = ["id": id, "searchText": query, "searchTimeout": 10_000, "responseLimit": 200,
                                    "fileLimit": 5000, "filterResponses": true]
         try expect(call("POST", ["searches"], body: body, settings: settings), 200, 201)
         defer { _ = try? call("DELETE", ["searches", id], settings: settings) }
