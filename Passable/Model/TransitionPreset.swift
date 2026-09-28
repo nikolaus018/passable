@@ -228,7 +228,7 @@ struct TransitionBuilder {
     /// melody comes in: a DJ's EQ making space for the incoming song. The
     /// cut stays while A's parts leave (lifting it on the switch pushed A
     /// back up just as B's beat landed) and resets once they're gone.
-    private mutating func makeRoom(at at: Double, until: Double, melody: Bool) {
+    private mutating func makeRoom(at: Double, until: Double, melody: Bool) {
         guard room > 0.25, at > 0, until > at else { return }
         let cut = 0.5 - min(room, 12) / 80
         let reset = Double(bars) + 4
