@@ -59,6 +59,7 @@ final class SetSession: ObservableObject {
     /// Songs were added since the set was last ordered.
     private var needsOrdering = false
     private var buildTask: Task<Void, Never>?
+    private var orderTask: Task<Void, Never>?
     private var exportTask: Task<Void, Never>?
     private var clock: Timer?
 
@@ -142,16 +143,31 @@ final class SetSession: ObservableObject {
     /// transitions, then builds the mix.
     func autoOrder() {
         needsOrdering = false
+        orderTask?.cancel()
         let ready = items.filter { $0.analysis != nil }
-        guard ready.count == items.count, items.count > 2 else { return rebuild() }
+        guard ready.count == items.count, items.count > 1 else { return rebuild() }
         let analyses = ready.map { $0.analysis! }
-        let order = SetOrdering.order(SetOrdering.costMatrix(analyses), washOuts: SetOrdering.washOuts(analyses))
-        let reordered = order.map { ready[$0] }
-        if reordered.map(\.id) != items.map(\.id) {
-            items = reordered
-            invalidate()
-        } else {
-            rebuild()
+        let songs = ready.compactMap(\.loaded)
+        let ids = ready.map(\.id)
+        // Every pair of songs is planned to price it: seconds for a long
+        // set, so not on the main thread.
+        buildTask?.cancel()
+        buildStatus = "Ordering songs…"
+        orderTask = Task { [weak self] in
+            let order = await Task.detached(priority: .userInitiated) {
+                SetOrdering.order(SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: songs)),
+                                  washOuts: SetOrdering.washOuts(analyses))
+            }.value
+            // The list changed meanwhile (a song removed, rows dragged):
+            // that order is the newer word.
+            guard !Task.isCancelled, let self, self.items.map(\.id) == ids else { return }
+            let reordered = order.map { ready[$0] }
+            if reordered.map(\.id) != ids {
+                self.items = reordered
+                self.invalidate()
+            } else {
+                self.rebuild()
+            }
         }
     }
 
@@ -192,6 +208,7 @@ final class SetSession: ObservableObject {
 
     /// The song list changed: the old mix no longer applies.
     private func invalidate() {
+        orderTask?.cancel()
         pause()
         mix = nil
         updateNowPlaying()

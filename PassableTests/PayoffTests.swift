@@ -271,6 +271,30 @@ final class PayoffTests: XCTestCase {
         let result = BeatAlign.nudge(a: a, aOffset: 0, b: b, bOffset: 0, from: 2, to: 18)
         XCTAssertEqual(result.nudge, -0.007, accuracy: 0.002)
         XCTAssertTrue(result.grooves)
+
+        // The same is found from the songs' own hits, before B is rendered
+        // at A's tempo: here B is 5 % slow, so the hit it plays at t is at
+        // 1.05 t in its own file.
+        func slow(_ buffer: StereoBuffer) -> StereoBuffer {
+            var out = StereoBuffer(count: buffer.count)
+            for k in 0..<(4 * seconds) {
+                let from = Int((Double(k) * 0.25 + 0.107) * Double(sr)), to = Int((Double(k) * 0.25 + 0.107) * 1.05 * Double(sr))
+                for i in 0..<200 where to + i < out.count && from + i < buffer.count {
+                    out.left[to + i] = buffer.left[from + i]
+                    out.right[to + i] = buffer.right[from + i]
+                }
+            }
+            return out
+        }
+        try StemAudio.save(slow(b.copyStereo()), directory: dir, name: "slow")
+        let ea = try XCTUnwrap(BeatAlign.attacks(of: a))
+        let own = try XCTUnwrap(BeatAlign.attacks(of: try StemAudio.load(directory: dir, name: "slow")))
+        let predicted = BeatAlign.predicted(a: ea, b: own, from: 2, to: 18, split: nil, bOffset: 0, rate: 1.05)
+        XCTAssertEqual(predicted.nudge, -0.007, accuracy: 0.002)
+        XCTAssertTrue(predicted.clearlyGrooves)
+        // Hits that fall between A's are no groove.
+        let off = BeatAlign.predicted(a: ea, b: own, from: 2, to: 18, split: nil, bOffset: 0, rate: 1.0)
+        XCTAssertFalse(off.clearlyGrooves)
     }
 
     /// The placement simulation hears the EQ cut, as much as it takes off
@@ -380,6 +404,170 @@ final class PayoffTests: XCTestCase {
             }
         }
         return s
+    }
+
+    /// A song that plays one major scale throughout, whatever its key was
+    /// estimated as.
+    private func song(scale tonic: Int, key: MusicalKey, bpm: Double = 120, bars: Int = 64) -> TrackAnalysis {
+        let notes: [Float] = (0..<12).map { [0, 2, 4, 5, 7, 9, 11].contains(($0 - tonic + 12) % 12) ? 40 : 1 }
+        var s = TrackStructure(activity: Dictionary(uniqueKeysWithValues: StemKind.allCases.map {
+            ($0.rawValue, [Float](repeating: 1, count: bars))
+        }), loudness: [Float](repeating: -10, count: bars))
+        s.harmonyChroma = [[Float]](repeating: notes, count: bars)
+        return TrackAnalysis(grid: BeatGrid(bpm: bpm, firstDownbeat: 0), key: key, duration: Double(bars) * 240 / bpm,
+                             structure: s, version: TrackAnalysis.currentVersion)
+    }
+
+    /// Songs read at half and double time of each other don't share a bar
+    /// grid, so they play as a Wash Out, and are priced as one: not as the
+    /// perfect tempo match they are on paper.
+    func testHalfTimePairIsPricedAsTheWashOutItPlaysAs() {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        let a = song(scale: 0, key: c, bpm: 87), same = song(scale: 0, key: c, bpm: 87)
+        let double = song(scale: 0, key: c, bpm: 174)
+        let blend = PairPlan.make(a: a, b: same), wash = PairPlan.make(a: a, b: double)
+        XCTAssertEqual(wash.preset, .echoOut)
+        XCTAssertNotEqual(blend.preset, .echoOut)
+        XCTAssertGreaterThan(wash.cost(a: a, b: double), blend.cost(a: a, b: same) + 1)
+    }
+
+    /// The set's last song fades out without undoing its way in: a part
+    /// still held back where the fade begins stays out until its moment.
+    func testEndFadeKeepsALateEntryHeldBack() {
+        // B's vocal is let in at 20 s; the song's last eight bars begin at 16.
+        var vocal = Envelope()
+        vocal.insert(AutomationPoint(time: 20, value: 0, curve: .hold))
+        vocal.insert(AutomationPoint(time: 20.001, value: 1))
+        SetBuilder.fadeOut(&vocal, from: 16, to: 40)
+        XCTAssertEqual(vocal.value(at: 5, default: 1), 0, "audible before its entry, over the song before")
+        XCTAssertEqual(vocal.value(at: 18, default: 1), 0)
+        XCTAssertEqual(vocal.value(at: 20.01, default: 1), 1, accuracy: 0.01)
+        XCTAssertEqual(vocal.value(at: 40, default: 1), 0)
+        // A part already playing fades from the start of those bars.
+        var drums = Envelope()
+        drums.insert(AutomationPoint(time: 2, value: 0, curve: .hold))
+        drums.insert(AutomationPoint(time: 2.001, value: 1))
+        SetBuilder.fadeOut(&drums, from: 16, to: 40)
+        XCTAssertEqual(drums.value(at: 1, default: 1), 0)
+        XCTAssertEqual(drums.value(at: 15, default: 1), 1)
+        XCTAssertLessThan(drums.value(at: 30, default: 1), 1)
+        XCTAssertEqual(drums.value(at: 40, default: 1), 0)
+        // No automation at all: full level until the fade.
+        var plain = Envelope()
+        SetBuilder.fadeOut(&plain, from: 16, to: 40)
+        XCTAssertEqual(plain.value(at: 0, default: 1), 1)
+        XCTAssertEqual(plain.value(at: 40, default: 1), 0)
+    }
+
+    func testTwoSongsAreOrderedToo() {
+        XCTAssertEqual(SetOrdering.order([[0, 5], [1, 0]]), [1, 0])
+        XCTAssertEqual(SetOrdering.order([[0, 1], [5, 0]]), [0, 1])
+    }
+
+    /// Whether melodies swap, and whether B is pitched, is decided once,
+    /// from the notes that overlap where the transition is placed: the
+    /// plan, its price and what plays agree.
+    func testNotesAtTheSpotDecideSwapAndShift() throws {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true), cSharp = MusicalKey(tonicPitchClass: 1, isMajor: true)
+        let a = song(scale: 0, key: c)
+        // A key estimate that's off: the notes share A's scale, so the
+        // melodies layer and B keeps its key.
+        let misread = PairPlan.make(a: a, b: song(scale: 0, key: cSharp))
+        XCTAssertFalse(misread.keysClash)
+        XCTAssertEqual(misread.semitones, 0)
+        // The other way round: the estimates agree, the notes don't.
+        let hidden = PairPlan.make(a: a, b: song(scale: 1, key: c))
+        XCTAssertTrue(hidden.keysClash)
+        XCTAssertEqual(hidden.semitones, 0, "no shift the key estimates didn't propose")
+
+        // Really a semitone up: heard as a clash, fixed by B a semitone
+        // down, or by A playing a semitone up itself.
+        let off = song(scale: 1, key: cSharp)
+        let sa = try XCTUnwrap(a.structure), sb = try XCTUnwrap(off.structure)
+        func clash(aShift: Int = 0, bShift: Int = 0) throws -> Float {
+            try XCTUnwrap(AutoPlacement.overlapClash(a: sa, aShift: aShift, entry: 16, b: sb, bShift: bShift, cue: 0,
+                                                     preset: .stemSwap, bars: 16, lowSwap: 8))
+        }
+        XCTAssertGreaterThan(try clash(), 0.2)
+        XCTAssertLessThan(try clash(bShift: -1), 0.01)
+        XCTAssertLessThan(try clash(aShift: 1), 0.01)
+        // Pitched or not, the plan says what will play.
+        let plan = PairPlan.make(a: a, b: off)
+        XCTAssertTrue(plan.semitones == 0 || plan.semitones == -1)
+        XCTAssertEqual(plan.keysClash, plan.semitones == 0)
+        XCTAssertFalse(PairPlan.make(a: a, b: off, aShift: 1).keysClash, "B is fitted to the key A is heard in")
+    }
+
+    /// Placement judges a blend's notes from the per-bar measurement, the
+    /// builder from the audio: over the same bars the two hear the same
+    /// (loud bars counting for more than quiet ones, the bass line in).
+    func testPlacementHearsTheNotesTheBuilderDoes() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let sr = AudioIO.sampleRate, bars = 24, bar = 2.0
+        let chords: [[Double]] = [[220, 261.6, 329.6], [174.6, 220, 261.6], [261.6, 329.6, 392], [196, 246.9, 293.7]]
+        var melody = StereoBuffer(count: Int(Double(bars) * bar * sr)), bass = melody
+        for i in 0..<melody.count {
+            let t = Double(i) / sr, b = Int(t / bar)
+            // Every third bar is a quiet one, in another chord.
+            let level = b % 3 == 2 ? 0.02 : 0.2
+            let chord = chords[b % 3 == 2 ? 3 : b % 3]
+            melody.left[i] = Float(level * chord.reduce(0) { $0 + sin(2 * .pi * $1 * t) })
+            melody.right[i] = melody.left[i]
+            bass.left[i] = Float(0.3 * sin(2 * .pi * chord[0] / 2 * t))
+            bass.right[i] = bass.left[i]
+        }
+        try StemAudio.save(melody, directory: dir, name: "other")
+        try StemAudio.save(bass, directory: dir, name: "bass")
+        let stems = [StemKind.other: try StemAudio.load(directory: dir, name: "other"),
+                     .bass: try StemAudio.load(directory: dir, name: "bass")]
+        let s = TrackStructure.measure(stems: stems, grid: BeatGrid(bpm: 120, firstDownbeat: 0))
+        let planned = try XCTUnwrap(AutoPlacement.notes(s, bars: 4..<12))
+        let heard = try XCTUnwrap(Harmony.chroma([stems[.other]!, stems[.bass]!], offset: 0, from: 4 * bar, to: 12 * bar))
+        let sp = planned.reduce(0, +), sh = heard.reduce(0, +)
+        for p in 0..<12 {
+            XCTAssertEqual(planned[p] / sp, heard[p] / sh, accuracy: 0.01, "pitch class \(p)")
+        }
+        XCTAssertLessThan(Harmony.clash(planned, heard), 0.005)
+        // The melody on its own, too.
+        let alone = try XCTUnwrap(AutoPlacement.notes(s, bars: 4..<12, melodyOnly: true))
+        let aloneHeard = try XCTUnwrap(Harmony.chroma([stems[.other]!], offset: 0, from: 4 * bar, to: 12 * bar))
+        XCTAssertLessThan(Harmony.clash(alone, aloneHeard), 0.005)
+        XCTAssertNotEqual(alone, planned)
+    }
+
+    /// Before the switch B's bass line is out: a bass line in A's key
+    /// doesn't make B's melody, a semitone off, fit A's.
+    func testASilentBassLineDoesNotVouchForItsMelody() throws {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        let a = song(scale: 0, key: c)
+        var b = song(scale: 0, key: c)
+        let off = try XCTUnwrap(song(scale: 1, key: c).structure?.harmonyChroma)
+        // B's melody plays C sharp major, quietly; its bass line C major, loudly.
+        b.structure?.melodyChroma = off.map { $0.map { $0 / 10 } }
+        let bassLine = try XCTUnwrap(b.structure?.harmonyChroma)
+        b.structure?.harmonyChroma = zip(bassLine, off).map { loud, quiet in zip(loud, quiet).map { $0 + $1 / 10 } }
+        let sa = try XCTUnwrap(a.structure), sb = try XCTUnwrap(b.structure)
+        let whole = Harmony.clash(try XCTUnwrap(AutoPlacement.notes(sa, bars: 20..<28)),
+                                  try XCTUnwrap(AutoPlacement.notes(sb, bars: 4..<12)))
+        XCTAssertLessThan(whole, 0.04, "melody and bass line together look like A's key")
+        let heard = try XCTUnwrap(AutoPlacement.overlapClash(a: sa, entry: 16, b: sb, cue: 0, preset: .stemSwap, bars: 16,
+                                                             lowSwap: 12))
+        XCTAssertGreaterThan(heard, 0.2)
+        XCTAssertTrue(PairPlan.make(a: a, b: b).keysClash)
+    }
+
+    /// A short song isn't cued so far in that it's over as soon as it has
+    /// the floor.
+    func testAShortSongKeepsTimeOnItsOwn() {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        let a = song(scale: 0, key: c)
+        let plan = PairPlan.make(a: a, b: song(scale: 0, key: c, bars: 40))
+        XCTAssertNotEqual(plan.preset, .echoOut)
+        XCTAssertLessThanOrEqual(plan.placement.cueBar + plan.bars + SetBuilder.minimumSoloBars + 16, 40)
+        // A song of ordinary length may still come in on a later phrase.
+        XCTAssertLessThanOrEqual(PairPlan.make(a: a, b: song(scale: 0, key: c, bars: 96)).placement.cueBar, 43)
     }
 
     func testClubEditJumpsFromChorusToChorus() {

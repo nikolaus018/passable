@@ -504,7 +504,8 @@ final class Session: ObservableObject {
     private func place(a: TrackAnalysis, b: TrackAnalysis) {
         let result = AutoPlacement.place(a: a, b: b, bars: transitionBars, preset: preset,
                                          trimA: Float(trimDB(.a)), trimB: Float(trimDB(.b)), keysClash: keysIncompatible,
-                                         mashup: !keysIncompatible && abs(matchRate - 1) < MixMath.mashupStretch)
+                                         mashup: !keysIncompatible && abs(matchRate - 1) < MixMath.mashupStretch,
+                                         bShift: semitones)
         placedFor = Placed(preset: preset, bars: transitionBars, entryBar: result.entryBar, cueBar: result.cueBar,
                            mashup: result.mashup, dropMoment: result.dropMoment, lowSwap: result.lowSwap,
                            vocalHandoff: result.vocalHandoff)

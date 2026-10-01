@@ -291,7 +291,7 @@ final class SetLab: XCTestCase {
             print("      placement expected together: \(pp.together.map(String.init) ?? "-"), handoff \(pp.vocalHandoff), B's vocal at "
                   + (pp.expectedVocalIn.map { String(format: "%.2f", $0) } ?? "-") + ", switch \(pp.lowSwap.map(String.init) ?? "-"), drop \(pp.dropMoment)")
             if t.edit.preset != .echoOut {
-                print(String(format: "      room %.0f dB  layered %@  lags ", t.room,
+                print(String(format: "      room %.0f dB  planned for lock %@  layered %@  lags ", t.room, t.plan.drumsLock ? "yes" : "no",
                              t.drumsLayered ? (t.drumsLinger ? "yes" : "before the swap") : "no")
                       + t.grooveLags.map { String(format: "%.0f", $0 * 1000) }.joined(separator: " "))
             }

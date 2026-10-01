@@ -24,6 +24,14 @@ struct TrackStructure: Codable, Equatable {
     /// the song repeats itself, for hooks and for jumps. Optional like the
     /// above.
     var barChroma: [[Float]]?
+    /// Per bar, the 12 pitch-class energies of the melody and bass line, as
+    /// measured (not scaled per bar): the notes that layer when two songs
+    /// blend, so bars add up to what the builder hears in the audio.
+    /// Optional like the above.
+    var harmonyChroma: [[Float]]?
+    /// The same of the melody alone: what sits on the other song's melody
+    /// and bass line while its own bass line is still out.
+    var melodyChroma: [[Float]]?
 
     /// How loud the track is when it's going: the level of its loud bars
     /// (80th percentile), which is what a DJ matches with the trim knob.
@@ -145,27 +153,31 @@ struct TrackStructure: Codable, Equatable {
         }
         // Harmony and melody per bar (the melody stems and the vocal, which
         // is what a chorus repeats), for finding the hooks.
-        var chroma: [[Float]] = []
-        if let other = stems[.other] {
-            let vocals = stems[.vocals]
+        func chromaPerBar(_ parts: [StemAudio], normalised: Bool) -> [[Float]] {
+            var chroma: [[Float]] = []
             var bar = 0
             while true {
                 let start = Int(grid.downbeat(bar) * sr), end = Int(grid.downbeat(bar + 1) * sr)
-                guard end <= other.count, end <= vocals?.count ?? end else { break }
+                guard parts.allSatisfy({ end <= $0.count }) else { break }
                 bar += 1
                 guard start >= 0 else { chroma.append([Float](repeating: 0, count: 12)); continue }
                 let n = end - start
                 var mono = [Float](repeating: 0, count: n)
-                for channel in [other.left, other.right] + (vocals.map { [$0.left, $0.right] } ?? []) {
+                for channel in parts.flatMap({ [$0.left, $0.right] }) {
                     vDSP_vadd(mono, 1, channel.pointer + start, 1, &mono, 1, vDSP_Length(n))
                 }
-                chroma.append(KeyDetector.computeChroma(samples: mono, sampleRate: sr).map(Float.init))
+                chroma.append(KeyDetector.computeChroma(samples: mono, sampleRate: sr, normalised: normalised).map(Float.init))
             }
+            return chroma
         }
+        let chroma = stems[.other].map { chromaPerBar([$0] + [stems[.vocals]].compactMap { $0 }, normalised: true) } ?? []
         var structure = TrackStructure(activity: activity, loudness: loudness, stemLevel: stemLevel,
                                        stemLowLevel: stemLowLevel, vocalBeatLevel: vocalBeats)
         structure.hookStart = hookStarts(chroma: chroma, structure: structure)
         structure.barChroma = chroma
+        // What the builder judges a blend's notes on: melody and bass line.
+        structure.harmonyChroma = stems[.other].map { chromaPerBar([$0] + [stems[.bass]].compactMap { $0 }, normalised: false) } ?? []
+        structure.melodyChroma = stems[.other].map { chromaPerBar([$0], normalised: false) } ?? []
         return structure
     }
 
@@ -634,6 +646,55 @@ enum AutoPlacement {
         /// and where it expects B's vocal to come in (bars from B's entry).
         var together: Int?
         var expectedVocalIn: Double?
+        /// The melodies clash at this spot (heard in the notes that overlap
+        /// there, see `overlapClash`), so they swap rather than layer.
+        var notesClash: Bool?
+    }
+
+    /// Bars (from B's entry) in which the two melodies are heard together,
+    /// in two parts, since what's under them changes hands in between:
+    /// before the switch B's melody (in from a quarter in) sits on A's
+    /// melody and bass line; from the switch, A's melody (until it has
+    /// dissolved) sits on B's melody and bass line. The builder judges the
+    /// audio over the same stretches.
+    static func melodyOverlap(_ preset: TransitionPreset, bars n: Int,
+                              lowSwap: Int?) -> (before: Range<Int>, after: Range<Int>) {
+        let sw = TransitionBuilder.switchBar(preset, bars: n, lowSwap: lowSwap)
+        let q = n / 4, until = max(q + 1, Int(TransitionBuilder.melodyDissolve(preset, bars: n, switchAt: sw)) + 2)
+        let split = min(max(q, Int(sw)), until)
+        return (q..<split, split..<until)
+    }
+
+    /// The notes a song plays over `bars`, per pitch class: its melody and
+    /// bass line, or its melody alone; nil if there are none (or it was
+    /// measured before per-bar notes existed).
+    static func notes(_ s: TrackStructure, bars: Range<Int>, shift: Int = 0, melodyOnly: Bool = false) -> [Float]? {
+        guard let chroma = (melodyOnly ? s.melodyChroma : nil) ?? s.harmonyChroma ?? s.barChroma else { return nil }
+        let r = bars.clamped(to: 0..<chroma.count)
+        guard !r.isEmpty else { return nil }
+        var out = [Float](repeating: 0, count: 12)
+        for b in r { for p in 0..<12 { out[p] += chroma[b][p] } }
+        guard out.contains(where: { $0 > 0 }) else { return nil }
+        return shift == 0 ? out : Harmony.transposed(out, by: shift)
+    }
+
+    /// How badly the two songs' notes clash where their melodies overlap
+    /// (see `Harmony.clash`), with A entering its bar `e` and B cued at
+    /// `c`, each as it's heard (pitched by its shift): the worse of the two
+    /// stretches of `melodyOverlap`, each judged on what plays in it (a
+    /// bass line that's still out doesn't vouch for its melody). nil if
+    /// there are no notes to compare.
+    static func overlapClash(a: TrackStructure, aShift: Int = 0, entry e: Int, b: TrackStructure, bShift: Int = 0,
+                             cue c: Int, preset: TransitionPreset, bars n: Int, lowSwap: Int?) -> Float? {
+        let overlap = melodyOverlap(preset, bars: n, lowSwap: lowSwap)
+        func clash(_ bars: Range<Int>, lowEndIsAs: Bool) -> Float? {
+            guard !bars.isEmpty,
+                  let na = notes(a, bars: (e + bars.lowerBound)..<(e + bars.upperBound), shift: aShift, melodyOnly: !lowEndIsAs),
+                  let nb = notes(b, bars: (c + bars.lowerBound)..<(c + bars.upperBound), shift: bShift, melodyOnly: lowEndIsAs)
+            else { return nil }
+            return Harmony.clash(na, nb)
+        }
+        return [clash(overlap.before, lowEndIsAs: true), clash(overlap.after, lowEndIsAs: false)].compactMap { $0 }.max()
     }
 
     /// - Parameters:
@@ -650,10 +711,14 @@ enum AutoPlacement {
     ///     paced for a crowd; nil, it favours letting A play out.
     ///   - skip: bars of A a jump leaves out, if A plays that far: the
     ///     transition starts before them or well after.
+    ///   - aShift, bShift: semitones each song plays pitched by, so their
+    ///     notes are compared as they're heard.
+    ///   - drumsLock: the two grooves are known to lock, so B's drums will
+    ///     build in under A's: spots aren't also judged without that.
     static func place(a: TrackAnalysis, b: TrackAnalysis, bars n: Int, preset: TransitionPreset,
                       trimA: Float = 0, trimB: Float = 0, entryRange: ClosedRange<Int>? = nil,
                       keysClash: Bool = false, mashup: Bool = false, soloFrom: Int? = nil,
-                      skip: Range<Int>? = nil) -> Result {
+                      skip: Range<Int>? = nil, aShift: Int = 0, bShift: Int = 0, drumsLock: Bool = false) -> Result {
         let barsA = a.grid.barCount(duration: a.duration)
         let barsB = b.grid.barCount(duration: b.duration)
         guard let sa = a.structure, let sb = b.structure, !sa.loudness.isEmpty, !sb.loudness.isEmpty else {
@@ -688,8 +753,18 @@ enum AutoPlacement {
             .filter { e in skip.map { e + span <= $0.lowerBound || e - bridge - 8 >= $0.upperBound } ?? true }
         // Skipping more than ~45 % of B throws away too much of it. Far
         // enough to reach the first chorus: a DJ mixes pop in on the hook.
-        let lastCue = max(0, min(Int(Double(barsB) * 0.45), barsB - n - 8))
-        let cues = (0...lastCue).filter { ((($0 - phaseB) % 4) + 4) % 4 == 0 }
+        // And B needs music left once the blend is over: its time on its
+        // own and a way out. A short song cued half-way in is over as soon
+        // as it has the floor (as the set's last one: straight into the
+        // final fade).
+        let musicEndB = (sb.loudness.lastIndex { $0 + trimB > refB - 5 } ?? barsB - 1) + 1
+        let room = barsB - n - 8
+        let lastCue = max(0, min(Int(Double(barsB) * 0.45), room,
+                                 min(barsB, musicEndB) - span - SetBuilder.minimumSoloBars - 16))
+        var cues = (0...lastCue).filter { ((($0 - phaseB) % 4) + 4) % 4 == 0 }
+        // Too short for a cue on its phrase grid within that: its first
+        // phrase if the song has the bars for it, else its first bar.
+        if cues.isEmpty { cues = [phaseB <= max(0, room) ? phaseB : 0] }
 
         // Where the low end changes hands for an entry and a cue: the first
         // phrase from half-way where B's own kick and bass are really
@@ -743,21 +818,10 @@ enum AutoPlacement {
         /// the audio), not only guessed from the two keys. Where they do,
         /// B's melody and voice wait for the swap, and the spot is judged
         /// as that: planned as a blend, it would play as A alone.
-        let chromaA = sa.barChroma, chromaB = sb.barChroma
         func notesClash(e: Int, c: Int, sw: Int?) -> Bool {
-            guard !echo, let chromaA, let chromaB else { return keysClash }
-            let q = n / 4, s = TransitionBuilder.switchBar(preset, bars: n, lowSwap: sw)
-            let until = Int(TransitionBuilder.melodyDissolve(preset, bars: n, switchAt: s)) + 2
-            func sum(_ x: [[Float]], _ r: Range<Int>) -> [Float]? {
-                let bars = r.clamped(to: 0..<x.count)
-                guard !bars.isEmpty else { return nil }
-                var out = [Float](repeating: 0, count: 12)
-                for b in bars { for p in 0..<12 { out[p] += x[b][p] } }
-                return out.contains { $0 > 0 } ? out : nil
-            }
-            guard let a = sum(chromaA, (e + q)..<(e + until)), let b = sum(chromaB, (c + q)..<(c + until))
-            else { return keysClash }
-            return !Harmony.fits(a, b, tolerance: keysClash ? Harmony.keysClashTolerance : Harmony.clashTolerance)
+            guard !echo, let clash = overlapClash(a: sa, aShift: aShift, entry: e, b: sb, bShift: bShift, cue: c,
+                                                  preset: preset, bars: n, lowSwap: sw) else { return keysClash }
+            return clash > (keysClash ? Harmony.keysClashTolerance : Harmony.clashTolerance)
         }
         let pausesA = sa.vocalQuietBeats, pausesB = sb.vocalQuietBeats
 
@@ -906,7 +970,7 @@ enum AutoPlacement {
                         }
                         let usual = entry(from: clashHere ? swap : early ?? n / 2)
                         plans.append(Plan(vocalBar: v, mashup: false, vin: usual, drumsLayer: true))
-                        if preset == .stemSwap {
+                        if preset == .stemSwap, !drumsLock {
                             // First: usually the worst, so the rest can be
                             // skipped once the spot can't win.
                             plans.insert(Plan(vocalBar: v, mashup: false, vin: entry(from: swap), drumsLayer: false), at: 0)
@@ -1025,6 +1089,7 @@ enum AutoPlacement {
         notes.insert(contentsOf: payoff, at: 0)
         return Result(entryBar: best.entry, cueBar: best.cue, vocalHandoff: handoff, lowSwap: best.lowSwap,
                       reason: notes.joined(separator: " · "), score: best.score, mashup: isMashup,
-                      dropMoment: drops, payoff: payoff, together: bestHeard, expectedVocalIn: bestVocal)
+                      dropMoment: drops, payoff: payoff, together: bestHeard, expectedVocalIn: bestVocal,
+                      notesClash: notesClash(e: best.entry, c: best.cue, sw: best.lowSwap))
     }
 }

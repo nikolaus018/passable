@@ -59,3 +59,80 @@ final class RealTrackProbe: XCTestCase {
         }
     }
 }
+
+
+/// Not a unit test: for pairs of the songs listed in $PASSABLE_GROOVE (one
+/// path per line), compares the groove lock predicted from the songs' own
+/// drum attacks with the one measured on B rendered at A's tempo, at the
+/// spot the pair would be placed on. Skipped unless the variable is set.
+final class GrooveProbe: XCTestCase {
+    func testPrediction() async throws {
+        guard let listFile = ProcessInfo.processInfo.environment["PASSABLE_GROOVE"],
+              let list = try? String(contentsOfFile: listFile, encoding: .utf8) else {
+            throw XCTSkip("set PASSABLE_GROOVE")
+        }
+        let urls = list.split(separator: "\n").map(String.init).filter { !$0.isEmpty }.map { URL(fileURLWithPath: $0) }
+        let processor = TrackProcessor()
+        var loaded: [TrackProcessor.Loaded] = []
+        for url in urls {
+            loaded.append(try await withCheckedThrowingContinuation { c in
+                processor.load(url, ticket: .init(), progress: { _ in }) { c.resume(with: $0) }
+            })
+        }
+        let t0 = Date()
+        let attacks = loaded.map { $0.stems[.drums].flatMap(BeatAlign.attacks(of:)) }
+        print(String(format: "GROOVE attacks of %d songs: %.2f s", loaded.count, Date().timeIntervalSince(t0)))
+        let analyses = loaded.map(\.analysis)
+        var t1 = Date()
+        _ = SetOrdering.costMatrix(analyses)
+        print(String(format: "GROOVE cost matrix, grooves unknown: %.2f s", Date().timeIntervalSince(t1)))
+        t1 = Date()
+        _ = SetOrdering.costMatrix(analyses, drums: attacks)
+        print(String(format: "GROOVE cost matrix, grooves known: %.2f s", Date().timeIntervalSince(t1)))
+        var pairs: [(Int, Int)] = []
+        for i in loaded.indices {
+            for d in [1, 2, 5] { pairs.append((i, (i + d) % loaded.count)); pairs.append(((i + d) % loaded.count, i)) }
+        }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        final class Box: @unchecked Sendable { var lines: [String] = []; var agree = 0, total = 0, seconds = 0.0; let lock = NSLock() }
+        let box = Box()
+        let work = pairs, songs = loaded
+        DispatchQueue.concurrentPerform(iterations: work.count) { k in
+            let (i, j) = work[k]
+            let a = songs[i], b = songs[j]
+            let plan = PairPlan.make(a: a.analysis, b: b.analysis)
+            guard plan.preset != .echoOut, let ea = attacks[i], let eb = attacks[j],
+                  let drumsA = a.stems[.drums], let drumsB = b.stems[.drums] else { return }
+            let ga = a.analysis.grid, gb = b.analysis.grid
+            let start = ga.downbeat(plan.placement.entryBar), end = start + Double(plan.bars) * ga.barSeconds
+            let offset = start - gb.scaled(by: plan.rate).downbeat(plan.placement.cueBar)
+            let split = start + TransitionBuilder.switchBar(plan.preset, bars: plan.bars, lowSwap: plan.placement.lowSwap) * ga.barSeconds
+            let t = Date()
+            let predicted = BeatAlign.predicted(a: ea, b: eb, from: start, to: end, split: split, bOffset: offset, rate: plan.rate)
+            let took = Date().timeIntervalSince(t)
+            var stretched = drumsB
+            if plan.rate != 1 {
+                let out = TimeStretcher.process(drumsB.copyStereo(), map: .constant(plan.rate), semitones: 0, percussive: true)
+                guard (try? StemAudio.save(out, directory: dir, name: "\(k)")) != nil,
+                      let stem = try? StemAudio.load(directory: dir, name: "\(k)") else { return }
+                stretched = stem
+            }
+            let actual = BeatAlign.nudge(a: drumsA, aOffset: 0, b: stretched, bOffset: offset, from: start, to: end, split: split)
+            let line = String(format: "GROOVE %2d→%2d %@ %2d bars rate %.3f  predicted %@ nudge %+3.0f ms lock %3.0f%%  actual %@ nudge %+3.0f ms lock %3.0f%%%@",
+                              i + 1, j + 1, plan.preset.rawValue, plan.bars, plan.rate,
+                              predicted.grooves ? "yes" : "no ", predicted.nudge * 1000, predicted.lockBefore * 100,
+                              actual.grooves ? "yes" : "no ", actual.nudge * 1000, actual.lockBefore * 100,
+                              predicted.grooves == actual.grooves ? "" : "  DIFFER")
+            box.lock.lock()
+            box.lines.append(line)
+            box.total += 1
+            box.seconds += took
+            if predicted.grooves == actual.grooves { box.agree += 1 }
+            box.lock.unlock()
+        }
+        for line in box.lines.sorted() { print(line) }
+        print(String(format: "GROOVE agree %d of %d; a prediction takes %.1f ms", box.agree, box.total, 1000 * box.seconds / Double(max(1, box.total))))
+    }
+}
