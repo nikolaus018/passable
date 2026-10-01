@@ -18,14 +18,15 @@ final class SetPack: XCTestCase {
         let set = SetSession(persists: false)
         set.add(urls)
         let deadline = Date().addingTimeInterval(3600)
-        while !set.isReady {
+        // Until the set is built: the songs are ordered in the background
+        // once the last one is ready, and built in that order.
+        while set.mix == nil || set.buildStatus != nil {
             if Date() > deadline { XCTFail("timeout"); return }
             if let failed = set.items.first(where: { if case .failed = $0.status { return true } else { return false } }) {
                 XCTFail("\(failed.title): \(failed.status)"); return
             }
             try await Task.sleep(nanoseconds: 200_000_000)
         }
-        // Songs added to a set are ordered as soon as the last one is ready.
         for (i, item) in set.items.enumerated() {
             let a = item.analysis!
             print(String(format: "PACK %2d  %6.2f BPM  %@  %@", i + 1, a.grid.bpm, a.key.camelotCode, item.title))
