@@ -31,6 +31,10 @@ final class SetPack: XCTestCase {
             let a = item.analysis!
             print(String(format: "PACK %2d  %6.2f BPM  %@  %@", i + 1, a.grid.bpm, a.key.camelotCode, item.title))
         }
+        if let mix = set.mix {
+            let washOuts = mix.transitions.filter { $0.edit.preset == .echoOut }.count
+            print("PACK \(set.items.count) songs, \(Theme.time(mix.length)) long, \(washOuts) Wash Outs")
+        }
         try PassableFile.write(songs: set.items.map { ($0.url, $0.analysis) }, transitions: [], masterVolume: 0.85,
                                to: URL(fileURLWithPath: out)) { _ in }
         print("PACK wrote \(out)")
