@@ -153,6 +153,16 @@ final class SetLab: XCTestCase {
                         let fall = scores[k] - min(scores[k - 1], scores[k + 1])
                         if fall > 0 { lag += Double(0.5 * (scores[k + 1] - scores[k - 1]) / fall) }
                     }
+                    // The other lags the hits meet at nearly as well, for a
+                    // window that reads as a flam: one pair of hits on the
+                    // beat and another off it looks like this.
+                    if abs(lag) > 10 * fps / 1000 {
+                        let rivals = scores.indices.filter { j in
+                            j > 0 && j < scores.count - 1 && scores[j] >= scores[j - 1] && scores[j] > scores[j + 1]
+                                && scores[j] >= 0.7 * scores[k]
+                        }.map { String(format: "%+d ms %.0f%%", $0 - reach, 100 * scores[$0] / scores[k]) }
+                        print(String(format: "      flam window %d of %d→%d: ", w / window, t.from + 1, t.to + 1) + rivals.joined(separator: ", "))
+                    }
                     out.append(lag / fps * 1000)
                 }
                 w += window

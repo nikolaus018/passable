@@ -9,17 +9,6 @@ struct MusicSearchResult: Identifiable, Equatable {
     /// A YouTube Music song: the label-delivered album master, as opposed
     /// to a video upload (edits, skits, re-uploads).
     let isOfficialAudio: Bool
-    /// A file shared on Soulseek (nil: YouTube).
-    var soulseek: SoulseekFile? = nil
-    /// What the file is, where that's known ("FLAC 16/44.1", "MP3 320").
-    var quality: String? = nil
-}
-
-/// Where songs are found online.
-enum MusicSource: String, CaseIterable, Identifiable {
-    case youtube, soulseek
-    var id: String { rawValue }
-    var displayName: String { self == .youtube ? "YouTube" : "Soulseek" }
 }
 
 /// Search and download via yt-dlp + ffmpeg (Homebrew), ported from SyncUp.
@@ -161,7 +150,6 @@ enum MusicTools {
     /// dynamic-range-compressed copies and are never picked. If YouTube
     /// refuses Opus twice, its AAC stream (itag 140) is kept as it is.
     static func download(_ result: MusicSearchResult, folder: URL = libraryFolder) throws -> URL {
-        if result.soulseek != nil { return try Soulseek.download(result, folder: folder) }
         let opus = "251/bestaudio[acodec=opus][format_id!*=drc]"
         let aac = "140/bestaudio[ext=m4a][format_id!*=drc]"
         var lastError: Error?
