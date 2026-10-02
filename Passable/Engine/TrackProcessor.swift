@@ -92,13 +92,18 @@ final class TrackProcessor: @unchecked Sendable {
         /// finds the same files again after a relaunch.
         var cacheName: String {
             let start = map.rampStart.isFinite ? String(Int(map.rampStart.rounded())) : "inf"
-            return String(format: "v2-%.9f-%@-%d-%+d", map.rate, start, Int(map.rampLength.rounded()), semitones)
+            let exit = map.hasExit
+                ? String(format: "-x%.9f-%d-%d", map.exitRate, Int(map.exitStart.rounded()), Int(map.exitLength.rounded())) : ""
+            return String(format: "v3-%.9f-%@-%d-%+d", map.rate, start, Int(map.rampLength.rounded()), semitones) + exit
         }
 
         func isSame(as other: MatchPlan) -> Bool {
             func close(_ a: Double, _ b: Double) -> Bool { a == b || abs(a - b) < 0.5 }
-            return semitones == other.semitones && abs(map.rate - other.map.rate) < 1e-9
-                && close(map.rampStart, other.map.rampStart) && close(map.rampLength, other.map.rampLength)
+            guard semitones == other.semitones, abs(map.rate - other.map.rate) < 1e-9,
+                  close(map.rampStart, other.map.rampStart), close(map.rampLength, other.map.rampLength),
+                  map.hasExit == other.map.hasExit else { return false }
+            return !map.hasExit || (abs(map.exitRate - other.map.exitRate) < 1e-9
+                                    && close(map.exitStart, other.map.exitStart) && close(map.exitLength, other.map.exitLength))
         }
     }
 

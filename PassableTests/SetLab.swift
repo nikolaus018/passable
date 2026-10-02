@@ -227,6 +227,8 @@ final class SetLab: XCTestCase {
             // singing instead (the longest run of such bars in the blend
             // and the four after it): A's cut before B's voice arrives, or
             // B's held back where A has nothing to sing.
+            // (A's cut is judged inside the blend: past its end A is over,
+            // whoever sings.)
             var vocalGap = 0, heldBack = 0
             if t.edit.preset != .echoOut, let sa = mix.tracks[t.from].loaded.analysis.structure,
                let sb = mix.tracks[t.to].loaded.analysis.structure {
@@ -237,7 +239,7 @@ final class SetLab: XCTestCase {
                     let silent = vocA[k] <= -40 && vocB[k] <= -40
                     runA = silent && sa.isActive(.vocals, bar: t.edit.entryBar + rel) ? runA + 1 : 0
                     runB = silent && sb.isActive(.vocals, bar: t.edit.cueBar + rel) ? runB + 1 : 0
-                    vocalGap = max(vocalGap, runA)
+                    if rel < t.edit.bars { vocalGap = max(vocalGap, runA) }
                     heldBack = max(heldBack, runB)
                 }
             }
@@ -277,6 +279,10 @@ final class SetLab: XCTestCase {
             }
             // A Wash Out never layers two beats: its bridge is the blend.
             if together < min(6, t.edit.bars / 2 + 2), t.edit.preset != .echoOut { phrasing += " STRUNG-TOGETHER" }
+            // The builder had to move the plan's entry, or the blend runs
+            // past A's music: planned for one spot, played at another.
+            if t.edit.entryBar != t.plan.placement.entryBar { phrasing += " ENTRY-MOVED" }
+            if t.plan.placement.overruns { phrasing += " OVERRUNS" }
             if busy > 2 { phrasing += " CROWDED" }
             if vocalGap > 2 { phrasing += " VOCAL-GAP" }
             if melx2 > 0, keyClash > Harmony.clashTolerance { phrasing += " KEY-CLASH" }
@@ -365,7 +371,10 @@ final class SetLab: XCTestCase {
               + "  (under 6: \(togetherBars.filter { $0 < 6 }.count))")
         print("Crowded bars (3+ of the melodies and voices at once): " + busyBars.map(String.init).joined(separator: " "))
         let shifted = mix.transitions.filter { $0.edit.semitones != 0 }.count
-        let stretches = mix.transitions.filter { $0.edit.preset != .echoOut }.map { abs($0.plan.rate - 1) * 100 }
+        // What each song is heard stretched by: the two share it (see `MixMath.shared`).
+        let stretches = mix.transitions.filter { $0.edit.preset != .echoOut }.map {
+            max(abs($0.plan.shared.a - 1), abs($0.plan.shared.b - 1)) * 100
+        }
         print(String(format: "Songs pitch-shifted: %d of %d;  stretch over 4%%: %d, largest %.1f%%", shifted,
                      mix.transitions.count, stretches.filter { $0 > 4 }.count, stretches.max() ?? 0))
         print("Payoffs over \(mix.transitions.count) transitions: "

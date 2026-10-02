@@ -35,9 +35,11 @@ struct TransitionPanel: View {
                     if automatic { session.autoArrange() } else { session.keepAsEdited() }
                 }))
                 .toggleStyle(.checkbox)
-                .help(session.isEdited
-                      ? "Shaped by hand. Tick to go back to the automatic transition (drops your changes)."
-                      : "Planned automatically from the two songs. Any change you make here turns this off.")
+                .help(session.byHand
+                      ? "Automation drawn by hand: it plays exactly as drawn. Tick to go back to the automatic transition (drops your changes)."
+                      : session.isEdited
+                      ? "Your spot, preset, length and key; what happens inside is still worked out from the two songs. Tick to go back to the fully automatic transition."
+                      : "Planned automatically from the two songs. Any change you make here turns this off; untick to keep it exactly as it is.")
             }
         }
     }
@@ -46,12 +48,19 @@ struct TransitionPanel: View {
         let a = session.deckA.analysis!, b = session.deckB.analysis!
         let percent = (session.matchRate - 1) * 100
         let own = b.grid.bpm * session.tempoMultiplier
+        // In a set a bigger stretch is shared: the two meet between their tempos.
+        let share = session.host == nil || session.preset == .echoOut ? (a: 1.0, b: session.matchRate)
+            : MixMath.shared(session.matchRate)
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: "metronome").frame(width: 16)
                 if session.preset == .echoOut {
                     Text(String(format: "B stays at %.2f BPM", own))
                     Text("no shared beat").foregroundStyle(.secondary)
+                } else if share.a != 1 {
+                    Text(String(format: "A %.2f and B %.2f meet at %.2f BPM", a.grid.bpm, own, a.grid.bpm * share.a))
+                    Text(String(format: "A %+.1f%%, B %+.1f%%", (share.a - 1) * 100, (share.b - 1) * 100))
+                        .foregroundStyle(abs(percent) > 8 ? .orange : .secondary)
                 } else {
                     Text(String(format: "B %.2f → %.2f BPM", own, a.grid.bpm))
                     Text(String(format: "%+.1f%%", percent))
@@ -61,7 +70,9 @@ struct TransitionPanel: View {
             }
             .help(session.preset == .echoOut
                   ? "Wash Out never layers the two beats, so B keeps its own tempo."
-                  : "B matches A's tempo only while they overlap, then glides back to its own over \(session.glideBars) bars and plays untouched."
+                  : (share.a != 1
+                     ? "The two meet at a tempo between theirs, so neither is heard far off its own: A glides there over its last bars alone, B glides back to its own after the blend and plays untouched."
+                     : "B matches A's tempo only while they overlap, then glides back to its own over \(session.glideBars) bars and plays untouched.")
                     + (abs(percent) > 8 ? " That's a big stretch: Wash Out avoids it." : ""))
             HStack(spacing: 6) {
                 Image(systemName: "tuningfork").frame(width: 16)

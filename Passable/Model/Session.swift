@@ -56,7 +56,7 @@ final class Session: ObservableObject {
             guard entryBar != oldValue else { return }
             if !isRestoring && !isPlacing {
                 pushUndo(Arrangement(lanes: lanes, rolls: rolls, entryBar: oldValue, cueBar: cueBar, preset: preset,
-                                     bars: transitionBars))
+                                     bars: transitionBars, byHand: byHand))
             }
             alignmentChanged(from: oldValue)
             editChanged()
@@ -68,7 +68,7 @@ final class Session: ObservableObject {
             guard cueBar != oldValue else { return }
             if !isRestoring && !isPlacing {
                 pushUndo(Arrangement(lanes: lanes, rolls: rolls, entryBar: entryBar, cueBar: oldValue, preset: preset,
-                                     bars: transitionBars))
+                                     bars: transitionBars, byHand: byHand))
             }
             alignmentChanged(from: nil)
             editChanged()
@@ -120,8 +120,11 @@ final class Session: ObservableObject {
     @Published private(set) var transitionTitle: String?
     /// Bars of A the set lets the transition start on.
     @Published var entryRange: ClosedRange<Int>?
-    /// Shaped by hand, rather than the automatic plan.
+    /// Changed by the user, rather than the automatic plan.
     @Published private(set) var isEdited = false
+    /// The automation was drawn by hand (see `TransitionEdit.byHand`);
+    /// otherwise the set writes it for the spot and preset chosen here.
+    @Published private(set) var byHand = false
     private var isOpening = false
     /// What was last opened or sent to the host: only a real change (not a
     /// mute, solo or which parameter a lane shows) counts as an edit.
@@ -131,13 +134,55 @@ final class Session: ObservableObject {
 
     var currentEdit: TransitionEdit {
         TransitionEdit(entryBar: entryBar, cueBar: cueBar, preset: preset, bars: transitionBars,
-                       semitones: semitones, lanes: lanes, rolls: rolls)
+                       semitones: semitones, lanes: lanes, rolls: rolls, byHand: byHand)
+    }
+
+    /// How the set plays the transition shown here. The editor's clock is
+    /// the set's less a constant: A's own clock up to where A sets off for
+    /// the blend's tempo (the two songs meet between theirs, see
+    /// `MixMath.shared`), and as the set plays from there. So A is shown
+    /// as the set renders it, and the blend's bars are the set's.
+    struct Hosted {
+        /// What it was built for: once something is changed here, it holds
+        /// for A until the set has rebuilt, and no longer for B.
+        let edit: TransitionEdit
+        /// A as the set plays it (nil: the song as it is), its time map,
+        /// and the editor time of its stems' frame 0 around the transition.
+        let aMatched: TrackProcessor.Matched?
+        let aMap: TimeMap
+        let aOffset: Double
+        /// Editor time of B's rendition's frame 0.
+        let bOffset: Double
+        /// A bar of the blend.
+        let barSeconds: Double
+    }
+    private var hosted: Hosted?
+    /// `hosted`, while the transition is still the one the set built.
+    private var hostedHere: Hosted? {
+        hosted.flatMap {
+            $0.edit.entryBar == entryBar && $0.edit.cueBar == cueBar && $0.edit.preset == preset
+                && $0.edit.bars == transitionBars && $0.edit.semitones == semitones ? $0 : nil
+        }
+    }
+
+    /// A bar of the blend: A's own, unless the set has A meet B part of the way.
+    var blendBarSeconds: Double { hostedHere?.barSeconds ?? masterGrid?.barSeconds ?? 2 }
+
+    /// Editor time at which A's own second `native` plays, and back.
+    func timeA(_ native: Double) -> Double {
+        guard let h = hosted else { return native }
+        return h.aOffset + h.aMap.output(native * AudioIO.sampleRate) / AudioIO.sampleRate
+    }
+
+    private func nativeA(_ time: Double) -> Double {
+        guard let h = hosted else { return time }
+        return h.aMap.source((time - h.aOffset) * AudioIO.sampleRate) / AudioIO.sampleRate
     }
 
     /// Shows one transition of a set, exactly as the set plays it.
     func open(title: String, a: Deck, b: Deck, edit: TransitionEdit, isEdited: Bool, matched: TrackProcessor.Matched?,
               placement: AutoPlacement.Result, placedAs: (preset: TransitionPreset, bars: Int),
-              entryRange: ClosedRange<Int>, offset: Double) {
+              entryRange: ClosedRange<Int>, offset: Double, hosted: Hosted? = nil) {
         isOpening = true
         isRestoring = true
         defer { isOpening = false; isRestoring = false }
@@ -149,6 +194,7 @@ final class Session: ObservableObject {
         matchStatus = nil
         deckA = a
         deckB = b
+        self.hosted = hosted
         // In a set, the plan's key shift (if any) is what B plays at.
         autoKey = edit.semitones == 0
         keyClash = nil
@@ -167,6 +213,7 @@ final class Session: ObservableObject {
                            lowSwap: placement.lowSwap, vocalHandoff: placement.vocalHandoff)
         placementNote = isEdited || placement.reason.isEmpty ? nil : placement.reason
         self.matched = matched
+        byHand = isEdited && edit.byHand
         rolls = edit.rolls
         lanes = edit.lanes
         self.entryRange = entryRange
@@ -182,12 +229,46 @@ final class Session: ObservableObject {
         syncTransport()
     }
 
+    /// The set has rebuilt the transition shown here: its rendition of B,
+    /// and, unless the automation is drawn by hand, the automation the set
+    /// wrote for the spot and preset chosen here.
+    func adopt(_ edit: TransitionEdit, matched: TrackProcessor.Matched?, placement: AutoPlacement.Result,
+               hosted: Hosted? = nil) {
+        guard hasPair else { return }
+        isOpening = true
+        isRestoring = true
+        defer { isOpening = false; isRestoring = false }
+        self.hosted = hosted
+        if let matched, self.matched?.plan.isSame(as: matched.plan) != true { self.matched = matched }
+        // Only what it was built from: a change made since is on its way.
+        guard !byHand, !edit.byHand, edit.preset == preset, edit.bars == transitionBars, edit.cueBar == cueBar,
+              edit.semitones == semitones else { return rebuildSnapshot() }
+        placedFor = Placed(preset: edit.preset, bars: edit.bars, entryBar: edit.entryBar, cueBar: edit.cueBar,
+                           mashup: placement.mashup, dropMoment: placement.dropMoment, lowSwap: placement.lowSwap,
+                           vocalHandoff: placement.vocalHandoff)
+        // (The set may have moved the entry into the bars A is free on.)
+        entryBar = edit.entryBar
+        var written = edit.lanes
+        for i in written.indices {
+            guard let shown = lanes.first(where: { $0.id == written[i].id }) else { continue }
+            written[i].isMuted = shown.isMuted
+            written[i].isSoloed = shown.isSoloed
+            written[i].visibleParameter = shown.visibleParameter
+        }
+        if written != lanes || edit.rolls != rolls {
+            rolls = edit.rolls
+            lanes = written
+        }
+        baseline = currentEdit
+    }
+
     func close() {
         isOpening = true
         defer { isOpening = false }
         deckA = Deck()
         deckB = Deck()
         matched = nil
+        hosted = nil
         transitionTitle = nil
         pairID = UUID()
     }
@@ -195,7 +276,12 @@ final class Session: ObservableObject {
     private func editChanged() {
         guard let host, !isOpening, !isRestoring, hasPair else { return }
         let edit = currentEdit
-        if let baseline, Self.sameContent(baseline, edit) { return }
+        if let baseline, Self.sameContent(baseline, edit) {
+            // Nothing new for the set, but the lanes may have been
+            // rewritten here (Apply): show what the set plays again.
+            if !byHand { host.editorUnchanged() }
+            return
+        }
         baseline = edit
         isEdited = true
         placementNote = nil
@@ -204,14 +290,17 @@ final class Session: ObservableObject {
 
     private static func sameContent(_ a: TransitionEdit, _ b: TransitionEdit) -> Bool {
         a.entryBar == b.entryBar && a.cueBar == b.cueBar && a.preset == b.preset && a.bars == b.bars
-            && a.semitones == b.semitones && a.lanes.map(\.envelopes) == b.lanes.map(\.envelopes) && a.rolls == b.rolls
+            && a.semitones == b.semitones && a.byHand == b.byHand
+            // Automation the set writes itself isn't part of what was chosen.
+            && (!a.byHand || (a.lanes.map(\.envelopes) == b.lanes.map(\.envelopes) && a.rolls == b.rolls))
     }
 
     /// Keeps the transition exactly as it is, as a hand edit: later changes
     /// elsewhere in the set no longer re-plan it.
     func keepAsEdited() {
-        guard let host, hasPair, !isEdited else { return }
+        guard let host, hasPair, !byHand else { return }
         isEdited = true
+        byHand = true
         placementNote = nil
         baseline = currentEdit
         host.editorChanged(currentEdit)
@@ -372,10 +461,8 @@ final class Session: ObservableObject {
     private var desiredPlan: TrackProcessor.MatchPlan? {
         guard deckA.loaded != nil, deckB.loaded != nil, let g = masterGrid else { return nil }
         let sr = AudioIO.sampleRate
-        // As in a set: B glides home once A's melody has dissolved.
-        let tail = preset == .stemSwap
-            ? SetBuilder.exitTail(bars: transitionBars, lowSwap: placedHere?.lowSwap) : 0
-        let map = TimeMap.glide(rate: matchRate, rampStart: (transitionEnd + Double(tail) * g.barSeconds - offsetB) * sr,
+        // As in a set: B glides home as the blend ends.
+        let map = TimeMap.glide(rate: matchRate, rampStart: (transitionEnd - offsetB) * sr,
                                 rampLength: Double(glideBars) * g.barSeconds * sr)
         return .init(map: map, semitones: semitones)
     }
@@ -383,7 +470,8 @@ final class Session: ObservableObject {
     /// Moving the transition moves where B's glide starts, so B is
     /// re-rendered, once the edits settle.
     private func scheduleRematch() {
-        guard deckB.loaded != nil, deckA.loaded != nil else { return }
+        // In a set, the set renders B and hands it over (see `adopt`).
+        guard host == nil, deckB.loaded != nil, deckA.loaded != nil else { return }
         rematchTask?.cancel()
         rematchTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -394,7 +482,7 @@ final class Session: ObservableObject {
 
     private func rematch() {
         rematchTask?.cancel()
-        guard let b = deckB.loaded, let plan = desiredPlan else { return }
+        guard host == nil, let b = deckB.loaded, let plan = desiredPlan else { return }
         if pendingPlan?.isSame(as: plan) == true || (pendingPlan == nil && matched?.plan.isSame(as: plan) == true) { return }
         matchTicket?.cancel()
         let ticket = TrackProcessor.Ticket()
@@ -431,15 +519,16 @@ final class Session: ObservableObject {
 
     /// Master-timeline seconds at which B's frame 0 plays.
     var offsetB: Double {
+        if let h = hostedHere { return h.bOffset }
         guard let a = masterGrid, let b = matchedGridB else { return 0 }
         return a.downbeat(entryBar) - b.downbeat(cueBar)
     }
 
+    /// (In a set too: the editor's clock is A's own up to the blend.)
     var transitionStart: Double { masterGrid?.downbeat(entryBar) ?? 0 }
 
     var transitionEnd: Double {
-        guard let g = masterGrid else { return 0 }
-        return preset == .echoOut ? g.downbeat(entryBar) : g.downbeat(entryBar + transitionBars)
+        preset == .echoOut ? transitionStart : transitionStart + Double(transitionBars) * blendBarSeconds
     }
 
     var barCountA: Int { deckA.analysis.map { $0.grid.barCount(duration: $0.duration) } ?? 0 }
@@ -452,10 +541,15 @@ final class Session: ObservableObject {
     }
 
     func peaks(for lane: Lane) -> [Float]? {
-        lane.side == .a ? deckA.loaded?.peaks[lane.stem] : matched?.peaks[lane.stem]
+        lane.side == .a ? hosted?.aMatched?.peaks[lane.stem] ?? deckA.loaded?.peaks[lane.stem] : matched?.peaks[lane.stem]
     }
 
-    func laneOffset(_ lane: Lane) -> Double { lane.side == .a ? 0 : offsetB }
+    func laneOffset(_ lane: Lane) -> Double { laneOffset(lane.side) }
+
+    /// Editor time of a deck's stems' frame 0, as shown.
+    func laneOffset(_ side: DeckSide) -> Double {
+        side == .a ? (hosted?.aMatched != nil ? hosted!.aOffset : 0) : offsetB
+    }
 
     /// Moving the entry point drags the automation with it, so a transition
     /// you've shaped by hand survives being slid to a different phrase.
@@ -531,6 +625,7 @@ final class Session: ObservableObject {
     func choosePreset(_ p: TransitionPreset) {
         guard p != preset else { return }
         checkpoint()
+        byHand = false
         preset = p
         transitionBars = p.defaultBars
         writePreset()
@@ -539,20 +634,24 @@ final class Session: ObservableObject {
     func chooseBars(_ bars: Int) {
         guard bars != transitionBars else { return }
         checkpoint()
+        byHand = false
         transitionBars = bars
         writePreset()
     }
 
     func applyPreset() {
         checkpoint()
+        byHand = false
         writePreset()
     }
 
+    /// In a set this is only what's shown until the set has rebuilt the
+    /// transition from the audio (see `adopt`).
     private func writePreset() {
         guard let g = masterGrid else { return }
         let placed = placedHere
         let made = TransitionBuilder.make(preset, lanes: lanes, start: g.downbeat(entryBar),
-                                          barSeconds: g.barSeconds, bars: transitionBars, vocalBar: placed?.vocalHandoff,
+                                          barSeconds: blendBarSeconds, bars: transitionBars, vocalBar: placed?.vocalHandoff,
                                           keysClash: keysIncompatible,
                                           lowSwap: placed?.lowSwap,
                                           mashup: placed?.mashup ?? false, dropMoment: placed?.dropMoment ?? false,
@@ -567,17 +666,17 @@ final class Session: ObservableObject {
     private func vocalFade(_ side: DeckSide) -> Double {
         guard let g = masterGrid, let stem = side == .a ? deckA.loaded?.stems[.vocals] : matched?.stems[.vocals],
               let ref = VocalPhrasing.reference(deck(side).analysis?.structure) else { return 1 }
-        let probe = TransitionBuilder.make(preset, lanes: Lane.allLanes(), start: g.downbeat(entryBar), barSeconds: g.barSeconds,
+        let probe = TransitionBuilder.make(preset, lanes: Lane.allLanes(), start: g.downbeat(entryBar), barSeconds: blendBarSeconds,
                                            bars: transitionBars, vocalBar: placedHere?.vocalHandoff,
                                            keysClash: keysIncompatible, lowSwap: placedHere?.lowSwap,
                                            mashup: placedHere?.mashup ?? false, dropMoment: placedHere?.dropMoment ?? false)
-        let beat = g.barSeconds / 4
+        let beat = blendBarSeconds / 4
         if side == .a, let exit = probe.vocalExit {
-            let t = g.downbeat(entryBar) + exit * g.barSeconds
+            let t = g.downbeat(entryBar) + exit * blendBarSeconds
             return VocalPhrasing.sounding(stem, offset: 0, reference: ref, at: t, beat: beat) ? 1 : 0
         }
         if side == .b, let entry = probe.vocalEntry {
-            let t = g.downbeat(entryBar) + entry * g.barSeconds - beat
+            let t = g.downbeat(entryBar) + entry * blendBarSeconds - beat
             return VocalPhrasing.sounding(stem, offset: offsetB, reference: ref, at: t, beat: beat) ? 1 : 0
         }
         return 0
@@ -585,6 +684,7 @@ final class Session: ObservableObject {
 
     func clearAutomation() {
         checkpoint()
+        byHand = true
         resetAutomation()
     }
 
@@ -602,7 +702,12 @@ final class Session: ObservableObject {
     func updateLane(_ id: String, undoable: Bool = true, _ change: (inout Lane) -> Void) {
         guard let i = lanes.firstIndex(where: { $0.id == id }) else { return }
         if undoable { checkpoint() }
-        change(&lanes[i])
+        var lane = lanes[i]
+        change(&lane)
+        // Drawing on a lane (not muting it or switching what it shows)
+        // takes the automation over by hand.
+        if lane.envelopes != lanes[i].envelopes { byHand = true }
+        lanes[i] = lane
     }
 
     // MARK: - Undo
@@ -614,6 +719,7 @@ final class Session: ObservableObject {
         var cueBar: Int
         var preset: TransitionPreset
         var bars: Int
+        var byHand = false
     }
 
     private var undoStack: [Arrangement] = []
@@ -624,7 +730,8 @@ final class Session: ObservableObject {
     @Published private(set) var canRedo = false
 
     private var currentArrangement: Arrangement {
-        Arrangement(lanes: lanes, rolls: rolls, entryBar: entryBar, cueBar: cueBar, preset: preset, bars: transitionBars)
+        Arrangement(lanes: lanes, rolls: rolls, entryBar: entryBar, cueBar: cueBar, preset: preset, bars: transitionBars,
+                    byHand: byHand)
     }
 
     /// Records the arrangement as it is now, before an edit.
@@ -651,6 +758,7 @@ final class Session: ObservableObject {
 
     private func restore(_ state: Arrangement) {
         isRestoring = true
+        byHand = state.byHand
         preset = state.preset
         transitionBars = state.bars
         entryBar = state.entryBar
@@ -735,9 +843,13 @@ final class Session: ObservableObject {
         let b = gridB
         let aEnd = min(t1, b?.from ?? t1)
         if t0 < aEnd {
-            var i = Int(((t0 - a.firstDownbeat) / a.beatSeconds).rounded(.down)) - 4
-            while a.beat(i) <= aEnd {
-                if a.beat(i) >= t0 - a.barSeconds && a.beat(i) < aEnd { add(a.beat(i), i) }
+            // A's beats where they play: its own grid, bent where it glides
+            // to the blend's tempo and through the blend (in a set).
+            var i = Int(((nativeA(t0) - a.firstDownbeat) / a.beatSeconds).rounded(.down)) - 4
+            while true {
+                let t = timeA(a.beat(i))
+                if t > aEnd { break }
+                if t >= t0 - a.barSeconds && t < aEnd { add(t, i) }
                 i += 1
             }
         }
@@ -766,7 +878,7 @@ final class Session: ObservableObject {
         }
         guard let g = masterGrid else { return seconds }
         let step = g.beatSeconds / division
-        return g.firstDownbeat + ((seconds - g.firstDownbeat) / step).rounded() * step
+        return timeA(g.firstDownbeat + ((nativeA(seconds) - g.firstDownbeat) / step).rounded() * step)
     }
 
     // MARK: - Rendering

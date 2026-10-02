@@ -608,4 +608,199 @@ final class PayoffTests: XCTestCase {
         let steps = (1..<30_000).map { abs(l[$0] - l[$0 - 1]) }
         XCTAssertLessThan(steps.max()!, 5e-4, "the seam clicks")
     }
+
+    /// A short song between two blends: the way out starts once it's back
+    /// at its own tempo, on one of its phrases, with a blend that fits what
+    /// is left of it. (It used to be planned before that and then pushed a
+    /// bar or more off its phrases, past the end of its music.)
+    func testAShortSongLeavesOnAPhraseOnceItIsHome() {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        let a = song(scale: 0, key: c, bars: 40), b = song(scale: 0, key: c)
+        // Home at bar 23, so no room for eight bars alone and sixteen of blend.
+        let plan = PairPlan.make(a: a, b: b, entryRange: 31...Int.max, soloFrom: 23)
+        XCTAssertGreaterThanOrEqual(plan.placement.entryBar, 23)
+        XCTAssertEqual(plan.placement.entryBar % 4, 0)
+        XCTAssertLessThanOrEqual(plan.placement.entryBar + plan.bars, 40)
+        XCTAssertFalse(plan.placement.overruns)
+        // Nothing fits a song that is over as it comes home: said, and on a phrase.
+        let late = PairPlan.make(a: a, b: b, entryRange: 46...Int.max, soloFrom: 38)
+        XCTAssertTrue(late.placement.overruns)
+        XCTAssertGreaterThanOrEqual(late.placement.entryBar, 38)
+        XCTAssertEqual(late.placement.entryBar % 4, 0)
+    }
+
+    /// The set builder rolls into a drop only from a blend of sixteen bars:
+    /// placement doesn't plan (and simulate) one for a shorter Stem Swap.
+    func testNoDropIsPlannedForAShortStemSwap() {
+        let s = popSong()
+        let song = TrackAnalysis(grid: BeatGrid(bpm: 120, firstDownbeat: 0), key: MusicalKey(tonicPitchClass: 0, isMajor: true),
+                                 duration: 128, structure: s, version: TrackAnalysis.currentVersion)
+        for cue in [16, 20] {
+            let long = AutoPlacement.place(a: song, b: song, bars: 16, preset: .stemSwap, at: (32, cue))
+            let short = AutoPlacement.place(a: song, b: song, bars: 8, preset: .stemSwap, at: (32, cue))
+            XCTAssertFalse(short.dropMoment)
+            XCTAssertFalse(short.payoff.contains("roll into the drop"))
+            XCTAssertEqual(long.entryBar, 32)
+            XCTAssertEqual(long.cueBar, cue)
+        }
+    }
+
+    /// What's left of a melody in a drums-only intro is separation bleed:
+    /// no notes to clash with, for placement as for the builder.
+    func testBleedIsNotANote() throws {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        var b = try XCTUnwrap(song(scale: 1, key: c).structure)
+        XCTAssertNotNil(AutoPlacement.notes(b, bars: 0..<8))
+        b.stemLevel = Dictionary(uniqueKeysWithValues: StemKind.allCases.map { ($0.rawValue, [Float](repeating: -65, count: 64)) })
+        XCTAssertNil(AutoPlacement.notes(b, bars: 0..<8))
+        b.stemLevel?[StemKind.other.rawValue] = [Float](repeating: -25, count: 64)
+        XCTAssertNotNil(AutoPlacement.notes(b, bars: 0..<8))
+    }
+
+    /// A Wash Out never plays the two songs' notes together: no clash to
+    /// swap melodies for, or to price.
+    func testAWashOutHasNoNotesToClash() {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        let a = song(scale: 0, key: c, bpm: 100), far = song(scale: 1, key: MusicalKey(tonicPitchClass: 1, isMajor: true), bpm: 125)
+        let wash = PairPlan.make(a: a, b: far)
+        XCTAssertEqual(wash.preset, .echoOut)
+        XCTAssertFalse(wash.keysClash)
+        XCTAssertEqual(wash.placement.notesClash, false)
+    }
+
+    /// A lock predicted from nothing isn't one.
+    func testGrooveLockNeedsWindowsThatVote() {
+        XCTAssertFalse(BeatAlign.Result(nudge: 0, lock: 1).clearlyGrooves)
+        XCTAssertTrue(BeatAlign.Result(nudge: 0, lock: 1).grooves, "the builder still layers what it can't judge")
+        XCTAssertTrue(BeatAlign.Result(nudge: 0, lock: 1, lockBefore: 0.9, votesBefore: 4).clearlyGrooves)
+        // B's tops too sparse to say before the swap, both kits as one after it.
+        XCTAssertTrue(BeatAlign.Result(nudge: 0, lock: 1, lockAfter: 1, votesBefore: 1, votesAfter: 3).clearlyGrooves)
+        XCTAssertFalse(BeatAlign.Result(nudge: 0, lock: 1, lockAfter: 0.5, votesBefore: 0, votesAfter: 4).clearlyGrooves)
+    }
+
+    /// A spot, preset and length chosen by hand are planned where they were
+    /// put: only what happens inside is worked out.
+    func testAChosenSpotIsPlannedWhereItWasPut() {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        let a = song(scale: 0, key: c), b = song(scale: 0, key: c)
+        for (preset, bars) in [(TransitionPreset.dropSwap, 8), (.longBlend, 32), (.stemSwap, 4), (.echoOut, 8), (.stemSwap, 1)] {
+            let chosen = TransitionEdit(entryBar: 37, cueBar: 3, preset: preset, bars: bars, semitones: 1, lanes: [],
+                                        byHand: false)
+            let plan = PairPlan.make(a: a, b: b, entryRange: 20...Int.max, soloFrom: 12, fixed: chosen)
+            XCTAssertEqual(plan.preset, preset)
+            XCTAssertEqual(plan.bars, bars)
+            XCTAssertEqual(plan.placement.entryBar, 37)
+            XCTAssertEqual(plan.placement.cueBar, 3)
+            XCTAssertEqual(plan.semitones, 1)
+        }
+        // And past the end of both songs without falling over.
+        let late = TransitionEdit(entryBar: 63, cueBar: 60, preset: .longBlend, bars: 32, semitones: 0, lanes: [], byHand: false)
+        XCTAssertEqual(PairPlan.make(a: a, b: b, fixed: late).placement.entryBar, 63)
+    }
+
+    /// Saved edits from before the flag existed were drawn in the editor.
+    func testOldEditsAreByHand() throws {
+        let json = #"{"entryBar":4,"cueBar":0,"preset":"stemSwap","bars":16,"semitones":0,"lanes":[]}"#
+        XCTAssertTrue(try JSONDecoder().decode(TransitionEdit.self, from: Data(json.utf8)).byHand)
+    }
+
+    /// Nothing of A sounds past the blend's end, where B starts gliding
+    /// home: a mashup's switch on the last bar dissolves A's melody into it.
+    func testAIsGoneByTheEndOfAMashup() {
+        let lanes = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16,
+                                           vocalBar: 4, lowSwap: 16, mashup: true).lanes
+        XCTAssertEqual(value(lanes, .a, .other, bar: 13.9), 1)
+        XCTAssertLessThan(value(lanes, .a, .other, bar: 15.5), 0.2)
+        for stem in StemKind.allCases { XCTAssertEqual(value(lanes, .a, stem, bar: 16.01), 0, "\(stem)") }
+        XCTAssertEqual(value(lanes, .b, .other, bar: 15.9), 0)
+        XCTAssertEqual(value(lanes, .b, .other, bar: 16.01), 1)
+    }
+
+    /// The half beat of silence before a drop ends with A gone, at any
+    /// tempo (below 120 BPM A's beat used to open again for a few ms).
+    func testNothingOfALeaksOutOfTheSilenceBeforeADrop() {
+        for barSeconds in [1.6, 2.0, 2.8, 3.4] {
+            let lanes = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 10, barSeconds: barSeconds, bars: 16,
+                                               lowSwap: 8, dropMoment: true).lanes
+            for stem in [StemKind.drums, .bass] {
+                let lane = lanes.first { $0.side == .a && $0.stem == stem }!
+                for ms in [0.0, 0.5, 1, 2, 3, 5] {
+                    XCTAssertEqual(lane.value(.volume, at: 10 + 8 * barSeconds + ms / 1000), 0, "\(stem) \(barSeconds) \(ms)")
+                }
+            }
+            let b = lanes.first { $0.side == .b && $0.stem == .drums }!
+            XCTAssertEqual(b.value(.volume, at: 10 + 8 * barSeconds + 0.006), 1)
+        }
+    }
+
+    /// The exact search prices the whole set, not only its transitions: it
+    /// finds what trying every order finds.
+    func testExactOrderCountsWhatTheSetPaysFor() {
+        var seed: UInt64 = 7
+        func random() -> Double {
+            seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Double(seed >> 33) / Double(1 << 31)
+        }
+        func permutations(_ x: [Int]) -> [[Int]] {
+            x.count <= 1 ? [x] : x.indices.flatMap { i -> [[Int]] in
+                var rest = x
+                let head = rest.remove(at: i)
+                return permutations(rest).map { [head] + $0 }
+            }
+        }
+        for n in [4, 6, 7] {
+            let costs = (0..<n).map { _ in (0..<n).map { _ in 3 * random() } }
+            let washOuts = (0..<n).map { _ in (0..<n).map { _ in random() < 0.3 } }
+            let energies = (0..<n).map { _ in random() }
+            let found = SetOrdering.order(costs, washOuts: washOuts, energies: energies)
+            XCTAssertEqual(Set(found), Set(0..<n))
+            let best = permutations(Array(0..<n)).map { SetOrdering.total($0, costs, washOuts, energies) }.min()!
+            XCTAssertEqual(SetOrdering.total(found, costs, washOuts, energies), best, accuracy: 1e-9)
+        }
+    }
+
+    /// A song added to a set that has its order is fitted in; the others
+    /// stay where they were.
+    func testAnAddedSongIsFittedIn() {
+        // 0 → 1 → 2 is the set; 3 belongs between 1 and 2.
+        var costs = [[Double]](repeating: [Double](repeating: 5, count: 4), count: 4)
+        costs[0][1] = 1; costs[1][2] = 1; costs[1][3] = 0.2; costs[3][2] = 0.2
+        XCTAssertEqual(SetOrdering.insert([3], into: [0, 1, 2], costs), [0, 1, 3, 2])
+        // Even where starting over would turn the set round.
+        costs[2][1] = 0; costs[1][0] = 0
+        XCTAssertEqual(SetOrdering.insert([3], into: [0, 1, 2], costs), [0, 1, 3, 2])
+        // Larger sets: local search, still every song once.
+        var seed: UInt64 = 3
+        let big = (0..<16).map { _ in (0..<16).map { _ -> Double in
+            seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Double(seed >> 33) / Double(1 << 31)
+        } }
+        XCTAssertEqual(Set(SetOrdering.order(big)), Set(0..<16))
+    }
+
+    /// A Wash Out's bridge comes in two lengths, and the plan says which.
+    func testAWashOutPicksItsBridge() {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        let plan = PairPlan.make(a: song(scale: 0, key: c, bpm: 100), b: song(scale: 0, key: c, bpm: 125))
+        XCTAssertEqual(plan.preset, .echoOut)
+        XCTAssertTrue([4, 8].contains(plan.bars))
+        let lanes = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 4).lanes
+        XCTAssertEqual(value(lanes, .a, .drums, bar: -4.01), 1)
+        XCTAssertEqual(value(lanes, .a, .drums, bar: -1.99), 0, accuracy: 0.01)
+        XCTAssertEqual(value(lanes, .a, .other, bar: -0.5), 1)
+        XCTAssertEqual(value(lanes, .b, .drums, bar: -0.01), 0)
+        XCTAssertEqual(value(lanes, .b, .drums, bar: 0.01), 1)
+    }
+
+    /// Placement hears where B's voice really starts, not where its
+    /// channel opens.
+    func testPlacementHearsWhereTheVoiceStarts() {
+        var s = popSong()
+        s.stemLevel = ["vocals": [Float](repeating: -20, count: 64)]
+        // Silent for the first eight bars, singing from the ninth.
+        s.vocalBeatLevel = (0..<256).map { $0 < 32 ? -80 : -20 }
+        XCTAssertEqual(AutoPlacement.vocalSounds(s, cue: 0, from: 4, limit: 16), 8)
+        XCTAssertEqual(AutoPlacement.vocalSounds(s, cue: 0, from: 9.5, limit: 16), 9.5)
+        XCTAssertEqual(AutoPlacement.vocalSounds(s, cue: 0, from: 2, limit: 6), 6, "not found by then: that's where it's taken to start")
+    }
 }

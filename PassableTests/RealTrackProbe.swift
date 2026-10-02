@@ -136,3 +136,47 @@ final class GrooveProbe: XCTestCase {
         print(String(format: "GROOVE agree %d of %d; a prediction takes %.1f ms", box.agree, box.total, 1000 * box.seconds / Double(max(1, box.total))))
     }
 }
+
+
+/// Not a unit test: for each neighbouring pair of the songs listed in
+/// $PASSABLE_PAIRS (one path per line, in set order), what every preset and
+/// length would give at its best spot, whether or not the grooves lock.
+/// Shows why a pair is planned as it is. Skipped unless the variable is set.
+final class PairProbe: XCTestCase {
+    func testOptions() async throws {
+        guard let listFile = ProcessInfo.processInfo.environment["PASSABLE_PAIRS"],
+              let list = try? String(contentsOfFile: listFile, encoding: .utf8) else {
+            throw XCTSkip("set PASSABLE_PAIRS")
+        }
+        let urls = list.split(separator: "\n").map(String.init).filter { !$0.isEmpty }.map { URL(fileURLWithPath: $0) }
+        let processor = TrackProcessor()
+        var loaded: [TrackProcessor.Loaded] = []
+        for url in urls {
+            loaded.append(try await withCheckedThrowingContinuation { c in
+                processor.load(url, ticket: .init(), progress: { _ in }) { c.resume(with: $0) }
+            })
+        }
+        for (i, (la, lb)) in zip(loaded, loaded.dropFirst()).enumerated() {
+            let a = la.analysis, b = lb.analysis
+            let soloFrom = a.grid.barCount(duration: a.duration) / 4
+            let rate = MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)
+            let clash = MixMath.keysClash(a.key, b.key)
+            print(String(format: "PAIR %d→%d  %@ → %@  rate %+.1f%%  keys %@ %@%@", i + 1, i + 2, SongTitle.of(urls[i]),
+                         SongTitle.of(urls[i + 1]), (rate - 1) * 100, a.key.camelotCode, b.key.camelotCode, clash ? " (clash)" : ""))
+            for (preset, bars) in [(TransitionPreset.stemSwap, 16), (.stemSwap, 8), (.dropSwap, 16), (.dropSwap, 8), (.echoOut, 8)] {
+                for lock in [false, true] where !(lock && preset == .echoOut) {
+                    let p = AutoPlacement.place(a: a, b: b, bars: bars, preset: preset, trimA: Float(MixMath.trimDB(a)),
+                                                trimB: Float(MixMath.trimDB(b)),
+                                                entryRange: (soloFrom + SetBuilder.minimumSoloBars)...Int.max, keysClash: clash,
+                                                mashup: !clash && abs(rate - 1) < MixMath.mashupStretch, soloFrom: soloFrom,
+                                                drumsLock: lock, glide: MixMath.glideBars(rate: rate))
+                    print(String(format: "   %@ %2d %@  score %6.2f  together %@  entry %3d cue %3d  switch %@ handoff %2d  clash %@  %@",
+                                 preset.rawValue.padding(toLength: 8, withPad: " ", startingAt: 0), bars,
+                                 lock ? "locked " : "unknown", p.score, p.together.map(String.init) ?? "-", p.entryBar, p.cueBar,
+                                 p.lowSwap.map(String.init) ?? "-", p.vocalHandoff, p.notesClash == true ? "yes" : "no ",
+                                 p.reason))
+                }
+            }
+        }
+    }
+}

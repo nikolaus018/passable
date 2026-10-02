@@ -20,25 +20,33 @@ final class ChoreographyProbe: XCTestCase {
                         for layer in [false, true] {
                             for linger in [false, true] where !linger || layer {
                                 for mashup in [false, true] where !mashup || (preset == .stemSwap && !clash) {
+                                  for carry in [false, true] where !carry || (preset == .stemSwap && !clash && !mashup) {
                                     for drop in [false, true] where !drop || preset != .echoOut {
                                         let vocalBars = Array(Set([n / 4, n / 2, 3 * n / 4, n]))
                                         for vocalBar in vocalBars {
                                             for vocalIn in [nil] + [Double(n) / 4 + 0.25, Double(n) / 2 + 0.5, Double(n) - 0.75]
                                                 .map { Optional($0) } {
-                                                for vocalOut in [nil, -1.5, Double(n) / 4, Double(n) / 2 - 0.25] as [Double?] {
+                                                // Where the set builder may put A's exit: in
+                                                // a Wash Out's bridge, otherwise from bar 0
+                                                // to where B's voice sounds (which can be a
+                                                // little after its channel opens).
+                                                let exits: [Double?] = preset == .echoOut ? [nil, -1.5]
+                                                    : [nil, Double(n) / 4, Double(n) / 2 - 0.25]
+                                                for vocalOut in exits {
                                                     built += 1
                                                     let made = TransitionBuilder.make(
                                                         preset, lanes: Lane.allLanes(), start: 0, barSeconds: 1, bars: n,
                                                         vocalBar: vocalBar, keysClash: clash, lowSwap: sw,
                                                         drumsLayer: layer, drumsLinger: linger, vocalIn: vocalIn,
                                                         vocalOut: vocalOut, mashup: mashup, dropMoment: drop,
-                                                        rollBeat: nil, vocalOutFade: 0, vocalInFade: 0, room: 6)
-                                                    let tag = "\(preset.rawValue) n=\(n) sw=\(sw.map(String.init) ?? "nil") clash=\(clash) layer=\(layer) linger=\(linger) mashup=\(mashup) drop=\(drop) vocalBar=\(vocalBar) vin=\(vocalIn.map { "\($0)" } ?? "nil") vout=\(vocalOut.map { "\($0)" } ?? "nil")"
+                                                        rollBeat: nil, vocalOutFade: 0, vocalInFade: 0, room: 6, carry: carry)
+                                                    let tag = "\(preset.rawValue) n=\(n) sw=\(sw.map(String.init) ?? "nil") clash=\(clash) layer=\(layer) linger=\(linger) mashup=\(mashup) carry=\(carry) drop=\(drop) vocalBar=\(vocalBar) vin=\(vocalIn.map { "\($0)" } ?? "nil") vout=\(vocalOut.map { "\($0)" } ?? "nil")"
                                                     check(made, preset: preset, n: n, tag: tag, fail: fail)
                                                 }
                                             }
                                         }
                                     }
+                                  }
                                 }
                             }
                         }
@@ -49,6 +57,7 @@ final class ChoreographyProbe: XCTestCase {
         print("CHOREO built \(built)")
         for (rule, f) in failures.sorted(by: { $0.key < $1.key }) {
             print("CHOREO \(f.count)× \(rule)\n    e.g. \(f.example)")
+            XCTFail("\(f.count)× \(rule), e.g. \(f.example)")
         }
     }
 
@@ -74,7 +83,9 @@ final class ChoreographyProbe: XCTestCase {
         let echo = preset == .echoOut
         let from = echo ? -Double(min(n, 8)) - 2 : -2.0
         let to = Double(n) + 6
-        var t = from + 1.0 / 64
+        // Between the grid's lines: a cut takes a thousandth of a bar, and a
+        // sample landing inside it would see both sides at once.
+        var t = from + 1.0 / 128
         var noLowRun = 0.0, noDrumsRun = 0.0
         var reported = Set<String>()
         func once(_ rule: String) {
@@ -117,7 +128,12 @@ final class ChoreographyProbe: XCTestCase {
             if !drumsA && !drumsB { noDrumsRun += 1.0 / 64 } else { noDrumsRun = 0 }
             if noDrumsRun > 1 && !echo { once("no drums at all for over a bar inside a blend") }
             // Two voices at once.
-            if heard(.a, .vocals, t) && heard(.b, .vocals, t) { once("two vocals at once") }
+            // (Unless the caller kept A's past B's channel opening: it does
+            // that where B's isn't singing yet.)
+            let keptOn = tag.components(separatedBy: " vout=").last.flatMap(Double.init).map { out in
+                (made.vocalEntry ?? .infinity) < out
+            } ?? false
+            if heard(.a, .vocals, t) && heard(.b, .vocals, t) && !keptOn { once("two vocals at once") }
             // A's voice gone before B's arrives or B takes the low end: a
             // hole nobody sings in (only where the caller didn't place A's
             // exit itself).
@@ -134,9 +150,9 @@ final class ChoreographyProbe: XCTestCase {
             if made.lanes.isEmpty == false, inBlend || t >= 0 {
                 // (keys clash is in the tag; checked by caller through melodies)
             }
-            // After the blend (plus the melody's dissolve) A is gone.
-            if t > Double(n) + 2.5 && !echo {
-                for stem in StemKind.allCases where heard(.a, stem, t) { once("A still heard 2.5 bars past the blend (\(stem))") }
+            // After the blend A is gone: B glides home from there.
+            if t > Double(n) + 0.05 && !echo {
+                for stem in StemKind.allCases where heard(.a, stem, t) { once("A still heard past the blend (\(stem))") }
             }
             if t > 0.5 && echo {
                 for stem in StemKind.allCases where heard(.a, stem, t) { once("wash out: A heard after B's downbeat (\(stem))") }
@@ -156,7 +172,7 @@ final class ChoreographyProbe: XCTestCase {
         }
         // Clashing keys: melodies never together.
         if tag.contains("clash=true") {
-            var u = 0.0
+            var u = 1.0 / 128
             while u < to {
                 if heard(.a, .other, u) && heard(.b, .other, u) {
                     fail("clashing keys: both melodies heard", tag + String(format: " @bar %.3f", u)); break

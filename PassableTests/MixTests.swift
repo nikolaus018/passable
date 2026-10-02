@@ -152,6 +152,66 @@ final class MixTests: XCTestCase {
         }
     }
 
+    /// A track that is mixed out of at a tempo between its own and the
+    /// next song's: home after its way in, untouched until it sets off,
+    /// then gliding to its share and holding it, every hit where the map
+    /// says, with no click where the untouched stretch begins or ends.
+    func testAWayOutGlidesToTheSharedTempo() {
+        let sr = 44_100.0
+        let input = clickTrack(seconds: 60)
+        for (inRate, outRate, percussive) in [(1.04, 0.963, true), (1.0, 1.038, true), (0.97, 1.03, false)] {
+            let entry = inRate == 1 ? TimeMap.constant(1) : TimeMap.glide(rate: inRate, rampStart: 8 * sr, rampLength: 6 * sr)
+            let home = entry.output(30 * sr)
+            let map = entry.exiting(at: home, length: 2 * 5 * sr / (1 + outRate), rate: outRate)
+            XCTAssertTrue(map.hasExit)
+            for x in [1_000.0, 20 * sr, 31 * sr, 34.9 * sr, 35.1 * sr, 50 * sr] {
+                XCTAssertEqual(map.source(map.output(x)), x, accuracy: 1e-4, "\(inRate) \(outRate) \(x)")
+            }
+            // The glide plays exactly the five seconds from 30 to 35, then the rate holds.
+            XCTAssertEqual(map.output(35 * sr), map.exitEnd, accuracy: 1e-3)
+            XCTAssertEqual(map.slope(at: map.exitEnd + 10), outRate)
+            XCTAssertEqual(map.slope(at: map.exitStart - 10), 1)
+            XCTAssertEqual(map.output(50 * sr) - map.output(40 * sr), 10 * sr / outRate, accuracy: 1e-3)
+
+            let out = TimeStretcher.process(input, map: map, semitones: 0, percussive: percussive)
+            XCTAssertEqual(Double(out.count), map.output(Double(input.count)), accuracy: 1)
+            // Untouched between the way in and the way out.
+            let offset = try! XCTUnwrap(map.tailOffset)
+            let from = (map.hasGlide ? Int(map.rampEnd) : 0) + 4096, to = Int(map.exitStart) - 4096
+            XCTAssertEqual((from..<to).map { abs(out.left[$0] - input.left[$0 + offset]) }.max(), 0, "\(inRate) \(outRate)")
+            // Hits before, inside and after the glide out land where the map puts them.
+            for k in [44, 58, 63, 67, 72, 90, 110] {
+                let expected = map.output(Double(k * 22_050 + 32))
+                XCTAssertEqual(peak(in: out, near: expected), expected, accuracy: percussive ? 16 : 90,
+                               "\(inRate) \(outRate) click \(k)")
+            }
+            // Nothing but the clicks themselves: no step where the stretches join.
+            for join in [Int(map.exitStart) - 2048, Int(map.exitStart)] {
+                let quiet = (join - 1500)..<(join + 1500)
+                let clicks = (0..<120).map { Int(map.output(Double($0 * 22_050))) }
+                guard !clicks.contains(where: { quiet.overlaps(($0 - 200)..<($0 + 2500)) }) else { continue }
+                XCTAssertLessThan(quiet.map { abs(out.left[$0]) }.max()!, 0.02, "\(inRate) \(outRate) join \(join)")
+            }
+        }
+        // No way out for the same tempo.
+        XCTAssertFalse(TimeMap.constant(1).exiting(at: 100, length: 100, rate: 1 + 1e-7).hasExit)
+    }
+
+    /// A small stretch is the incoming song's alone; a bigger one the two
+    /// share, meeting at a tempo between theirs.
+    func testTheTwoSongsShareABigStretch() {
+        XCTAssertEqual(MixMath.shared(1.02).a, 1)
+        XCTAssertEqual(MixMath.shared(1.02).b, 1.02)
+        XCTAssertEqual(MixMath.runUpBars(rate: 1.02), 0)
+        for rate in [1.075, 0.93, 1.04] {
+            let share = MixMath.shared(rate)
+            XCTAssertEqual(share.b / share.a, rate, accuracy: 1e-12, "the two play at one tempo")
+            XCTAssertEqual(abs(log(share.a)), abs(log(share.b)), accuracy: 1e-12, "each moves as far")
+            XCTAssertLessThan(abs(share.b - 1), abs(rate - 1) * 0.52)
+            XCTAssertGreaterThan(MixMath.runUpBars(rate: rate), 0)
+        }
+    }
+
     /// TiK ToK (120.00017 BPM) into DJ Got Us Fallin' In Love (120.00018):
     /// aligning the glide to whole frames made it 230 bars long, so the
     /// song never settled and the set stayed stuck on that transition.

@@ -23,60 +23,80 @@ enum TimeStretcher {
         if map.isIdentity && semitones == 0 { return input }
 
         let pitch = pow(2, Double(semitones) / 12)
-        // Where the untouched tail takes over, if there is one.
         let fade = 2048
-        var tailStart: Int?
-        if semitones == 0, map.hasGlide, let _ = map.tailOffset {
-            tailStart = min(total, Int(map.rampEnd.rounded(.up)))
-        }
         let size = percussive ? 2048 : 4096
-        let processed = tailStart.map { min(total, $0 + fade + size) } ?? total
-
         let mono = input.mono()
         let onsets = Onsets.detect(mono, sensitivity: percussive ? 0.06 : 0.25)
 
-        var out: StereoBuffer
-        if pitch == 1 {
-            out = PhaseVocoder(size: size).process(input, count: processed, source: map.source, onsets: onsets)
-        } else {
+        if pitch != 1 {
             // Stretch by rate/pitch, then play the result `pitch` times
-            // faster: tempo as mapped, pitch shifted.
+            // faster: tempo as mapped, pitch shifted. End to end: there is
+            // no untouched stretch of a shifted song.
             let taps = Resampler.halfWidth(step: pitch) + 2
-            let zCount = Int((Double(processed) * pitch).rounded(.up)) + taps
+            let zCount = Int((Double(total) * pitch).rounded(.up)) + taps
             let z = PhaseVocoder(size: size).process(input, count: zCount, source: { map.source($0 / pitch) },
                                                      onsets: onsets)
-            out = StereoBuffer(left: Resampler.resample(z.left, step: pitch, count: processed),
-                               right: Resampler.resample(z.right, step: pitch, count: processed))
+            return StereoBuffer(left: Resampler.resample(z.left, step: pitch, count: total),
+                                right: Resampler.resample(z.right, step: pitch, count: total))
         }
 
-        if percussive && semitones == 0 {
-            TransientCopy.apply(to: &out, source: input, map: map, onsets: onsets, until: tailStart ?? total)
+        // The stretch of the output that is the source itself, frame for
+        // frame: after the glide home (from the start, without one), until
+        // any way out.
+        var verbatim: (start: Int, end: Int, offset: Int)?
+        if let offset = map.tailOffset, map.hasGlide || map.hasExit {
+            let start = map.hasGlide ? min(total, Int(map.rampEnd.rounded(.up))) : 0
+            let end = map.hasExit ? min(total, Int(map.exitStart.rounded(.down))) : total
+            // (Too short a stretch to fade into and out of isn't worth it.)
+            if end - start > 2 * fade { verbatim = (start, end, offset) }
+        }
+        guard let verbatim else {
+            var out = PhaseVocoder(size: size).process(input, count: total, source: map.source, onsets: onsets)
+            if percussive { TransientCopy.apply(to: &out, source: input, map: map, onsets: onsets, until: total) }
+            return out
         }
 
-        if let start = tailStart, let offset = map.tailOffset {
-            // Cross-fade into the source itself.
-            let missing = [Float](repeating: 0, count: max(0, total - out.count))
-            out.left.append(contentsOf: missing)
-            out.right.append(contentsOf: missing)
-            for y in start..<total {
-                let x = y + offset
-                let inside = x >= 0 && x < input.count
-                let l = inside ? input.left[x] : 0
-                let r = inside ? input.right[x] : 0
-                let u = y - start
-                if u < fade {
-                    let g = Float(0.5 - 0.5 * cos(Double.pi * Double(u) / Double(fade)))
-                    out.left[y] = out.left[y] * (1 - g) + l * g
-                    out.right[y] = out.right[y] * (1 - g) + r * g
-                } else {
-                    out.left[y] = l
-                    out.right[y] = r
-                }
+        var out = StereoBuffer(left: [Float](repeating: 0, count: total), right: [Float](repeating: 0, count: total))
+        if verbatim.start > 0 {
+            let count = min(total, verbatim.start + fade + size)
+            let head = PhaseVocoder(size: size).process(input, count: count, source: map.source, onsets: onsets)
+            out.left.replaceSubrange(0..<count, with: head.left)
+            out.right.replaceSubrange(0..<count, with: head.right)
+            if percussive {
+                TransientCopy.apply(to: &out, source: input, map: map, onsets: onsets, until: verbatim.start)
             }
         }
-        if out.count > total {
-            out.left.removeLast(out.count - total)
-            out.right.removeLast(out.count - total)
+        // Cross-fade into the source itself.
+        for y in verbatim.start..<verbatim.end {
+            let x = y + verbatim.offset
+            let inside = x >= 0 && x < input.count
+            let l = inside ? input.left[x] : 0
+            let r = inside ? input.right[x] : 0
+            let u = y - verbatim.start
+            if verbatim.start > 0, u < fade {
+                let g = Float(0.5 - 0.5 * cos(Double.pi * Double(u) / Double(fade)))
+                out.left[y] = out.left[y] * (1 - g) + l * g
+                out.right[y] = out.right[y] * (1 - g) + r * g
+            } else {
+                out.left[y] = l
+                out.right[y] = r
+            }
+        }
+        if map.hasExit, verbatim.end < total {
+            // And out of it again, into the way out: the vocoder starts on
+            // the source's own phases, so the two are the same sound there.
+            let from = max(verbatim.start, verbatim.end - fade)
+            let tail = PhaseVocoder(size: size).process(input, count: total - from,
+                                                        source: { map.source($0 + Double(from)) }, onsets: onsets)
+            for y in from..<total {
+                let u = y - from
+                let g = u < fade ? Float(0.5 - 0.5 * cos(Double.pi * Double(u) / Double(fade))) : 1
+                out.left[y] = out.left[y] * (1 - g) + tail.left[u] * g
+                out.right[y] = out.right[y] * (1 - g) + tail.right[u] * g
+            }
+            if percussive {
+                TransientCopy.apply(to: &out, source: input, map: map, onsets: onsets, from: verbatim.end, until: total)
+            }
         }
         return out
     }
@@ -392,7 +412,10 @@ enum Resampler {
 /// vocoder's output fills the gap before the next hit, when it's sped up the
 /// hit's tail is cut short.
 enum TransientCopy {
-    static func apply(to out: inout StereoBuffer, source: StereoBuffer, map: TimeMap, onsets: [Int], until end: Int) {
+    /// - Parameters from, end: the output frames to work in (hits that
+    ///   land before `from` are left as they are).
+    static func apply(to out: inout StereoBuffer, source: StereoBuffer, map: TimeMap, onsets: [Int], from: Int = 0,
+                      until end: Int) {
         let sr = AudioIO.sampleRate
         let pre = Int(0.015 * sr)     // start this long before the detected onset
         let fadeIn = Int(0.002 * sr)
@@ -405,6 +428,7 @@ enum TransientCopy {
             // Output span [start, stop): stop leaves room for the next
             // hit's lead-in, and never reads past the next source onset.
             let start = y - pre - fadeIn
+            if start < from { continue }
             let stop = min(y + (nextX - x), nextY) - pre - fadeIn
             guard stop - start > fadeIn + fadeOut + 16 else { continue }
             if start >= limit { break }

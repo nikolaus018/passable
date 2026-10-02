@@ -65,6 +65,75 @@ final class SetEditingTests: XCTestCase {
         XCTAssertTrue(set.isEdited(from: 0))
         XCTAssertTrue(editor.isEdited)
         XCTAssertEqual(set.mix!.transitions[0].edit.lanes, editor.lanes)
+        // A chosen preset is still written by the set, from the audio: the
+        // editor shows what the set built.
+        XCTAssertFalse(set.mix!.transitions[0].edit.byHand)
+        XCTAssertFalse(editor.byHand)
+        XCTAssertEqual(set.mix!.transitions[0].plan.preset, other)
+
+        // Drawing on a lane takes the automation over: it plays as drawn.
+        let lane = editor.lanes[0]
+        editor.updateLane(lane.id) { $0[.volume].insert(AutomationPoint(time: editor.transitionStart + 1, value: 0.3)) }
+        XCTAssertTrue(editor.byHand)
+        try await wait("the drawn lanes to reach the set") { set.mix?.transitions.first?.edit.byHand == true }
+        XCTAssertEqual(set.mix!.transitions[0].edit.lanes.map(\.envelopes), editor.lanes.map(\.envelopes))
+        XCTAssertTrue(editor.lanes[0][.volume].points.contains { $0.value == 0.3 })
+        // Muting a lane isn't drawing; picking a length hands the writing back.
+        editor.chooseBars(editor.transitionBars == 8 ? 16 : 8)
+        XCTAssertFalse(editor.byHand)
+        try await wait("the set to write it again") { set.mix?.transitions.first?.edit.byHand == false }
+        XCTAssertEqual(set.mix!.transitions[0].edit.bars, editor.transitionBars)
+        try await wait("the editor to show the set's lanes") { set.mix!.transitions[0].edit.lanes == editor.lanes }
+
+        // Every control of the panel, through the calls it makes.
+        // Moving the transition: written by the set, where it was put.
+        let range = try XCTUnwrap(editor.entryRange)
+        let moved = editor.entryBar + 4 <= range.upperBound ? editor.entryBar + 4 : max(range.lowerBound, editor.entryBar - 4)
+        editor.entryBar = moved
+        try await wait("the move to reach the set") { set.mix?.transitions.first?.edit.entryBar == moved }
+        try await wait("the set's lanes at the new spot") { set.mix!.transitions[0].edit.lanes == editor.lanes }
+        XCTAssertFalse(set.mix!.transitions[0].edit.byHand)
+        XCTAssertEqual(editor.entryBar, moved)
+        XCTAssertEqual(editor.transitionStart + editor.hostOffset, set.mix!.transitions[0].start, accuracy: 1e-6)
+        // B's cue, and back with undo.
+        let cue = editor.cueBar
+        editor.cueBar = cue + 1
+        try await wait("the cue to reach the set") { set.mix?.transitions.first?.edit.cueBar == cue + 1 }
+        try await wait("the set's lanes for the new cue") { set.mix!.transitions[0].edit.lanes == editor.lanes }
+        XCTAssertEqual(editor.offsetB + editor.hostOffset, set.mix!.tracks[1].offset, accuracy: 1e-6)
+        editor.undo()
+        XCTAssertEqual(editor.cueBar, cue)
+        try await wait("the undo to reach the set") { set.mix?.transitions.first?.edit.cueBar == cue }
+        // B's key: the set renders it, the editor shows that rendition.
+        editor.setSemitones(1)
+        try await wait("the key to reach the set") { set.mix?.transitions.first?.edit.semitones == 1 }
+        try await wait("the shifted rendition") { editor.matched?.plan.semitones == 1 }
+        XCTAssertFalse(editor.byHand)
+        editor.setSemitones(0)
+        try await wait("the key to go back") { set.mix?.transitions.first?.edit.semitones == 0 && editor.matched?.plan.semitones == 0 }
+        try await wait("the set's lanes again") { set.mix!.transitions[0].edit.lanes == editor.lanes }
+        // Apply changes nothing the set isn't already playing.
+        editor.applyPreset()
+        XCTAssertEqual(set.mix!.transitions[0].edit.lanes, editor.lanes)
+        XCTAssertFalse(editor.byHand)
+        // Clear is by hand: nothing automated, played as that.
+        editor.clearAutomation()
+        XCTAssertTrue(editor.byHand)
+        try await wait("the cleared lanes to reach the set") {
+            set.mix?.transitions.first.map { $0.edit.byHand && $0.edit.lanes.allSatisfy { $0.envelopes.allSatisfy(\.isEmpty) } } ?? false
+        }
+        // Back to automatic, then kept exactly as it is.
+        editor.autoArrange()
+        try await wait("the automatic transition again") { set.mix?.transitions.first?.isEdited == false && !editor.isEdited }
+        let automatic = editor.lanes.map(\.envelopes)
+        XCTAssertFalse(automatic.allSatisfy { $0.allSatisfy(\.isEmpty) })
+        editor.keepAsEdited()
+        XCTAssertTrue(editor.byHand)
+        try await wait("the kept transition") { set.mix?.transitions.first?.edit.byHand == true }
+        XCTAssertEqual(set.mix!.transitions[0].edit.lanes.map(\.envelopes), automatic)
+        // Left as a chosen preset for what follows.
+        editor.choosePreset(other == .longBlend ? .dropSwap : .longBlend)
+        try await wait("a chosen preset again") { set.mix?.transitions.first?.edit.byHand == false }
 
         // Auto drops the edit.
         editor.autoArrange()

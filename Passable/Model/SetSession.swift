@@ -58,6 +58,9 @@ final class SetSession: ObservableObject {
     private var reopenFocus = false
     /// Songs were added since the set was last ordered.
     private var needsOrdering = false
+    /// Those songs: with others already in their order, they are fitted in
+    /// where they go best and the rest stays put.
+    private var unplaced: Set<UUID> = []
     private var buildTask: Task<Void, Never>?
     private var orderTask: Task<Void, Never>?
     private var exportTask: Task<Void, Never>?
@@ -78,6 +81,7 @@ final class SetSession: ObservableObject {
         guard persists, items.isEmpty, let paths = UserDefaults.standard.stringArray(forKey: Self.storageKey) else { return }
         add(paths.map { URL(fileURLWithPath: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) })
         needsOrdering = false
+        unplaced = []
     }
 
     var isReady: Bool { !items.isEmpty && items.allSatisfy { $0.loaded != nil } }
@@ -88,6 +92,7 @@ final class SetSession: ObservableObject {
         for url in urls where !items.contains(where: { $0.url == url }) {
             let item = Item(url: url)
             items.append(item)
+            unplaced.insert(item.id)
             needsOrdering = true
             load(item.id)
         }
@@ -123,7 +128,7 @@ final class SetSession: ObservableObject {
                 case .success(let loaded):
                     self.update(id) { $0.loaded = loaded; $0.status = .ready }
                     guard self.isReady else { return }
-                    if self.needsOrdering { self.autoOrder() } else { self.rebuild() }
+                    if self.needsOrdering { self.autoOrder(keepingOrder: true) } else { self.rebuild() }
                 case .failure(let error):
                     self.update(id) { $0.status = .failed(error.localizedDescription) }
                     self.rebuild()
@@ -141,11 +146,18 @@ final class SetSession: ObservableObject {
 
     /// Puts the songs in the order with the smoothest, most driving run of
     /// transitions, then builds the mix.
-    func autoOrder() {
+    /// - Parameter keepingOrder: songs added to a set that has its order
+    ///   are fitted in where they go best, and the others stay as they
+    ///   are (Auto-Order itself starts from scratch).
+    func autoOrder(keepingOrder: Bool = false) {
         needsOrdering = false
         orderTask?.cancel()
         let ready = items.filter { $0.analysis != nil }
+        let new = keepingOrder ? unplaced : []
+        unplaced = []
         guard ready.count == items.count, items.count > 1 else { return rebuild() }
+        let placed = ready.indices.filter { !new.contains(ready[$0].id) }, added = ready.indices.filter { new.contains(ready[$0].id) }
+        let fitIn = !added.isEmpty && placed.count > 1
         let analyses = ready.map { $0.analysis! }
         let songs = ready.compactMap(\.loaded)
         let ids = ready.map(\.id)
@@ -155,8 +167,10 @@ final class SetSession: ObservableObject {
         buildStatus = "Ordering songs…"
         orderTask = Task { [weak self] in
             let order = await Task.detached(priority: .userInitiated) {
-                SetOrdering.order(SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: songs)),
-                                  washOuts: SetOrdering.washOuts(analyses))
+                let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: songs))
+                let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
+                return fitIn ? SetOrdering.insert(added, into: placed, costs, washOuts: washOuts, energies: energies)
+                    : SetOrdering.order(costs, washOuts: washOuts, energies: energies)
             }.value
             // The list changed meanwhile (a song removed, rows dragged):
             // that order is the newer word.
@@ -180,7 +194,9 @@ final class SetSession: ObservableObject {
 
     func summary(from i: Int) -> String? {
         guard let mix, let t = mix.transitions.first(where: { $0.from == i }) else { return nil }
-        if t.isEdited {
+        // Drawn by hand, only what was drawn is known; a chosen spot or
+        // preset is still planned, and described, like any other.
+        if t.isEdited, t.edit.byHand {
             var parts = [t.edit.preset.displayName]
             if t.edit.preset != .echoOut { parts.append("\(t.edit.bars) bars") }
             if t.edit.semitones != 0 { parts.append("B \(t.edit.semitones > 0 ? "+" : "")\(t.edit.semitones) st") }
@@ -189,10 +205,12 @@ final class SetSession: ObservableObject {
         var parts = [t.plan.preset.displayName]
         if t.plan.preset != .echoOut {
             parts.append("\(t.plan.bars) bars")
-            parts.append(String(format: "%+.1f%% tempo", t.plan.stretchPercent))
+            let share = t.plan.shared
+            parts.append(share.a == 1 ? String(format: "%+.1f%% tempo", t.plan.stretchPercent)
+                         : String(format: "tempos meet (A %+.1f%%, B %+.1f%%)", (share.a - 1) * 100, (share.b - 1) * 100))
         }
         if t.edit.semitones != 0 { parts.append("B \(t.edit.semitones > 0 ? "+" : "")\(t.edit.semitones) st to fit") }
-        parts.append(t.melodiesClash ? "melodies clash, swapped" : "melodies fit")
+        if t.plan.preset != .echoOut { parts.append(t.melodiesClash ? "melodies clash, swapped" : "melodies fit") }
         if t.skippedBars > 0 { parts.append("A skips \(t.skippedBars) bars of verse and breakdown") }
         parts += t.payoff
         // Not a payoff, a compromise: said apart so it isn't counted as one.
@@ -329,13 +347,19 @@ final class SetSession: ObservableObject {
         focused = i
         editor.hostOffset = t.delta
         editor.entryRange = t.entryRange
-        guard reopen || key != focusedKey else { return editor.syncTransport() }
+        // A as the set renders it, around the transition (past any jump).
+        let hosted = Session.Hosted(edit: t.edit, aMatched: a.matched, aMap: a.map, aOffset: a.stemOffset(at: t.start) - t.delta,
+                                    bOffset: b.offset - t.delta, barSeconds: t.barSeconds)
+        guard reopen || key != focusedKey else {
+            editor.adopt(t.edit, matched: b.matched, placement: played(t), hosted: hosted)
+            return editor.syncTransport()
+        }
         focusedKey = key
         editor.open(title: "\(t.from + 1) → \(t.to + 1)",
                     a: Deck(url: a.url, status: .ready, loaded: a.loaded),
                     b: Deck(url: b.url, status: .ready, loaded: b.loaded),
                     edit: t.edit, isEdited: t.isEdited, matched: b.matched, placement: played(t),
-                    placedAs: (t.plan.preset, t.plan.bars), entryRange: t.entryRange, offset: t.delta)
+                    placedAs: (t.plan.preset, t.plan.bars), entryRange: t.entryRange, offset: t.delta, hosted: hosted)
     }
 
     /// The plan's placement as the set really plays it: a mashup only where
@@ -368,6 +392,13 @@ final class SetSession: ObservableObject {
         guard let key = focusedKey else { return }
         edits[key] = edit
         rebuild()
+    }
+
+    /// The editor rewrote its lanes without changing what was chosen: it
+    /// shows the set's own again.
+    func editorUnchanged() {
+        guard mix != nil, let i = focused, focusedKey != nil else { return }
+        focus(i, reopen: false)
     }
 
     /// Hands the focused transition back to the automatic plan.
@@ -685,6 +716,7 @@ final class SetSession: ObservableObject {
         masterVolume = opened.manifest.masterVolume
         items = opened.urls.map { Item(url: $0) }
         needsOrdering = false
+        unplaced = []
         tab = .set
         for item in items { load(item.id) }
         invalidate()

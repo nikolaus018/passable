@@ -506,7 +506,7 @@ struct OverviewBar: View {
                 for side in DeckSide.allCases {
                     let lanes = session.lanes.filter { $0.side == side }
                     guard let first = lanes.first, session.peaks(for: first) != nil else { continue }
-                    let offset = side == .a ? 0 : session.offsetB
+                    let offset = session.laneOffset(side)
                     var path = Path()
                     let hop = Double(TrackProcessor.peakHop) / AudioIO.sampleRate
                     let mid = size.height / 2

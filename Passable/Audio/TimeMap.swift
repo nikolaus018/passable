@@ -6,12 +6,22 @@ import Foundation
 /// plays at a constant `rate`; from there its tempo glides linearly back to
 /// its original over `rampLength`, and after that the source plays untouched.
 /// All positions are in frames; output frame 0 is source frame 0.
+///
+/// A track that is itself mixed out of at another tempo than its own (the
+/// two songs of a blend meet half-way, see `MixMath.shared`) has a way out
+/// too: from `exitStart`, well after the glide home, its tempo glides over
+/// `exitLength` to `exitRate` and stays there to its end.
 struct TimeMap: Equatable, Sendable {
     /// Source frames consumed per output frame before the glide.
     let rate: Double
     /// Output frame at which the glide starts (`.infinity`: never).
     let rampStart: Double
     let rampLength: Double
+    /// Output frame at which the way out starts (`.infinity`: none), the
+    /// output frames its glide takes, and the rate it glides to.
+    var exitStart = Double.infinity
+    var exitLength = 1.0
+    var exitRate = 1.0
 
     static func constant(_ rate: Double) -> TimeMap {
         TimeMap(rate: rate, rampStart: .infinity, rampLength: 1)
@@ -38,18 +48,36 @@ struct TimeMap: Equatable, Sendable {
         return TimeMap(rate: rate, rampStart: y0, rampLength: max(1, length))
     }
 
-    var isIdentity: Bool { rate == 1 }
-    var hasGlide: Bool { rampStart.isFinite && !isIdentity }
+    /// The same map with a way out: from output frame `start` (where the
+    /// track plays at its own tempo) the tempo glides over `length` output
+    /// frames to `rate`.
+    func exiting(at start: Double, length: Double, rate: Double) -> TimeMap {
+        guard abs(rate - 1) >= Self.sameTempo else { return self }
+        var map = self
+        map.exitStart = max(start, hasGlide ? rampEnd : 0)
+        map.exitLength = max(1, length)
+        map.exitRate = rate
+        return map
+    }
+
+    var hasExit: Bool { exitStart.isFinite && exitRate != 1 }
+    var exitEnd: Double { exitStart + exitLength }
+    var isIdentity: Bool { rate == 1 && !hasExit }
+    var hasGlide: Bool { rampStart.isFinite && rate != 1 }
     var rampEnd: Double { rampStart + rampLength }
 
-    /// Source minus output once the glide is over (a whole number of frames).
+    /// Source minus output once the glide is over, until any way out (a
+    /// whole number of frames).
     var tailOffset: Int? {
-        guard hasGlide else { return isIdentity ? 0 : nil }
+        guard hasGlide else { return rate == 1 ? 0 : nil }
         return Int(((rate - 1) * (rampStart + rampLength / 2)).rounded())
     }
 
     /// Playback rate (source frames per output frame) at output frame `y`.
     func slope(at y: Double) -> Double {
+        if hasExit, y > exitStart {
+            return y >= exitEnd ? exitRate : 1 + (exitRate - 1) * (y - exitStart) / exitLength
+        }
         if y <= rampStart { return rate }
         if y >= rampEnd { return 1 }
         return rate + (1 - rate) * (y - rampStart) / rampLength
@@ -57,17 +85,37 @@ struct TimeMap: Equatable, Sendable {
 
     /// Source frame heard at output frame `y`.
     func source(_ y: Double) -> Double {
+        guard hasExit, y > exitStart else { return entrySource(y) }
+        let u = min(y, exitEnd) - exitStart
+        let x = entrySource(exitStart) + u + (exitRate - 1) * u * u / (2 * exitLength)
+        return y > exitEnd ? x + exitRate * (y - exitEnd) : x
+    }
+
+    /// Output frame at which source frame `x` is heard.
+    func output(_ x: Double) -> Double {
+        guard hasExit else { return entryOutput(x) }
+        let x0 = entrySource(exitStart)
+        if x <= x0 { return entryOutput(x) }
+        // u + a·u² = k through the glide, then a constant rate.
+        let k = x - x0
+        let a = (exitRate - 1) / (2 * exitLength)
+        let glided = exitLength + a * exitLength * exitLength
+        if k >= glided { return exitEnd + (k - glided) / exitRate }
+        return exitStart + 2 * k / (1 + (1 + 4 * a * k).squareRoot())
+    }
+
+    /// `source` and `output` of the way in alone.
+    private func entrySource(_ y: Double) -> Double {
         if y <= rampStart { return rate * y }
         let u = min(y, rampEnd) - rampStart
         let x = rate * rampStart + rate * u + (1 - rate) * u * u / (2 * rampLength)
         return y > rampEnd ? x + (y - rampEnd) : x
     }
 
-    /// Output frame at which source frame `x` is heard.
-    func output(_ x: Double) -> Double {
+    private func entryOutput(_ x: Double) -> Double {
         let x0 = rate * rampStart
         if !rampStart.isFinite || x <= x0 { return x / rate }
-        let x1 = source(rampEnd)
+        let x1 = entrySource(rampEnd)
         if x >= x1 { return rampEnd + (x - x1) }
         // (1 − r)/(2D)·u² + r·u − k = 0, in the cancellation-free form.
         let k = x - x0
