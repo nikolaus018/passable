@@ -6,6 +6,12 @@ import XCTest
 /// path per line, any order), lets Passable order it, renders it to
 /// ~/Music/Passable/Lab/Set.wav and measures every transition and the energy
 /// over the whole set. Skipped unless the variable is set.
+///
+/// With $PASSABLE_SET_AUDIT (a folder), each transition is also written out
+/// as two files, the outgoing song alone and the incoming one alone as they
+/// play through it, with a list of what is where: for a beat tracker that
+/// knows nothing of Passable's own grids (tools/audit/audit.py) to say
+/// whether the two songs' beats and bars really coincide.
 @MainActor
 final class SetLab: XCTestCase {
     func testSet() async throws {
@@ -26,13 +32,34 @@ final class SetLab: XCTestCase {
             try await Task.sleep(nanoseconds: 200_000_000)
         }
         let mix = try XCTUnwrap(set.mix)
+        // What the order was chosen on: every neighbouring pair's price,
+        // and the whole set's with what it pays for as a set.
+        let analyses = set.items.map { $0.analysis! }
+        let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: set.items.compactMap(\.loaded)))
+        let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
         print("\n==== SET ORDER ====")
         for (i, item) in set.items.enumerated() {
             let a = item.analysis!
             print(String(format: "%2d  %6.2f BPM  %@  energy %.2f  %@", i + 1, a.grid.bpm, a.key.camelotCode,
                          SetOrdering.energy(a), item.title))
-            if let s = set.summary(from: i) { print("      ↓ \(s)") }
+            if let s = set.summary(from: i) { print(String(format: "      ↓ (cost %.2f) %@", costs[i][i + 1], s)) }
         }
+        let path = Array(analyses.indices)
+        var cheaper: [String] = []
+        for i in path {
+            var rest = path
+            rest.remove(at: i)
+            for j in 0...rest.count where j != i {
+                var p = rest
+                p.insert(i, at: j)
+                let gain = SetOrdering.total(path, costs, washOuts, energies) - SetOrdering.total(p, costs, washOuts, energies)
+                if gain > 0.01 { cheaper.append(String(format: "song %d to place %d saves %.2f", i + 1, j + 1, gain)) }
+            }
+        }
+        print("Costs, row to column:")
+        for i in path { print(String(format: "  %2d ", i + 1) + path.map { i == $0 ? "   – " : String(format: "%5.1f", costs[i][$0]) }.joined()) }
+        print(String(format: "Order's total cost %.2f; single moves that would be cheaper: %@",
+                     SetOrdering.total(path, costs, washOuts, energies), cheaper.isEmpty ? "none" : cheaper.joined(separator: ", ")))
 
         // Pacing: how long each song holds the floor, and how long anything
         // plays on its own between two transitions.
@@ -379,6 +406,53 @@ final class SetLab: XCTestCase {
                      mix.transitions.count, stretches.filter { $0 > 4 }.count, stretches.max() ?? 0))
         print("Payoffs over \(mix.transitions.count) transitions: "
               + payoffCounts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+
+        if let audit = ProcessInfo.processInfo.environment["PASSABLE_SET_AUDIT"] {
+            let folder = URL(fileURLWithPath: audit)
+            try? FileManager.default.removeItem(at: folder)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            var entries: [[String: Any]] = []
+            for (k, t) in mix.transitions.enumerated() {
+                // Enough of each song on its own for a tracker to find its
+                // beat: sixteen bars before and after.
+                let lead = t.edit.preset == .echoOut ? Double(min(8, t.edit.bars)) : 0
+                let from = max(0, t.start - (lead + 16) * t.barSeconds), to = min(mix.length, t.end + 16 * t.barSeconds)
+                let range = Int(from * sr)..<Int(to * sr)
+                for (name, track) in [("a", t.from), ("b", t.to)] {
+                    try Exporter.render(snapshot: set.makeSnapshot { i, _ in i == track }, range: range, tail: 0,
+                                        to: folder.appendingPathComponent(String(format: "%02d-%@.wav", k + 1, name))) { _ in }
+                }
+                /// Where the song's own time lands in the set: every beat
+                /// of its grid that plays in the stretch written out, as
+                /// (its own seconds, the set's). For beats tracked in the
+                /// song file itself to be placed in the set.
+                func warp(_ track: Int) -> [[Double]] {
+                    let tr = mix.tracks[track], grid = tr.loaded.analysis.grid
+                    return (-8..<(Int(tr.loaded.analysis.duration / grid.beatSeconds) + 8)).compactMap { i in
+                        let own = grid.beat(i), master = tr.master(own)
+                        if let skip = tr.skip, own >= skip.from, own < skip.to { return nil }
+                        return master >= from - 1 && master <= to + 1 ? [own, master] : nil
+                    }
+                }
+                entries.append([
+                    "pathA": mix.tracks[t.from].url.path, "pathB": mix.tracks[t.to].url.path,
+                    "warpA": warp(t.from), "warpB": warp(t.to),
+                    "index": k + 1, "a": set.items[t.from].title, "b": set.items[t.to].title,
+                    "preset": t.plan.preset.displayName, "bars": t.edit.bars, "from": from, "start": t.start, "end": t.end,
+                    "barSeconds": t.barSeconds, "at": Theme.time(t.start),
+                    "switch": TransitionBuilder.switchBar(t.edit.preset, bars: t.edit.bars, lowSwap: t.plan.placement.lowSwap),
+                    "drumsLayered": t.drumsLayered, "melodiesClash": t.melodiesClash,
+                    "stretchA": (t.plan.shared.a - 1) * 100, "stretchB": (t.plan.shared.b - 1) * 100,
+                    "semitones": t.edit.semitones,
+                    "bpmA": mix.tracks[t.from].loaded.analysis.grid.bpm, "bpmB": mix.tracks[t.to].loaded.analysis.grid.bpm,
+                    "keyA": mix.tracks[t.from].loaded.analysis.key.displayName,
+                    "keyB": mix.tracks[t.to].loaded.analysis.key.displayName,
+                ])
+            }
+            try JSONSerialization.data(withJSONObject: entries, options: [.prettyPrinted])
+                .write(to: folder.appendingPathComponent("transitions.json"))
+            print("Audit files in \(folder.path)")
+        }
 
         let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Music/Passable/Lab/Set.wav")
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

@@ -36,6 +36,12 @@ struct BeatGrid: Codable, Equatable {
 ///
 /// The downbeat is the beat phase (of four) where harmony tends to change and
 /// the low end hits hardest.
+///
+/// Onset energy says where the hits are, to the millisecond, but not always
+/// which pulse through them is the beat. Where a trained beat tracker
+/// (`BeatTracker`) hears one steady pulse, that settles the metre: which
+/// tempo, on or off the kicks, which beat is the one. The grid is still
+/// fitted to the hits here.
 enum TempoEstimator {
     static let hop = 441                  // 10 ms at 44.1 kHz
     static let frameSize = 1024
@@ -44,7 +50,9 @@ enum TempoEstimator {
 
     /// - Parameter layers: mono stems (drums, bass, melody) whose entries and
     ///   exits mark bar starts; see `downbeatPhase`.
-    static func estimate(rhythm: [Float], harmony: [Float]?, layers: [[Float]] = [],
+    /// - Parameter heard: the beats and downbeats a trained tracker hears
+    ///   in the whole mix, if there is one; see `pulse`.
+    static func estimate(rhythm: [Float], harmony: [Float]?, layers: [[Float]] = [], heard: BeatTracker.Beats? = nil,
                          sampleRate: Double) -> BeatGrid {
         let fps = sampleRate / Double(hop)
         let (flux, lowFlux) = onsetEnvelopes(rhythm, sampleRate: sampleRate)
@@ -102,15 +110,72 @@ enum TempoEstimator {
             }
         }
 
+        // Which of the pulses that fit the hits is the beat, onsets can't
+        // always say: a dancehall kick pattern repeats every three
+        // sixteenths, and the comb then finds 4:5 or 4:3 of the tempo
+        // (117 BPM read as 93.6) on a grid no other song's beat can sit
+        // on. Where the tracker hears one steady pulse, the tempo is that
+        // one (an octave up or down where it lies outside the range), fitted
+        // to the hits as before.
+        let pulse = heard.flatMap { Self.pulse($0.beats) }
+        if let pulse {
+            var target = pulse * fps
+            while 60 * fps / target < minBPM { target /= 2 }
+            while 60 * fps / target > maxBPM { target *= 2 }
+            if abs(log2(period / target)) > log2(1.03) {
+                (period, phase) = refine(onset, around: target)
+            }
+        }
+        // And where in the beat: the tracker's beats all sit at one offset
+        // from a grid of their own tempo (also where it skips every other
+        // beat here and there, which is no steady pulse but still says
+        // where the beats are). Off the grid by more than a fifth of a
+        // beat, the grid is on the wrong hits (the claps between the kicks,
+        // a syncopated 808): it moves to the hits nearest the tracker's
+        // beats, unless there is next to nothing there to sit on (then the
+        // tracker is the one that's off).
+        var beatsHeard = false
+        if let heard, heard.beats.count >= 32 {
+            // (A tracker hearing twice the grid's tempo has every other
+            // beat between the grid's: compared half a beat at a time.)
+            let unit = pulse.map { $0 * fps < 0.75 * period } ?? false ? period / 2 : period
+            var x = 0.0, y = 0.0
+            for t in heard.beats {
+                let angle = 2 * Double.pi * (t * fps - phase) / unit
+                x += cos(angle)
+                y += sin(angle)
+            }
+            let agreement = (x * x + y * y).squareRoot() / Double(heard.beats.count)
+            if agreement > 0.7 {
+                beatsHeard = true
+                let offset = atan2(y, x) / (2 * .pi) * unit
+                if abs(offset) > 0.2 * unit {
+                    var centre = (phase + offset).truncatingRemainder(dividingBy: period)
+                    if centre < 0.12 * period { centre += period }
+                    let (_, moved) = combSearch(onset, periods: stride(from: period, through: period, by: 1), phaseStep: 0.02,
+                                                phaseRange: (centre - 0.12 * period)...(centre + 0.12 * period))
+                    if combScore(onset, period: period, phase: moved) >= 0.5 * combScore(onset, period: period, phase: phase) {
+                        phase = moved
+                    } else {
+                        beatsHeard = false
+                    }
+                }
+            }
+        }
+
         // Off-beat hats and shakers are broadband, so in overall flux they
         // can out-score the kick and pull the grid half a beat late. Beats
-        // are where the low end hits.
-        if combScore(lowOnset, period: period, phase: phase + period / 2) > combScore(lowOnset, period: period, phase: phase) {
+        // are where the low end hits. (Not where the tracker has said
+        // which hits the beat is on: a syncopated bass drum hits hardest
+        // off it.)
+        if !beatsHeard,
+           combScore(lowOnset, period: period, phase: phase + period / 2) > combScore(lowOnset, period: period, phase: phase) {
             phase += period / 2
         }
 
         let beatPhase = downbeatPhase(period: period, phase: phase, lowFlux: lowOnset,
-                                      harmony: harmony, layers: layers, sampleRate: sampleRate)
+                                      harmony: harmony, layers: layers, heard: beatsHeard ? heard?.downbeats : nil,
+                                      sampleRate: sampleRate)
         var first = (phase + Double(beatPhase) * period) / fps
         // Put the grid where the kicks actually peak. Every track is then
         // placed by the same yardstick, so two layered tracks line up kick
@@ -121,6 +186,19 @@ enum TempoEstimator {
         while first >= bar { first -= bar }
         while first < 0 { first += bar }
         return BeatGrid(bpm: 60 * fps / period, firstDownbeat: first)
+    }
+
+    /// Seconds per beat as a tracker hears it, if what it hears is one
+    /// steady pulse: three quarters of its beats follow the last at the
+    /// same distance (to its 20 ms frames). nil where it loses the beat or
+    /// changes its mind along the way; onsets then decide alone.
+    static func pulse(_ beats: [Double]) -> Double? {
+        guard beats.count >= 32 else { return nil }
+        let gaps = zip(beats, beats.dropFirst()).map { $1 - $0 }
+        let median = gaps.sorted()[gaps.count / 2]
+        let steady = gaps.filter { abs($0 - median) <= max(0.021, 0.08 * median) }
+        guard 4 * steady.count >= 3 * gaps.count else { return nil }
+        return steady.reduce(0, +) / Double(steady.count)
     }
 
     // MARK: - Onset envelope
@@ -281,8 +359,14 @@ enum TempoEstimator {
     /// changes land on the one. Chord changes alone are ambiguous in music
     /// that changes chord every two bars or rides one chord, and in rap the
     /// kick hits beats 1 and 3 equally.
+    ///
+    /// A trained tracker's downbeats, where there is one, outweigh all
+    /// three: it has learnt what the one sounds like from annotated music.
+    /// It decides half a minute at a time and can flip between the one and
+    /// the three from one stretch to the next, so the song's grid takes the
+    /// beat most of its downbeats fall on, and the cues above break a tie.
     private static func downbeatPhase(period: Double, phase: Double, lowFlux: [Float], harmony: [Float]?,
-                                      layers: [[Float]], sampleRate: Double) -> Int {
+                                      layers: [[Float]], heard: [Double]? = nil, sampleRate: Double) -> Int {
         let fps = sampleRate / Double(hop)
         var beatFrames: [Double] = []
         var t = phase
@@ -312,6 +396,16 @@ enum TempoEstimator {
 
         let entries = entryVotes(layers, beatSeconds: beatFrames.map { $0 / fps }, sampleRate: sampleRate)
         if let entries { for p in 0..<4 { votes[p] += 2 * entries[p] } }
+        if let heard {
+            var counts = [Double](repeating: 0, count: 4)
+            for t in heard {
+                let k = ((t * fps - phase) / period).rounded()
+                guard abs(t * fps - (phase + k * period)) < 0.2 * period else { continue }
+                counts[((Int(k) % 4) + 4) % 4] += 1
+            }
+            let total = counts.reduce(0, +)
+            if total >= 8 { for p in 0..<4 { votes[p] += 3 * counts[p] / total } }
+        }
         return votes.indices.max(by: { votes[$0] < votes[$1] }) ?? 0
     }
 

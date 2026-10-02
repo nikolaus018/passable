@@ -746,6 +746,9 @@ enum AutoPlacement {
     ///     before A has had its time).
     ///   - keysClash: the melodies will be swapped rather than layered,
     ///     which changes what plays when.
+    ///   - clashAbove: how badly the notes that overlap at a spot may
+    ///     clash before they're swapped there (`Harmony.tolerance` of the
+    ///     two keys; nil: from `keysClash`).
     ///   - mashup: B's vocal may sing over A's beat from a quarter into the
     ///     blend (the keys fit and the tempos are close).
     ///   - soloFrom: A's bar from which it has the floor to itself (in a
@@ -767,7 +770,7 @@ enum AutoPlacement {
     ///     it has to be back at its own before it sets off again.
     static func place(a: TrackAnalysis, b: TrackAnalysis, bars n: Int, preset: TransitionPreset,
                       trimA: Float = 0, trimB: Float = 0, entryRange: ClosedRange<Int>? = nil,
-                      keysClash: Bool = false, mashup: Bool = false, soloFrom: Int? = nil,
+                      keysClash: Bool = false, clashAbove: Float? = nil, mashup: Bool = false, soloFrom: Int? = nil,
                       skip: Range<Int>? = nil, aShift: Int = 0, bShift: Int = 0, drumsLock: Bool = false,
                       drumsLinger: Bool = true, at spot: (entry: Int, cue: Int)? = nil, glide: Int = 0,
                       runUp: Int = 0) -> Result {
@@ -908,7 +911,7 @@ enum AutoPlacement {
             // No notes where the melodies would overlap: nothing to clash.
             guard let clash = overlapClash(a: sa, aShift: aShift, entry: e, b: sb, bShift: bShift, cue: c,
                                            preset: preset, bars: n, lowSwap: sw) else { return false }
-            return clash > (keysClash ? Harmony.keysClashTolerance : Harmony.clashTolerance)
+            return clash > clashAbove ?? (keysClash ? Harmony.keysClashTolerance : Harmony.clashTolerance)
         }
         let pausesA = sa.vocalQuietBeats, pausesB = sb.vocalQuietBeats
 

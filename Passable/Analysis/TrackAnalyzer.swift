@@ -10,7 +10,7 @@ struct TrackAnalysis: Codable, Equatable {
     /// Analyses older than `currentVersion` are redone on load.
     var version: Int?
 
-    static let currentVersion = 4
+    static let currentVersion = 6
 }
 
 enum TrackAnalyzer {
@@ -26,7 +26,10 @@ enum TrackAnalyzer {
         // speak of; fall back to the harmonic content.
         let rhythm = rms(drums) > 1e-3 ? drums : sum(of: Array(stems.values))
         let layers = [StemKind.drums, .bass, .other].compactMap { stems[$0]?.copyStereo().mono() }
-        let grid = TempoEstimator.estimate(rhythm: rhythm, harmony: harmony, layers: layers, sampleRate: sr)
+        // The beat as a trained tracker hears it in the whole song (the
+        // stems add up to the mix it was trained on).
+        let heard = try? BeatTracker.shared?.track(sum(of: Array(stems.values)))
+        let grid = TempoEstimator.estimate(rhythm: rhythm, harmony: harmony, layers: layers, heard: heard, sampleRate: sr)
         let key = KeyDetector.detect(samples: harmony, sampleRate: sr)
         return TrackAnalysis(grid: grid, key: key, duration: duration,
                              structure: TrackStructure.measure(stems: stems, grid: grid),

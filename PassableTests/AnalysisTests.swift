@@ -59,6 +59,48 @@ final class AnalysisTests: XCTestCase {
         XCTAssertEqual(grid.firstDownbeat, 0.5, accuracy: 0.015)
     }
 
+    /// Chords played on notes rich in overtones, over hiss: the key is the
+    /// one the notes are in, not a fifth up (where every note's third
+    /// harmonic lies), and two keys' chroma clash or don't as the keys do.
+    func testKeyOfNotesWithOvertones() {
+        let sr = 44_100.0
+        func song(tonic: Int) -> [Float] {
+            // I–vi–IV–V, two seconds a chord.
+            let chords = [[0, 4, 7], [9, 0, 4], [5, 9, 0], [7, 11, 2]].map { $0.map { ($0 + tonic) % 12 } }
+            var out = [Float](repeating: 0, count: Int(8 * sr))
+            var seed: UInt32 = 3
+            for i in out.indices {
+                let t = Double(i) / sr
+                let chord = chords[Int(t / 2) % 4]
+                var v = 0.0
+                for (k, pitch) in chord.enumerated() {
+                    // The root an octave down as well, like a bass line.
+                    for octave in k == 0 ? [36, 60] : [60] {
+                        let f = 440 * pow(2, Double(octave + pitch - 69) / 12)
+                        for h in 1...4 { v += sin(2 * .pi * f * Double(h) * t) / Double(h) }
+                    }
+                }
+                seed = seed &* 1_664_525 &+ 1_013_904_223
+                out[i] = Float(0.05 * v) + 0.02 * (Float(seed >> 8) / Float(1 << 24) - 0.5)
+            }
+            return out
+        }
+        let songs = Dictionary(uniqueKeysWithValues: [0, 7, 6, 1].map { ($0, song(tonic: $0)) })
+        for (tonic, samples) in songs {
+            let key = KeyDetector.detect(samples: samples, sampleRate: sr)
+            XCTAssertEqual(key.camelotNumber, MusicalKey(tonicPitchClass: tonic, isMajor: true).camelotNumber, "tonic \(tonic)")
+        }
+        func chroma(_ tonic: Int) -> [Float] {
+            KeyDetector.computeChroma(samples: songs[tonic]!, sampleRate: sr, normalised: false).map(Float.init)
+        }
+        let c = chroma(0)
+        XCTAssertLessThanOrEqual(Harmony.clash(c, chroma(7)), Harmony.clashTolerance, "a fifth apart blends")
+        XCTAssertGreaterThan(Harmony.clash(c, chroma(1)), Harmony.clashTolerance, "a semitone apart doesn't")
+        XCTAssertGreaterThan(Harmony.clash(c, chroma(6)), Harmony.clashTolerance, "nor a tritone")
+        // Too short to tell a note from its neighbour: nothing, not noise.
+        XCTAssertEqual(KeyDetector.computeChroma(samples: [Float](repeating: 0.1, count: 20_000), sampleRate: sr).reduce(0, +), 0)
+    }
+
     func testHarmonicShift() {
         let aMinor = MusicalKey(tonicPitchClass: 9, isMajor: false)
         let cMajor = MusicalKey(tonicPitchClass: 0, isMajor: true)

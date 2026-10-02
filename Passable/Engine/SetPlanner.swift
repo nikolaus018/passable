@@ -86,8 +86,12 @@ enum MixMath {
     }
 
     /// The most an automatic transition pitches a song to fit the one
-    /// before. Rarely used: a known song even a semitone off is noticed.
-    static let maxKeyShift = 2
+    /// before: not at all. A song plays shifted for all of its time in the
+    /// set, the next one is then fitted to it as it sounds (and shifted in
+    /// turn), and a song everyone knows a semitone off its key is noticed
+    /// more than the blend it buys. Keys that clash swap melodies instead;
+    /// a shift can still be chosen by hand in the editor.
+    static let maxKeyShift = 0
 
     /// Tempos this close layer a vocal over the other song's beat without
     /// the stretch being heard.
@@ -131,10 +135,11 @@ struct PairPlan: Equatable {
         let rate = MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)
         let preset = fixed?.preset ?? MixMath.recommendedPreset(a: a.grid.bpm, b: b.grid.bpm)
         let aKey = a.key.transposed(by: aShift)
-        // Where the keys clash, B may be pitched into A's key: then the
-        // melodies can layer and B can sing over A's beat. The shift stays
-        // on for all of B, and a song everyone knows sounds wrong off its
-        // key, so it costs a lot: only a much better blend is worth it.
+        // Where the keys clash, B could be pitched into A's key (up to
+        // `MixMath.maxKeyShift`, which allows none): then the melodies can
+        // layer and B can sing over A's beat. The shift stays on for all of
+        // B, and a song everyone knows sounds wrong off its key, so it
+        // costs a lot: only a much better blend would be worth it.
         var shifts = [0]
         if MixMath.keysClash(aKey, b.key),
            let shift = b.key.harmonicShift(toMatch: aKey, limit: MixMath.maxKeyShift), shift != 0 {
@@ -146,6 +151,7 @@ struct PairPlan: Equatable {
             AutoPlacement.place(a: a, b: b, bars: bars, preset: preset,
                                 trimA: Float(MixMath.trimDB(a)), trimB: Float(MixMath.trimDB(b)),
                                 entryRange: entryRange, keysClash: clash(shift),
+                                clashAbove: Harmony.tolerance(aKey, b.key.transposed(by: shift)),
                                 mashup: !clash(shift) && abs(rate - 1) < MixMath.mashupStretch, soloFrom: soloFrom,
                                 skip: skip, aShift: aShift, bShift: shift, drumsLock: drumsLock, drumsLinger: drumsLinger,
                                 at: fixed.map { ($0.entryBar, $0.cueBar) },
@@ -815,32 +821,10 @@ enum BeatAlign {
         let window = max(1, Int((to - from) / 8 * sr / hop))
         let frame = hop / sr, reach = Int((maxNudge / frame).rounded())
         /// A window's score at every lag from -reach to reach frames, as a
-        /// share of its best.
+        /// share of its best, and the lag (seconds) its hits land together
+        /// at.
         typealias Curve = [Double]
-        // Only a window whose hits line up clearly better at one lag than
-        // at any other says anything about the groove. In a sparse intro (a
-        // few hats, a lone snare against a full kit) several lags far
-        // apart score about the same and the best one is noise: counted
-        // as votes, such bars called beats that sit together perfectly
-        // "won't lock" (measured: their best lag beat the one the full
-        // bars lock at by 2–18 %). Nor is a best lag at the edge of the
-        // search a peak: the hits meet somewhere past it, if at all.
-        func curves(_ frames: Range<Int>) -> [Curve] {
-            var out: [Curve] = []
-            for w in stride(from: frames.lowerBound, to: frames.upperBound - window + 1, by: window) {
-                let f = w..<(w + window)
-                guard ea[f].reduce(0, +) > 0 else { continue }
-                let scores = (-reach...reach).map { score(Double($0) * frame, f) }
-                let k = scores.indices.max { scores[$0] < scores[$1] }!
-                let best = scores[k], mean = scores.reduce(0, +) / Double(scores.count)
-                guard best > 0, best > 1.25 * mean, k > 0, k < scores.count - 1 else { continue }
-                // 12 ms: the far side of a hit's own width and of the
-                // little a groove's bars differ among themselves.
-                let rival = scores.indices.contains { abs($0 - k) > 12 && scores[$0] >= 0.8 * best }
-                if !rival { out.append(scores.map { $0 / best }) }
-            }
-            return out
-        }
+        typealias Window = (curve: Curve, lag: Double)
         /// Where a curve peaks (seconds). Whole onset frames (a
         /// millisecond) first, then the peak's own shape through the best
         /// and its neighbours: hits are sharp, so it's a V (two lines of
@@ -856,23 +840,65 @@ enum BeatAlign {
             }
             return lag * frame
         }
+        // Only a window whose hits line up clearly better at one lag than
+        // at any other says anything about the groove. In a sparse intro (a
+        // few hats, a lone snare against a full kit) several lags far
+        // apart score about the same and the best one is noise: counted
+        // as votes, such bars called beats that sit together perfectly
+        // "won't lock" (measured: their best lag beat the one the full
+        // bars lock at by 2–18 %). Nor is a best lag at the edge of the
+        // search a peak: the hits meet somewhere past it, if at all.
+        //
+        // Two kits can also meet at two lags close together: the kicks at
+        // one, the claps at another (one song's clap sits a little behind
+        // its kick, the other's on it). Neither is the lag: at either, the
+        // other pair flams. Where everything that scores nearly as well
+        // as the best lies within 16 ms, the window's lag is the middle
+        // of the best of that, where every pair of hits is within 8 ms:
+        // under what's heard as a flam. (Such windows used to have no say, B stayed
+        // where its grid put it, and the claps flammed by 19 ms.)
+        func curves(_ frames: Range<Int>) -> [Window] {
+            var out: [Window] = []
+            for w in stride(from: frames.lowerBound, to: frames.upperBound - window + 1, by: window) {
+                let f = w..<(w + window)
+                guard ea[f].reduce(0, +) > 0 else { continue }
+                let scores = (-reach...reach).map { score(Double($0) * frame, f) }
+                let k = scores.indices.max { scores[$0] < scores[$1] }!
+                let best = scores[k], mean = scores.reduce(0, +) / Double(scores.count)
+                guard best > 0, best > 1.25 * mean, k > 0, k < scores.count - 1 else { continue }
+                let curve = scores.map { $0 / best }
+                // 12 ms: the far side of a hit's own width and of the
+                // little a groove's bars differ among themselves.
+                let strong = scores.indices.filter { scores[$0] >= 0.8 * best }
+                if !strong.contains(where: { abs($0 - k) > 12 }) {
+                    out.append((curve, peak(scores)))
+                } else if let first = strong.first, let last = strong.last, last - first <= 16 {
+                    // Between the lags that are all but as good as the
+                    // best (a second pair of hits only four fifths as
+                    // strong doesn't pull the lag off the first).
+                    let top = scores.indices.filter { scores[$0] >= 0.9 * best }
+                    out.append((curve, Double(top.first! + top.last! - 2 * reach) / 2 * frame))
+                }
+            }
+            return out
+        }
         /// A window sits at an offset if its hits land within 8 ms of it
         /// (a flam is heard from about 10).
-        func sits(_ curve: Curve, at lag: Double) -> Bool { abs(peak(curve) - lag) <= 0.008 }
+        func sits(_ window: Window, at lag: Double) -> Bool { abs(window.lag - lag) <= 0.008 }
         /// The offset a clear majority of the windows sit at; nil if there
         /// are too few to say or they don't agree. Where they land
         /// together best taken as one (each counting the same), then the
         /// middle of those that sit there: bars at -1 and at 8 ms are all
         /// within 5 of 4, and 9 off each other's.
-        func consensus(_ curves: [Curve]) -> Double? {
-            guard curves.count >= 2 else { return nil }
+        func consensus(_ windows: [Window]) -> Double? {
+            guard windows.count >= 2 else { return nil }
             var sum = [Double](repeating: 0, count: 2 * reach + 1)
-            for curve in curves { for k in sum.indices { sum[k] += curve[k] } }
+            for w in windows { for k in sum.indices { sum[k] += w.curve[k] } }
             let common = peak(sum)
-            let near = curves.map(peak).filter { abs($0 - common) <= 0.008 }
+            let near = windows.map(\.lag).filter { abs($0 - common) <= 0.008 }
             guard let low = near.min(), let high = near.max() else { return nil }
             let lag = (low + high) / 2
-            return 4 * curves.filter { sits($0, at: lag) }.count >= 3 * curves.count ? lag : nil
+            return 4 * windows.filter { sits($0, at: lag) }.count >= 3 * windows.count ? lag : nil
         }
         let half = split.map { min(ea.count, max(0, Int((($0 - from) * sr / hop).rounded()))) } ?? ea.count / 2
         let first = curves(0..<half), second = curves(half..<ea.count)
@@ -885,16 +911,16 @@ enum BeatAlign {
         // With no more than a single clear window in all, that one is
         // what there is to go by: B's hits land on A's where it says.
         let all = first + second
-        let nudge = consensus(first) ?? consensus(second) ?? (all.count == 1 ? peak(all[0]) : 0)
+        let nudge = consensus(first) ?? consensus(second) ?? (all.count == 1 ? all[0].lag : 0)
         // Before the swap it's A's kit under B's tops, after it the other
         // way round: each half can groove or not on its own.
-        func lock(_ curves: [Curve]) -> Double {
-            curves.count < 2 ? 1 : Double(curves.filter { sits($0, at: nudge) }.count) / Double(curves.count)
+        func lock(_ windows: [Window]) -> Double {
+            windows.count < 2 ? 1 : Double(windows.filter { sits($0, at: nudge) }.count) / Double(windows.count)
         }
         // How much of the blend sits once nudged. Too few clear windows to
         // judge: the two beat grids (tracked, then nudged) are all there
         // is, and they agree by construction.
-        return Result(nudge: abs(nudge) >= 0.003 ? nudge : 0, lock: all.count < 3 ? 1 : lock(all), lags: all.map(peak),
+        return Result(nudge: abs(nudge) >= 0.003 ? nudge : 0, lock: all.count < 3 ? 1 : lock(all), lags: all.map(\.lag),
                       lockBefore: lock(first), lockAfter: lock(second), votesBefore: first.count, votesAfter: second.count)
     }
 
@@ -1018,19 +1044,18 @@ enum Harmony {
     /// scale A's notes fit best) about as well as in the scale that suits B
     /// best. A different chord of the same scale fits; notes a semitone or
     /// a tritone off don't.
-    /// - Parameter tolerance: how much worse B may sit in A's scale than in
-    ///   its own: small to pick a shift, larger to call a clash (only a
-    ///   clear one should break up a blend).
-    static func fits(_ a: [Float], _ b: [Float], tolerance: Float = 0.08) -> Bool {
+    /// - Parameter tolerance: the most the two may `clash`.
+    static func fits(_ a: [Float], _ b: [Float], tolerance: Float = fitTolerance) -> Bool {
         clash(a, b) <= tolerance
     }
 
     /// How much less the two together sit in one diatonic scale than each
-    /// does on its own (0: they share one; a fifth apart ≈ 0.04, a whole
-    /// tone ≈ 0.1, a tritone or semitone ≈ 0.3). Heard as one sound, which
-    /// is what a blend is, rather than B measured against A's best guess
-    /// of a scale (which let almost anything through). Neighbours on the
-    /// key wheel are what blends are made of: `fits` lets 0.08 through.
+    /// does on its own (0: they share one; whole scales a fifth apart
+    /// ≈ 0.07, a whole tone ≈ 0.13, a tritone or semitone ≈ 0.3; real
+    /// stretches of music use fewer notes and come out lower, see
+    /// `clashTolerance`). Heard as one sound, which is what a blend is,
+    /// rather than B measured against A's best guess of a scale (which let
+    /// almost anything through).
     static func clash(_ a: [Float], _ b: [Float]) -> Float {
         let major = [0, 2, 4, 5, 7, 9, 11]
         func best(_ x: [Float]) -> Float {
@@ -1059,18 +1084,40 @@ enum Harmony {
     /// `fits`, when both sides have notes to compare; nothing to clash
     /// with counts as fitting.
     static func fits(_ a: [StemAudio], aOffset: Double, _ b: [StemAudio], bOffset: Double, from: Double, to: Double,
-                     tolerance: Float = 0.08) -> Bool {
+                     tolerance: Float = fitTolerance) -> Bool {
         clash(a, aOffset: aOffset, b, bOffset: bOffset, from: from, to: to).map { $0 <= tolerance } ?? true
     }
 
-    /// Where the key estimates agree, only a clear clash heard in the notes
-    /// breaks up a blend; where they say the keys clash, the notes have to
-    /// show clearly that they don't.
-    /// Neighbours on the key wheel (a fifth) layer; anything further
-    /// (a whole tone, ≈ 0.13 on clean scales, less on real mixes) is two
-    /// melodies fighting, not a blend.
-    static let clashTolerance: Float = 0.08
-    static let keysClashTolerance: Float = 0.04
+    /// Where the songs' keys sit together (the same scale or a fifth
+    /// apart), only a clear clash heard in the notes that overlap breaks up
+    /// a blend; where they don't, the notes have to show clearly that this
+    /// stretch fits all the same.
+    /// Measured on songs with published keys, stretches of 4 to 16 s of one
+    /// song's melody and bass line against another's melody: in fitting
+    /// keys 9 in 10 stay under 0.02; three fifths or more apart the middle
+    /// one is at 0.07, and 1 in 10 under -0.03 (two bars on notes both keys
+    /// share). With these two, no fitting stretch was called a clash and
+    /// about 4 in 5 of the clashing ones were (1 in 25 before).
+    static let clashTolerance: Float = 0.07
+    static let keysClashTolerance: Float = 0.01
+    /// How badly the notes of a stretch may `clash` before two songs in
+    /// these keys swap melodies there instead of layering them. Three
+    /// fifths or more apart, the keys are believed whatever the stretch
+    /// reads: a stretch of two such songs reads as fitting 1 time in 5 (a
+    /// bar or two on notes both keys share), far more often than both keys
+    /// are misread, and the next bar brings the notes they don't share.
+    static func tolerance(_ a: MusicalKey, _ b: MusicalKey) -> Float {
+        let d = abs(a.camelotNumber - b.camelotNumber)
+        switch min(d, 12 - d) {
+        case 0, 1: return clashTolerance
+        case 2: return keysClashTolerance
+        default: return -.infinity
+        }
+    }
+
+    /// A voice over the other song's chords (a mashup, an a cappella) has
+    /// to sit in them, not merely avoid a clear clash.
+    static let fitTolerance: Float = 0.04
     /// B is pitched only where its notes clash worse than this (see
     /// `PairPlan.make`): a song off its own key is noticed, so layering is
     /// given up long before that.
@@ -1398,9 +1445,8 @@ enum SetBuilder {
             }
             let nudge = align.nudge
             // Vocals hand over between lines, not mid-word.
-            let keysDisagree = MixMath.keysClash(a.loaded.analysis.key.transposed(by: shifts[k - 1]),
-                                                 b.analysis.key.transposed(by: edit.semitones))
-            var keysClash = keysDisagree
+            let keyA = a.loaded.analysis.key.transposed(by: shifts[k - 1]), keyB = b.analysis.key.transposed(by: edit.semitones)
+            var keysClash = MixMath.keysClash(keyA, keyB)
             // Whether the melodies can layer is heard, not guessed from the
             // keys: the notes that will actually overlap decide, where
             // there are any, B as shifted. In two stretches, each judged on
@@ -1422,7 +1468,7 @@ enum SetBuilder {
                              heard(overlap.after, [otherA], [otherB, matched.stems[.bass]])].compactMap { $0 }.max()
                 // No notes to compare: nothing to clash (as placement
                 // judges it, see `AutoPlacement.notesClash`).
-                keysClash = worst.map { $0 > (keysDisagree ? Harmony.keysClashTolerance : Harmony.clashTolerance) } ?? false
+                keysClash = worst.map { $0 > Harmony.tolerance(keyA, keyB) } ?? false
             } else if span == 0 {
                 // A Wash Out never plays the two songs' notes together.
                 keysClash = false

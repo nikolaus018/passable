@@ -312,7 +312,7 @@ final class PayoffTests: XCTestCase {
         let major = [0, 2, 4, 5, 7, 9, 11]
         func scale(_ root: Int) -> [Float] { (0..<12).map { major.contains(($0 - root + 12) % 12) ? 1 : 0.05 } }
         XCTAssertEqual(Harmony.clash(scale(0), scale(0)), 0, accuracy: 1e-6)
-        XCTAssertTrue(Harmony.fits(scale(0), scale(7)), "neighbours on the key wheel")
+        XCTAssertLessThanOrEqual(Harmony.clash(scale(0), scale(7)), Harmony.clashTolerance, "neighbours on the key wheel")
         XCTAssertFalse(Harmony.fits(scale(0), scale(6)))
         XCTAssertGreaterThan(Harmony.clash(scale(0), scale(2)), Harmony.clash(scale(0), scale(7)))
         XCTAssertGreaterThan(Harmony.clash(scale(0), scale(6)), 0.2)
@@ -470,11 +470,15 @@ final class PayoffTests: XCTestCase {
     func testNotesAtTheSpotDecideSwapAndShift() throws {
         let c = MusicalKey(tonicPitchClass: 0, isMajor: true), cSharp = MusicalKey(tonicPitchClass: 1, isMajor: true)
         let a = song(scale: 0, key: c)
-        // A key estimate that's off: the notes share A's scale, so the
-        // melodies layer and B keeps its key.
-        let misread = PairPlan.make(a: a, b: song(scale: 0, key: cSharp))
+        // A key estimate that's a little off (two fifths): the notes share
+        // A's scale, so the melodies layer and B keeps its key.
+        let misread = PairPlan.make(a: a, b: song(scale: 0, key: MusicalKey(tonicPitchClass: 2, isMajor: true)))
         XCTAssertFalse(misread.keysClash)
         XCTAssertEqual(misread.semitones, 0)
+        // Keys far apart are believed over a stretch that happens to fit.
+        XCTAssertEqual(Harmony.tolerance(c, cSharp), -.infinity)
+        XCTAssertEqual(Harmony.tolerance(c, MusicalKey(tonicPitchClass: 9, isMajor: false)), Harmony.clashTolerance)
+        XCTAssertEqual(Harmony.tolerance(c, MusicalKey(tonicPitchClass: 7, isMajor: true)), Harmony.clashTolerance)
         // The other way round: the estimates agree, the notes don't.
         let hidden = PairPlan.make(a: a, b: song(scale: 1, key: c))
         XCTAssertTrue(hidden.keysClash)

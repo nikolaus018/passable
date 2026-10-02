@@ -61,34 +61,37 @@ struct MusicalKey: Codable, Equatable, Hashable {
     }
 }
 
-/// Key estimation via a chroma vector (12 pitch-class energy bins) correlated
-/// against the standard Krumhansl-Schmuckler major/minor key profiles.
+/// Key estimation from a chroma vector (12 pitch-class energies): the
+/// diatonic scale the song's notes fit best, and of its two keys (a major
+/// and its relative minor) the one whose Krumhansl-Schmuckler profile the
+/// notes follow more closely.
+///
+/// The scale is what mixing goes by (songs in relative keys share every
+/// note), and it is found the way `Harmony.clash` judges two songs together,
+/// so a key and a clash never disagree about the same notes. Correlating
+/// all 24 key profiles instead named a key a fifth off for a third of the
+/// songs checked against their published keys.
 struct KeyDetector {
     private static let majorProfile: [Double] = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
     private static let minorProfile: [Double] = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+    private static let majorScale = [0, 2, 4, 5, 7, 9, 11]
 
     static func detect(samples: [Float], sampleRate: Double) -> MusicalKey {
-        let chroma = computeChroma(samples: samples, sampleRate: sampleRate)
+        key(of: computeChroma(samples: samples, sampleRate: sampleRate))
+    }
 
-        var bestScore = -Double.infinity
-        var bestPitchClass = 0
-        var bestIsMajor = true
-
-        for pitchClass in 0..<12 {
-            let majorScore = correlation(chroma, rotate(majorProfile, by: pitchClass))
-            if majorScore > bestScore {
-                bestScore = majorScore
-                bestPitchClass = pitchClass
-                bestIsMajor = true
-            }
-            let minorScore = correlation(chroma, rotate(minorProfile, by: pitchClass))
-            if minorScore > bestScore {
-                bestScore = minorScore
-                bestPitchClass = pitchClass
-                bestIsMajor = false
-            }
+    /// The key a chroma vector sits in (see above).
+    static func key(of chroma: [Double]) -> MusicalKey {
+        guard chroma.count == 12, chroma.contains(where: { $0 > 0 }) else {
+            return MusicalKey(tonicPitchClass: 0, isMajor: true)
         }
-        return MusicalKey(tonicPitchClass: bestPitchClass, isMajor: bestIsMajor)
+        func inScale(_ tonic: Int) -> Double { majorScale.reduce(0) { $0 + chroma[($1 + tonic) % 12] } }
+        let tonic = (0..<12).max { inScale($0) < inScale($1) }!
+        let relative = (tonic + 9) % 12
+        let major = correlation(chroma, rotate(majorProfile, by: tonic))
+        let minor = correlation(chroma, rotate(minorProfile, by: relative))
+        return major >= minor ? MusicalKey(tonicPitchClass: tonic, isMajor: true)
+            : MusicalKey(tonicPitchClass: relative, isMajor: false)
     }
 
     private static func rotate(_ profile: [Double], by amount: Int) -> [Double] {
@@ -114,43 +117,60 @@ struct KeyDetector {
 
     /// Energy per pitch class of `samples`, scaled so the strongest is 1
     /// (or as measured: stretches then add up to what the whole would give).
+    ///
+    /// The notes themselves: the peaks of the spectrum from 55 Hz to 2 kHz
+    /// (fundamentals and their first few overtones), each counted once, at
+    /// its own strength, for the pitch it sits on. Summing every bin of the
+    /// spectrum up to 5 kHz instead (as this did) counts whatever fills the
+    /// spectrum between the notes and above them, and the top octaves have
+    /// by far the most bins: every song then leaned towards the same few
+    /// pitch classes, a fifth-off key was named for a third of them, and of
+    /// stretches of two songs in clashing keys, 4 % were heard to clash
+    /// (now about three in four; measured on songs with published keys).
     static func computeChroma(samples: [Float], sampleRate: Double, normalised: Bool = true) -> [Double] {
-        let frameSize = 4096
-        let hopSize = 2048
-        guard samples.count >= frameSize else { return [Double](repeating: 0, count: 12) }
+        // A quarter of the rate (each sample the mean of four) puts
+        // 1.35 Hz between the bins of an 8192-point frame: a semitone at
+        // 55 Hz is 3.3 Hz wide.
+        let factor = 4, frameSize = 8192, hopSize = 4096
+        var chroma = [Double](repeating: 0, count: 12)
+        let count = samples.count / factor
+        guard count >= frameSize else { return chroma }
+        var slow = [Float](repeating: 0, count: count)
+        let mean = [Float](repeating: 1 / Float(factor), count: factor)
+        vDSP_desamp(samples, vDSP_Stride(factor), mean, &slow, vDSP_Length(count), vDSP_Length(factor))
 
         let fft = RealFFT(size: frameSize)
         var window = [Float](repeating: 0, count: frameSize)
         vDSP_hann_window(&window, vDSP_Length(frameSize), Int32(vDSP_HANN_NORM))
-
-        let binHz = sampleRate / Double(frameSize)
-
-        // Below ~100Hz a 4096-point bin is wider than a semitone, so those bins
-        // smear across pitch classes instead of informing them; above 5kHz
-        // there is little tonal content left.
-        var binsByPitchClass = [[Int]](repeating: [], count: 12)
-        for k in 1..<(frameSize / 2) {
-            let freq = Double(k) * binHz
-            guard freq >= 100, freq <= 5000 else { continue }
-            let midi = 69.0 + 12.0 * log2(freq / 440.0)
-            binsByPitchClass[((Int(midi.rounded()) % 12) + 12) % 12].append(k)
-        }
-
-        var chroma = [Double](repeating: 0, count: 12)
+        let binHz = sampleRate / Double(factor) / Double(frameSize)
+        let first = max(1, Int((55 / binHz).rounded(.up))), last = min(frameSize / 2 - 2, Int(2000 / binHz))
         var frame = [Float](repeating: 0, count: frameSize)
 
         var offset = 0
-        while offset + frameSize <= samples.count {
-            samples.withUnsafeBufferPointer {
+        while offset + frameSize <= count {
+            slow.withUnsafeBufferPointer {
                 vDSP_vmul($0.baseAddress! + offset, 1, window, 1, &frame, 1, vDSP_Length(frameSize))
             }
-            let magnitudes = fft.magnitudes(of: frame)
-            for pitchClass in 0..<12 {
-                var sum: Float = 0
-                for k in binsByPitchClass[pitchClass] { sum += magnitudes[k] }
-                chroma[pitchClass] += Double(sum)
-            }
             offset += hopSize
+            let m = fft.magnitudes(of: frame)
+            var strongest: Float = 0
+            for k in first...last where m[k] > m[k - 1] && m[k] >= m[k + 1] { strongest = max(strongest, m[k]) }
+            guard strongest > 0 else { continue }
+            // Peaks within 34 dB of the strongest: below that it's noise
+            // and what separation left behind.
+            for k in first...last where m[k] > m[k - 1] && m[k] >= m[k + 1] && m[k] > 0.02 * strongest {
+                // Where between the bins the peak really is (a parabola
+                // through the log magnitudes), and how far that is from
+                // the nearest note: a peak between two notes counts for
+                // neither.
+                let a = log(Double(m[k - 1]) + 1e-12), b = log(Double(m[k])), c = log(Double(m[k + 1]) + 1e-12)
+                let curve = a - 2 * b + c
+                let bin = Double(k) + (curve < 0 ? max(-0.5, min(0.5, 0.5 * (a - c) / curve)) : 0)
+                let midi = 69 + 12 * log2(bin * binHz / 440)
+                let note = midi.rounded()
+                let weight = cos((midi - note) * Double.pi)
+                chroma[((Int(note) % 12) + 12) % 12] += Double(m[k]) * weight * weight
+            }
         }
 
         let maxVal = chroma.max() ?? 1

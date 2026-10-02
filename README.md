@@ -34,10 +34,13 @@ The format is a small chunked container: magic `PASSABLE\r\n\x1A\n`, a version, 
 
 ```sh
 brew install xcodegen yt-dlp ffmpeg uv
-# One-time: export the Core ML model (~200 MB, not checked in)
+# One-time: export the Core ML models (~200 MB and ~80 MB, not checked in)
 cd tools/convert-demucs && uv venv --python 3.12 .venv && \
   uv pip install --python .venv/bin/python torch==2.7.0 torchaudio==2.7.0 coremltools demucs numpy soundfile && \
   .venv/bin/python convert.py && .venv/bin/python make_fixtures.py && cd ../..
+cd tools/convert-beats && uv venv --python 3.12 .venv && \
+  uv pip install --python .venv/bin/python torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 beat-this soundfile && \
+  .venv/bin/python convert.py && cd ../..
 xcodegen generate && open Passable.xcodeproj
 ```
 
@@ -45,14 +48,28 @@ xcodegen generate && open Passable.xcodeproj
 
 Core ML has no complex tensors, so `convert.py` exports HTDemucs **without** its STFT/iSTFT. `Separation/DemucsSTFT.swift` reimplements those in Accelerate to match torch exactly. `StemSeparator` also reproduces `demucs.apply_model` chunking: 7.8 s segments, 25 % overlap, triangular cross-fades, and context padding for the last chunk.
 
+Beat grids start from a second model, [Beat This!](https://github.com/CPJKU/beat_this) (MIT), exported by `tools/convert-beats/convert.py` with its mel filterbank inside the graph; `Analysis/BeatTracker.swift` does the STFT and the 30-second chunking. It says which tempo, which hits the beat is on and which beat is the one; `TempoEstimator` then fits the grid to the drum hits to the millisecond. Without the model in the bundle, analysis falls back to onsets alone.
+
 The tests compare the result against PyTorch: stems match at over 110 dB SNR. The model runs in FP32 on the GPU. An FP16 (Neural Engine) export overflows and drifts badly. A 4-minute track separates in about 20 s on an M5. Stems are cached in `~/Library/Caches/Passable`.
+
+## Checking a set
+
+`PassableTests/SetLab` builds a set from a list of songs and measures every transition (levels, both songs heard, doubled lows and voices, flams). Its measures come from Passable's own analysis, so a wrong beat grid looks fine to it. For a second opinion, have it write each transition out and run the audit, which tracks the songs and the rendered blends with Beat This! in PyTorch and says where two songs don't share a beat or a bar:
+
+```sh
+TEST_RUNNER_PASSABLE_SET=songs.txt TEST_RUNNER_PASSABLE_SET_AUDIT=/tmp/audit \
+  xcodebuild test -project Passable.xcodeproj -scheme Passable -only-testing:PassableTests/SetLab
+tools/convert-beats/.venv/bin/python tools/audit/audit.py /tmp/audit
+```
+
+`PassableTests/GridProbe` (`TEST_RUNNER_PASSABLE_GRIDS`, `TEST_RUNNER_PASSABLE_GRIDS_OUT`) lists each song's grid and key as cached and as estimated now, without touching the cache.
 
 ## Layout
 
 | Folder | Contents |
 |---|---|
 | `Passable/Separation` | Core ML HTDemucs, STFT, stem cache |
-| `Passable/Analysis` | beat grid (onset comb search + downbeat), key (Krumhansl chroma) |
+| `Passable/Analysis` | beat grid (Beat This! tracker for the metre, onset comb search for the fit), key (Krumhansl chroma) |
 | `Passable/Audio` | decoding/resampling, mmap'd stems, time map + sample-exact stretcher (phase vocoder, transient copy, sinc resampler) |
 | `Passable/DSP` | mixer, biquads, Freeverb, ping-pong delay, limiter: shared by preview and render |
 | `Passable/Model` | automation envelopes, presets, session |
