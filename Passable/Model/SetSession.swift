@@ -11,6 +11,8 @@ final class SetSession: ObservableObject {
         let url: URL
         var status: Deck.Status = .decoding
         var loaded: TrackProcessor.Loaded?
+        /// Asked for while the set was playing, and mixed in (see `request`).
+        var requested = false
 
         var title: String { SongTitle.of(url) }
         var analysis: TrackAnalysis? { loaded?.analysis }
@@ -97,6 +99,157 @@ final class SetSession: ObservableObject {
             load(item.id)
         }
         invalidate()
+    }
+
+    // MARK: - Requests
+
+    /// A song asked for while the set plays, on its way into it.
+    struct Request: Identifiable, Equatable {
+        let id = UUID()
+        let url: URL
+        var status: Deck.Status = .decoding
+
+        var title: String { SongTitle.of(url) }
+    }
+
+    /// Requests still being fetched, separated and analysed.
+    @Published private(set) var requests: [Request] = []
+    /// Where the last request went, in words.
+    @Published private(set) var requestNote: String?
+    /// The request the build under way is for, and how often it may still
+    /// be moved a song later if the music has caught up with its spot.
+    private var placing: (id: UUID, tries: Int)?
+    /// Seconds a request needs before the transition it changes: the set
+    /// is planned and the song rendered at the blend's tempo meanwhile.
+    private static let requestLead = 20.0
+
+    func isInSet(_ url: URL) -> Bool { items.contains { $0.url == url } }
+    func isRequested(_ url: URL) -> Bool { requests.contains { $0.url == url } }
+
+    /// A song request: the song goes into the set as soon as it can, after
+    /// the song that's playing or the first one after it that it isn't
+    /// hopeless next to, and the set carries on from there as it was. The
+    /// music never stops for it: the song is got ready on the side, and
+    /// the set is rebuilt around the part that's playing.
+    /// - Returns: false if the song is in the set already (or asked for).
+    @discardableResult
+    func request(_ url: URL) -> Bool {
+        guard !isInSet(url), !isRequested(url) else { return false }
+        // No set playing yet: it's simply one more song of it.
+        guard mix != nil, isReady else {
+            add([url])
+            return true
+        }
+        let request = Request(url: url)
+        requests.append(request)
+        func update(_ change: (inout Request) -> Void) {
+            guard let i = requests.firstIndex(where: { $0.id == request.id }) else { return }
+            change(&requests[i])
+        }
+        processor.load(url, ticket: .init(), progress: { [weak self] progress in
+            Task { @MainActor in
+                guard let self, let i = self.requests.firstIndex(where: { $0.id == request.id }) else { return }
+                switch progress {
+                case .decoding: self.requests[i].status = .decoding
+                case .separating(let p): self.requests[i].status = .separating(p)
+                case .analyzing: self.requests[i].status = .analyzing
+                }
+            }
+        }, completion: { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                self.requests.removeAll { $0.id == request.id }
+                switch result {
+                case .success(let loaded): self.place(url, loaded)
+                case .failure(let error):
+                    self.alert = "“\(SongTitle.of(url))” couldn't be loaded: \(error.localizedDescription)"
+                }
+            }
+        })
+        return true
+    }
+
+    /// Whether `b` can follow `a` on a shared beat: anything but a pair
+    /// whose tempos are too far apart to match.
+    private func mixes(_ a: TrackAnalysis?, _ b: TrackAnalysis) -> Bool {
+        guard let a else { return true }
+        return MixMath.recommendedPreset(a: a.grid.bpm, b: b.grid.bpm) != .echoOut
+    }
+
+    /// The first place a requested song may go: after the song that's
+    /// leading, or after the next one if the way out of this one is too
+    /// close (or under way) to change.
+    private func earliestRequestSlot() -> Int {
+        guard let mix else { return items.count }
+        let current = min(currentIndex ?? 0, items.count - 1)
+        if let out = mix.transitions.first(where: { $0.from == current }),
+           transport.seconds > out.cue - Self.requestLead {
+            return min(items.count, current + 2)
+        }
+        return current + 1
+    }
+
+    private func place(_ url: URL, _ loaded: TrackProcessor.Loaded) {
+        guard !isInSet(url) else { return }
+        var item = Item(url: url)
+        item.loaded = loaded
+        item.status = .ready
+        item.requested = true
+        guard mix != nil, isReady else {
+            // The set is being rebuilt for something else: at its end.
+            items.append(item)
+            rebuild()
+            return
+        }
+        let earliest = earliestRequestSlot()
+        let slot = (earliest...items.count).first { mixes(items[$0 - 1].analysis, loaded.analysis) } ?? earliest
+        items.insert(item, at: slot)
+        placing = (item.id, 2)
+        requestNote = "“\(item.title)” plays after “\(items[slot - 1].title)”"
+        rebuild()
+    }
+
+    /// Whether `new` plays what `old` is playing now, and for the next
+    /// seconds: the same songs at the same places, and no transition
+    /// begun that the old mix didn't have. Then the player can change
+    /// over to it mid-song and nobody hears it.
+    private func continues(_ old: SetMix, into new: SetMix) -> Bool {
+        let now = transport.seconds, ahead = now + 5
+        for (k, t) in new.transitions.enumerated() where t.cue <= ahead {
+            guard k < old.transitions.count else { return false }
+            let was = old.transitions[k]
+            guard old.tracks[was.from].url == new.tracks[t.from].url, old.tracks[was.to].url == new.tracks[t.to].url,
+                  abs(was.start - t.start) < 1e-3, abs(was.end - t.end) < 1e-3 else { return false }
+        }
+        // And the song that's leading sits where it sat (its way out may
+        // have changed: where it glides to the next blend's tempo, a jump
+        // it takes or no longer takes).
+        let leading = old.transitions.last(where: { $0.end <= now })?.to ?? 0
+        guard leading < new.tracks.count, new.tracks[leading].url == old.tracks[leading].url else { return false }
+        let a = old.tracks[leading], b = new.tracks[leading]
+        var own = 0.0
+        while own < a.loaded.analysis.duration {
+            let at = a.master(own)
+            if at >= now - 1, at <= ahead, abs(b.master(own) - at) > 1e-3 { return false }
+            own += 0.5
+        }
+        return true
+    }
+
+    /// The music has caught up with the spot a request was built for: one
+    /// song later, and built again. False if there's nowhere later to go
+    /// (or it has been moved often enough): it goes in as built.
+    private func moveRequestLater() -> Bool {
+        guard let request = placing, request.tries > 0,
+              let i = items.firstIndex(where: { $0.id == request.id }) else { return false }
+        let slot = min(items.count - 1, max(i + 1, earliestRequestSlot()))
+        guard slot > i else { return false }
+        let item = items.remove(at: i)
+        items.insert(item, at: slot)
+        placing = (request.id, request.tries - 1)
+        requestNote = "“\(item.title)” plays after “\(items[slot - 1].title)”"
+        rebuild()
+        return true
     }
 
     func remove(_ id: UUID) {
@@ -259,6 +412,10 @@ final class SetSession: ObservableObject {
                     Task { @MainActor in if self?.mix == nil { self?.buildStatus = text } }
                 }
                 guard !Task.isCancelled, let self else { return }
+                // Built around what's playing for a request: if the music
+                // has moved on into what it changed, it goes a song later.
+                if self.placing != nil, let old = self.mix, !self.continues(old, into: mix), self.moveRequestLater() { return }
+                self.placing = nil
                 self.mix = mix
                 self.buildStatus = nil
                 self.refreshSnapshot()

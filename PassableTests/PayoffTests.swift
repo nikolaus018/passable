@@ -567,9 +567,12 @@ final class PayoffTests: XCTestCase {
     func testAShortSongKeepsTimeOnItsOwn() {
         let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
         let a = song(scale: 0, key: c)
-        let plan = PairPlan.make(a: a, b: song(scale: 0, key: c, bars: 40))
+        let short = song(scale: 0, key: c, bars: 40)
+        let plan = PairPlan.make(a: a, b: short)
         XCTAssertNotEqual(plan.preset, .echoOut)
-        XCTAssertLessThanOrEqual(plan.placement.cueBar + plan.bars + SetBuilder.minimumSoloBars + 16, 40)
+        // (From its first phrase, where it hasn't the bars for more.)
+        XCTAssertLessThanOrEqual(plan.placement.cueBar,
+                                 max(3, 40 - plan.bars - SetBuilder.minimumSoloBars(short.grid) - 16))
         // A song of ordinary length may still come in on a later phrase.
         XCTAssertLessThanOrEqual(PairPlan.make(a: a, b: song(scale: 0, key: c, bars: 96)).placement.cueBar, 43)
     }

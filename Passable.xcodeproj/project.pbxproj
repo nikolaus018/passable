@@ -33,6 +33,7 @@
 		4C63F614F9CEAE87D30892BD /* TransitionPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E1FA045141AEACB4C04FDF3 /* TransitionPanel.swift */; };
 		573288BB14DF37B676355955 /* PayoffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EEC2588B36CA71986AC14E9 /* PayoffTests.swift */; };
 		5A6238B318AA288716F24F77 /* LibraryFetch.swift in Sources */ = {isa = PBXBuildFile; fileRef = E437400E644FE3BB9ABE4583 /* LibraryFetch.swift */; };
+		5CEBC7F1363F1AA1A2532877 /* RequestLab.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1612B817C97CD12331F2300 /* RequestLab.swift */; };
 		5E0484FA52AD89AFD03BE96C /* PassableFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFA185FD99CE45F4F53A78AA /* PassableFile.swift */; };
 		6A87BFA23CB053EBC96C6F40 /* RealTrackProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 683C023C0AB1CCF3B368AA0D /* RealTrackProbe.swift */; };
 		7BC1E725829A8BFA8D01C4F8 /* SearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7DA88A707CD72420E5A9DB5 /* SearchSheet.swift */; };
@@ -128,6 +129,7 @@
 		E7DA88A707CD72420E5A9DB5 /* SearchSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchSheet.swift; sourceTree = "<group>"; };
 		E90F393D5126D1D1B90167C8 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		EAE2D93E072FDE7F8EEC047F /* SetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetView.swift; sourceTree = "<group>"; };
+		F1612B817C97CD12331F2300 /* RequestLab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestLab.swift; sourceTree = "<group>"; };
 		FE6C44F5546EC863B0C936DF /* PassableApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassableApp.swift; sourceTree = "<group>"; };
 		FFA185FD99CE45F4F53A78AA /* PassableFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassableFile.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -277,6 +279,7 @@
 				4EEC2588B36CA71986AC14E9 /* PayoffTests.swift */,
 				E498312F53D40FD534860992 /* PerfLab.swift */,
 				683C023C0AB1CCF3B368AA0D /* RealTrackProbe.swift */,
+				F1612B817C97CD12331F2300 /* RequestLab.swift */,
 				5BD3C5673D80CB6C6602ED07 /* SeparationTests.swift */,
 				4E892F9005FB98FACDDF2B72 /* SetEditingTests.swift */,
 				7079AC37C3DD4C737C158B2C /* SetLab.swift */,
@@ -397,6 +400,7 @@
 				573288BB14DF37B676355955 /* PayoffTests.swift in Sources */,
 				832B279B4D7E3B07CB6DBF5E /* PerfLab.swift in Sources */,
 				6A87BFA23CB053EBC96C6F40 /* RealTrackProbe.swift in Sources */,
+				5CEBC7F1363F1AA1A2532877 /* RequestLab.swift in Sources */,
 				AE9EA7FFF2681EACB38A9E04 /* SeparationTests.swift in Sources */,
 				85BAC09155E2470EB2093ECB /* SetEditingTests.swift in Sources */,
 				E6261CA89FD2926F41C8F839 /* SetLab.swift in Sources */,

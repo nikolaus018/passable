@@ -532,7 +532,9 @@ struct TransitionBuilder {
             for stem in [StemKind.drums, .bass, .other] {
                 automate(.b, stem, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
             }
-            bringInVocal(at: 0)
+            // B's voice with its beat, or on its next word if the downbeat
+            // falls in the middle of one.
+            bringInVocal(at: max(0, vocalIn ?? 0))
         }
     }
 }

@@ -5,6 +5,7 @@ import SwiftUI
 struct SetView: View {
     @EnvironmentObject private var set: SetSession
     @State private var showSearch = false
+    @State private var showRequest = false
     @State private var isDropTarget = false
 
     var body: some View {
@@ -35,6 +36,9 @@ struct SetView: View {
         .sheet(isPresented: $showSearch) {
             SearchSheet().environmentObject(set)
         }
+        .sheet(isPresented: $showRequest) {
+            SearchSheet(isRequest: true).environmentObject(set)
+        }
     }
 
     private var header: some View {
@@ -47,7 +51,16 @@ struct SetView: View {
             if let status = set.buildStatus {
                 ProgressView().controlSize(.small)
                 Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            } else if let request = set.requests.first {
+                ProgressView().controlSize(.small)
+                Text("Request: “\(request.title)” · \(Self.progress(request.status))")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
+            Button { showRequest = true } label: {
+                Label("Request…", systemImage: "music.note.list")
+            }
+            .disabled(set.mix == nil)
+            .help("Mix a song into the set as soon as it fits, without stopping the music")
             Button { OpenPanel.chooseMany { set.add($0) } } label: {
                 Label("Add Files…", systemImage: "folder")
             }
@@ -76,12 +89,21 @@ struct SetView: View {
         }
     }
 
+    private static func progress(_ status: Deck.Status) -> String {
+        switch status {
+        case .decoding: return "getting it…"
+        case .separating(let p): return "separating stems \(Int(p * 100))%"
+        case .analyzing: return "finding beat and key…"
+        default: return "nearly there…"
+        }
+    }
+
     private var subtitle: String {
         let n = set.items.count
         guard n > 0 else { return "Add songs; Passable orders them and mixes them into one set." }
         var text = "\(n) song\(n == 1 ? "" : "s")"
         if set.length > 0 { text += " · \(Theme.time(set.length))" }
-        if n > 1 { text += " · drag songs to reorder" }
+        if let note = set.requestNote { text += " · \(note)" } else if n > 1 { text += " · drag songs to reorder" }
         return text
     }
 
@@ -143,7 +165,14 @@ private struct TrackRow: View {
                 .frame(width: 26, height: 26)
                 .background(Circle().fill(isPlaying ? Theme.deckB : Theme.deckA))
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.title).lineLimit(1).font(.headline)
+                HStack(spacing: 6) {
+                    Text(item.title).lineLimit(1).font(.headline)
+                    if item.requested {
+                        Text("Request").font(.caption2.weight(.semibold)).foregroundStyle(.white)
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(Capsule().fill(Theme.deckB))
+                    }
+                }
                 status
             }
             Spacer()

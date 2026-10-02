@@ -165,6 +165,8 @@ final class SetLab: XCTestCase {
         var payoffCounts: [String: Int] = [:]
         var togetherBars: [Int] = []
         var busyBars: [Int] = []
+        var vocalCuts: [String: Int] = [:]
+        var held: [Int] = [], alone: [Int] = []
         for t in mix.transitions {
             let bar = t.barSeconds
             // A Wash Out happens in the bars before B's downbeat.
@@ -332,11 +334,15 @@ final class SetLab: XCTestCase {
                 + (t.skippedBars > 0 ? "  A skipped \(t.skippedBars) bars before" : "")
             if t.skippedBars > 0 { payoffCounts["club edit", default: 0] += 1 }
             print("      payoff: " + (t.payoff.isEmpty ? "none" : t.payoff.joined(separator: " · ")) + shift
-                  + "  vocals: B in on \(t.vocalInKind ?? "-"), A " + (t.vocalOutBlend ? "blends out" : "cut")
+                  + "  vocals: B in on \(t.vocalInKind ?? "-"), A out on \(t.vocalOutKind ?? "-")"
                   + String(format: " (bars: A out %@, B in %@, switch %@)",
                            t.vocalOut.map { String(format: "%.1f", ($0 - t.start) / t.barSeconds) } ?? "-",
                            t.vocalIn.map { String(format: "%.1f", ($0 - t.start) / t.barSeconds) } ?? "-",
                            t.plan.placement.lowSwap.map(String.init) ?? "-"))
+            vocalCuts["B in on \(t.vocalInKind ?? "-")", default: 0] += 1
+            vocalCuts["A out on \(t.vocalOutKind ?? "-")", default: 0] += 1
+            held.append(heldBack)
+            alone.append(Int((t.begins - (mix.transitions.last { $0.end <= t.begins }?.end ?? 0)).rounded()))
             for tag in t.payoff { payoffCounts[tag.components(separatedBy: ":")[0], default: 0] += 1 }
             if t.payoff.isEmpty { payoffCounts["none", default: 0] += 1 }
             // A lift is how a set builds; a drop is what empties a floor.
@@ -404,6 +410,9 @@ final class SetLab: XCTestCase {
         }
         print(String(format: "Songs pitch-shifted: %d of %d;  stretch over 4%%: %d, largest %.1f%%", shifted,
                      mix.transitions.count, stretches.filter { $0 > 4 }.count, stretches.max() ?? 0))
+        print("Vocals: " + vocalCuts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+        print("Bars nobody sings while B's voice is held back: " + held.map(String.init).joined(separator: " "))
+        print("Seconds each song plays on its own before its way out: " + alone.map(String.init).joined(separator: " "))
         print("Payoffs over \(mix.transitions.count) transitions: "
               + payoffCounts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
 

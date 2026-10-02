@@ -65,7 +65,8 @@ final class TrackProcessor: @unchecked Sendable {
                     analysis = cached
                     if analysis.structure?.stemLevel == nil || analysis.structure?.vocalBeatLevel == nil
                         || analysis.structure?.hookStart == nil || analysis.structure?.barChroma == nil
-                        || analysis.structure?.harmonyChroma == nil || analysis.structure?.melodyChroma == nil {
+                        || analysis.structure?.harmonyChroma == nil || analysis.structure?.melodyChroma == nil
+                        || analysis.structure?.vocalSixteenthLevel == nil || analysis.structure?.vocalChroma == nil {
                         analysis.structure = TrackStructure.measure(stems: stems, grid: analysis.grid)
                         StemCache.saveAnalysis(analysis, to: directory)
                     }

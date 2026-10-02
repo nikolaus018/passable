@@ -4,7 +4,12 @@ import SwiftUI
 /// Soulseek (through slskd), and add them to the set. Downloads run in the
 /// background, several at once, and land in ~/Music/Passable; a song
 /// downloaded before is added straight away.
+///
+/// As a request (`isRequest`), a song chosen here is mixed into the set
+/// that's playing as soon as it fits (`SetSession.request`) rather than
+/// added to a set that is then ordered again.
 struct SearchSheet: View {
+    var isRequest = false
     @EnvironmentObject private var set: SetSession
     @Environment(\.dismiss) private var dismiss
 
@@ -27,8 +32,10 @@ struct SearchSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Find Songs Online").font(.title3.bold())
-                    Text(source == .youtube
+                    Text(isRequest ? "Request a Song" : "Find Songs Online").font(.title3.bold())
+                    Text(isRequest
+                         ? "It's mixed in after the song that's playing, or as soon as it fits. The music doesn't stop."
+                         : source == .youtube
                          ? "Search YouTube Music and add songs to your set. Downloads are saved to ~/Music/Passable."
                          : "Lossless files (FLAC, WAV, AIFF) and 320 kbps MP3s shared on Soulseek, through slskd. "
                            + "Downloads are saved to ~/Music/Passable.")
@@ -152,6 +159,11 @@ struct SearchSheet: View {
         if isInSet(result) {
             Label("In set", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.secondary)
+        } else if set.requests.contains(where: { $0.url.lastPathComponent.contains("[\(result.id)]") }) {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Getting it ready…").font(.caption).foregroundStyle(.secondary)
+            }
         } else if states[result.id] == .downloading {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
@@ -165,7 +177,7 @@ struct SearchSheet: View {
             Button {
                 add(result)
             } label: {
-                Label("Add", systemImage: "plus")
+                Label(isRequest ? "Request" : "Add", systemImage: "plus")
             }
         }
     }
@@ -213,9 +225,14 @@ struct SearchSheet: View {
         }
     }
 
+    /// Into the set: as a request, or as one more song of it.
+    private func take(_ file: URL) {
+        if isRequest { set.request(file) } else { set.add([file]) }
+    }
+
     private func add(_ result: MusicSearchResult) {
         if let file = downloadedFile(result) {
-            set.add([file])
+            take(file)
             return
         }
         states[result.id] = .downloading
@@ -225,7 +242,7 @@ struct SearchSheet: View {
                 switch outcome {
                 case .success(let url):
                     states[result.id] = nil
-                    set.add([url])
+                    take(url)
                 case .failure(let error):
                     states[result.id] = .failed(error.localizedDescription)
                 }
