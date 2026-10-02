@@ -103,6 +103,21 @@ final class FlamProbe: XCTestCase {
         let perSecond = AudioIO.sampleRate / Double(BeatAlign.onsetHop)
         print(String(format: "FLAM %@ bar %d (%.2f BPM) ← %@ bar %d (%.2f BPM), rate %.4f", SongTitle.of(urls[0]), entry, ga.bpm,
                      SongTitle.of(urls[1]), cue, gb.bpm, rate))
+        // What the builder decides, on B rendered at A's tempo.
+        var played = stems[1][.drums]!
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        if rate != 1 {
+            try StemAudio.save(TimeStretcher.process(played.copyStereo(), map: .constant(rate), semitones: 0, percussive: true),
+                               directory: dir, name: "b")
+            played = try StemAudio.load(directory: dir, name: "b")
+        }
+        let result = BeatAlign.nudge(a: stems[0][.drums]!, aOffset: 0, b: played, bOffset: bOffset, from: start,
+                                     to: start + 16 * ga.barSeconds, split: start + 16 * ga.barSeconds)
+        print(String(format: "FLAM builder: nudge %+.0f ms, lock before %.0f%% → layered %@; lags %@", result.nudge * 1000,
+                     result.lockBefore * 100, result.grooves ? "yes" : "no",
+                     result.lags.map { String(format: "%.0f", $0 * 1000) }.joined(separator: " ")))
         for w in 0..<8 {
             let from = start + Double(2 * w) * ga.barSeconds, to = from + 2 * ga.barSeconds
             var scores: [Double] = []
@@ -154,5 +169,80 @@ final class PartsProbe: XCTestCase {
             let strong = parts.indices.filter { parts[$0] >= 0.6 }
             print("PARTS   parts end and begin at: " + strong.map { parts[$0] == 1 ? "[\($0)]" : "\($0)" }.joined(separator: " "))
         }
+    }
+}
+
+/// Not a unit test: builds the two songs of $PASSABLE_FLAM (the first two
+/// lines, in that order) as a set of their own and says whether B's drums
+/// were layered under A's, and how far apart the two kits land in what
+/// plays. Skipped unless the variable is set.
+final class PairBuildProbe: XCTestCase {
+    func testPair() async throws {
+        guard let listFile = ProcessInfo.processInfo.environment["PASSABLE_FLAM"],
+              let list = try? String(contentsOfFile: listFile, encoding: .utf8) else { throw XCTSkip("set PASSABLE_FLAM") }
+        let urls = list.split(separator: "\n").map(String.init).prefix(2).map { URL(fileURLWithPath: $0) }
+        let processor = TrackProcessor()
+        var tracks: [(url: URL, loaded: TrackProcessor.Loaded)] = []
+        for url in urls {
+            tracks.append((url, try await withCheckedThrowingContinuation { c in
+                processor.load(url, ticket: .init(), progress: { _ in }) { c.resume(with: $0) }
+            }))
+        }
+        // (At the spot on lines three and four, A's bar and B's, if given.)
+        let lines = list.split(separator: "\n").map(String.init)
+        var edits: [PairKey: TransitionEdit] = [:]
+        if lines.count >= 4, let entry = Int(lines[2]), let cue = Int(lines[3]) {
+            edits[PairKey(from: urls[0], to: urls[1])] = TransitionEdit(entryBar: entry, cueBar: cue, preset: .stemSwap, bars: 16,
+                                                                        semitones: 0, lanes: [], byHand: false)
+        }
+        let mix = try await SetBuilder.build(tracks, edits: edits, processor: processor) { _ in }
+        let t = try XCTUnwrap(mix.transitions.first)
+        let sr = AudioIO.sampleRate
+        func drums(_ track: Int) -> [Float] {
+            let renderer = MixRenderer(snapshot: mix.snapshot(masterGain: 1) { i, stem in i == track && stem == .drums })
+            renderer.setPositionImmediately(Int(t.start * sr))
+            let n = Int((t.end - t.start) * sr)
+            var l = [Float](repeating: 0, count: n), r = l
+            renderer.render(left: &l, right: &r, count: n)
+            return zip(l, r).map { $0 + $1 }
+        }
+        // The notes that play together through the blend: B's melody on A's
+        // melody and bass line, and on A's voice.
+        let ta = mix.tracks[0], tb = mix.tracks[1]
+        func notes(_ track: SetMix.Track, _ kinds: [StemKind], _ from: Double, _ to: Double) -> [Float]? {
+            Harmony.chroma(kinds.compactMap { track.stems[$0] }, offset: track.stemOffset(at: from), from: from, to: to)
+        }
+        let q = Double(t.edit.bars) / 4 * t.barSeconds
+        for (name, from, to) in [("first quarter on", t.start + q, t.end), ("whole blend", t.start, t.end)] {
+            let b = notes(tb, [.other], from, to)
+            func clash(_ kinds: [StemKind]) -> String {
+                guard let a = notes(ta, kinds, from, to), let b else { return "  –  " }
+                return String(format: "%+.3f", Harmony.clash(a, b))
+            }
+            print("PAIR   notes, \(name): B's melody against A's melody+bass \(clash([.other, .bass])), against A's voice \(clash([.vocals])), against all of A \(clash([.other, .bass, .vocals]))")
+        }
+        print("PAIR   keys \(ta.loaded.analysis.key.displayName) (\(ta.loaded.analysis.key.camelotCode)) → \(tb.loaded.analysis.key.displayName) (\(tb.loaded.analysis.key.camelotCode)); melodies swapped: \(t.melodiesClash); room \(t.room) dB; switch bar \(TransitionBuilder.switchBar(t.edit.preset, bars: t.edit.bars, lowSwap: t.plan.placement.lowSwap)); A's voice out \(t.vocalOut.map { String(format: "%.1f", ($0 - t.start) / t.barSeconds) } ?? "-"), B's in \(t.vocalIn.map { String(format: "%.1f", ($0 - t.start) / t.barSeconds) } ?? "-")")
+        // How loud each part is through the blend, bar by bar (dB).
+        func level(_ track: Int, _ stem: StemKind) -> [String] {
+            let renderer = MixRenderer(snapshot: mix.snapshot(masterGain: 1) { i, s in i == track && s == stem })
+            renderer.setPositionImmediately(Int(t.start * sr))
+            return (0..<t.edit.bars).map { _ in
+                let n = Int(t.barSeconds * sr)
+                var l = [Float](repeating: 0, count: n), r = l
+                renderer.render(left: &l, right: &r, count: n)
+                var e: Float = 0
+                for k in 0..<n { e += l[k] * l[k] + r[k] * r[k] }
+                return String(format: "%3.0f", 10 * log10(max(1e-12, e / Float(2 * n))))
+            }
+        }
+        print("PAIR   A voice  " + level(0, .vocals).joined(separator: " "))
+        print("PAIR   A melody " + level(0, .other).joined(separator: " "))
+        print("PAIR   B melody " + level(1, .other).joined(separator: " "))
+        print("PAIR   B voice  " + level(1, .vocals).joined(separator: " "))
+        let lags = BeatAlign.heardLags(a: drums(0), b: drums(1), window: 2 * t.barSeconds)
+        print(String(format: "PAIR %@ → %@: %@ %d bars from A's bar %d, B's bar %d; B's drums layered %@; nudge %+.0f ms; heard flam %.0f ms [%@]",
+                     SongTitle.of(urls[0]), SongTitle.of(urls[1]), t.plan.preset.displayName, t.edit.bars, t.edit.entryBar, t.edit.cueBar,
+                     t.drumsLayered ? "yes" : "no", t.nudge * 1000, BeatAlign.flam(lags) * 1000,
+                     lags.map { String(format: "%.0f", $0 * 1000) }.joined(separator: " ")))
     }
 }

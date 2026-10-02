@@ -37,9 +37,12 @@ enum MixMath {
     /// Stretches up to this are the incoming song's alone.
     static let shareAbove = 0.03
 
-    /// Beyond this, stretching B is audible even with its tempo matched
-    /// only through the blend: Wash Out, no shared beat.
-    static let maxStretch = 0.08
+    /// Beyond this (B's rate to A), the two don't share a beat: Wash Out.
+    /// Up to it they meet half-way (see `shared`), each no more than 6 %
+    /// off its own tempo, well inside what a DJ's pitch fader does all
+    /// night. (At 8 %, as this was, 146 into 135 BPM was bridged though
+    /// the two blend well.)
+    static let maxStretch = 0.12
 
     static func recommendedPreset(rate: Double) -> TransitionPreset {
         abs(rate - 1) > maxStretch ? .echoOut : .stemSwap
@@ -270,7 +273,7 @@ struct PairPlan: Equatable {
         switch stretch {
         case _ where preset == .echoOut: cost = 1.5 + 0.05 * stretch // fine once, not all night
         case ..<3: cost = 0.05 * stretch
-        case ..<8: cost = 0.15 + 0.14 * (stretch - 3)
+        case ..<(100 * MixMath.maxStretch): cost = 0.15 + 0.14 * (stretch - 3)
         default: cost = 1.5 + 0.05 * stretch
         }
         // Clashing songs can't blend, only swap: next to each other they
@@ -938,12 +941,16 @@ enum BeatAlign {
         var lockBefore: Double = 1, lockAfter: Double = 1
         /// Windows before and after the swap that clearly had a lag.
         var votesBefore = 0, votesAfter = 0
+        /// B's drums, layered under A's as the blend would play them,
+        /// were heard to flam (see `SetBuilder`): they come in whole on
+        /// the switch instead.
+        var topsSplit = false
         /// Two patterns that differ (a dancehall riddim over a straight
         /// beat) leave some windows without a clear lag, and those don't
         /// vote. Of the windows that do, a clear majority has to sit
         /// together: half the blend flamming is still a flam. B's tops
         /// layer under A's kit if the first half grooves.
-        var grooves: Bool { lockBefore >= 0.75 }
+        var grooves: Bool { lockBefore >= 0.75 && !topsSplit }
         /// A's drums play on under B's after the swap.
         var groovesAfter: Bool { grooves && lockAfter >= 0.75 }
         /// For a lock predicted from the songs' own hits rather than
@@ -978,6 +985,54 @@ enum BeatAlign {
             mono[i] = 0.5 * (stem.left.pointer[start + i] + stem.right.pointer[start + i])
         }
         return attacks(mono)
+    }
+
+    /// How far apart the hits of two drum parts land where both play (seconds
+    /// B is late by, one value per stretch of `window` seconds in which
+    /// the two clearly hit together at some lag), from what's heard: the
+    /// two parts rendered as the mix plays them, frame 0 of each at the
+    /// same moment. Anything past about 10 ms is heard as a flam.
+    static func heardLags(a: [Float], b: [Float], window seconds: Double) -> [Double] {
+        guard let ea = attacks(a), let eb = attacks(b) else { return [] }
+        let fps = AudioIO.sampleRate / Double(onsetHop), reach = 40
+        let window = Int(seconds * fps)
+        guard window > 4 * reach else { return [] }
+        var out: [Double] = []
+        var w = 0
+        while w + window <= min(ea.count, eb.count) {
+            defer { w += window }
+            let ra = Array(ea[w..<(w + window)]), rb = Array(eb[w..<(w + window)])
+            let sa = ra.reduce(0, +), sb = rb.reduce(0, +)
+            // Both kits really there, not one side's bleed or echo.
+            guard sa > 0, sb > 0, min(sa, sb) / max(sa, sb) > 0.2 else { continue }
+            let scores = (-reach...reach).map { lag -> Float in
+                var dot: Float = 0
+                for i in reach..<(window - reach) { dot += ra[i] * rb[i + lag] }
+                return dot
+            }
+            let k = scores.indices.max { scores[$0] < scores[$1] }!
+            let mean = scores.reduce(0, +) / Float(scores.count)
+            // Playing at the same time and hitting together near some lag
+            // (normalised correlation): a window with A's drums in one half
+            // and B's in the other (a hard swap) has nothing that could
+            // flam, and without a clear common lag it's two patterns, not
+            // a flam.
+            let norm = (ra.reduce(0) { $0 + $1 * $1 } * rb.reduce(0) { $0 + $1 * $1 }).squareRoot()
+            guard norm > 0, scores[k] / norm > 0.2, scores[k] > 1.25 * mean else { continue }
+            var lag = Double(k - reach)
+            if k > 0, k < scores.count - 1 {
+                let fall = scores[k] - min(scores[k - 1], scores[k + 1])
+                if fall > 0 { lag += Double(0.5 * (scores[k + 1] - scores[k - 1]) / fall) }
+            }
+            out.append(lag / fps)
+        }
+        return out
+    }
+
+    /// The flam typical of those lags (seconds): in some windows the two
+    /// patterns simply differ and meet anywhere.
+    static func flam(_ lags: [Double]) -> Double {
+        lags.isEmpty ? 0 : lags.map(abs).sorted()[lags.count / 2]
     }
 
     /// `onsets` of mono audio, frame 0 at its first sample.
@@ -1492,6 +1547,55 @@ enum SetBuilder {
                 // A Wash Out never plays the two songs' notes together.
                 keysClash = false
             }
+            // The beats can sit at one lag and still not sit: one kit's hats
+            // ahead of its clap, the other's on it, and no nudge closes
+            // both. Which hits carry depends on what's heard (B's low end
+            // killed, A's kit making room), so it's listened for: B's
+            // drums layered under A's are rendered as the blend would
+            // play them up to the swap, and if they flam there, they
+            // aren't layered. B's beat then comes in whole on the switch.
+            if !byHand, span > 0, align.grooves {
+                let sw = TransitionBuilder.switchBar(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
+                func lanes(room: Double, start: Double, bar: Double) -> [Lane] {
+                    TransitionBuilder.make(edit.preset, lanes: Lane.allLanes(), start: start, barSeconds: bar, bars: edit.bars,
+                                           vocalBar: max(edit.bars / 2, plan.placement.vocalHandoff), keysClash: keysClash,
+                                           lowSwap: plan.placement.lowSwap, drumsLayer: true, drumsLinger: align.groovesAfter,
+                                           dropMoment: plan.placement.dropMoment, room: room).lanes
+                }
+                var room = 0.0
+                if edit.preset == .stemSwap, let sa = a.loaded.analysis.structure, let sb = b.analysis.structure,
+                   let pa = AutoPlacement.powers(sa, trim: Float(MixMath.trimDB(a.loaded.analysis))),
+                   let pb = AutoPlacement.powers(sb, trim: Float(MixMath.trimDB(b.analysis))) {
+                    let q = max(1, edit.bars / 4)
+                    room = AutoPlacement.room(TransitionShape(lanes: lanes(room: 0, start: 0, bar: 1), preset: edit.preset, bars: edit.bars),
+                                              a: pa, e: edit.entryBar, b: pb, c: edit.cueBar, from: q, to: max(q + 1, Int(sw)))
+                }
+                var outgoing = a
+                var incoming = SetMix.Track(url: tracks[k].url, loaded: b, map: map, matched: matched, offset: offset + nudge,
+                                            envelopes: [:])
+                for lane in lanes(room: room, start: native, bar: blendBar) where lane.stem == .drums {
+                    let shifted = lane.envelopes.map { shift($0, by: delta) }
+                    if lane.side == .a {
+                        outgoing.envelopes[.drums] = merge(outgoing.envelopes[.drums], shifted)
+                    } else {
+                        incoming.envelopes[.drums] = shifted
+                    }
+                }
+                let pair = SetMix(tracks: [outgoing, incoming], transitions: [], length: end + 1)
+                let frames = Int(min(sw, Double(edit.bars)) * blendBar * sr)
+                func drums(_ track: Int) -> [Float] {
+                    let renderer = MixRenderer(snapshot: pair.snapshot(masterGain: 1) { i, stem in i == track && stem == .drums })
+                    renderer.setPositionImmediately(Int(start * sr))
+                    var l = [Float](repeating: 0, count: frames), r = l
+                    renderer.render(left: &l, right: &r, count: frames)
+                    vDSP_vadd(l, 1, r, 1, &l, 1, vDSP_Length(frames))
+                    return l
+                }
+                if frames > 0 {
+                    let lags = BeatAlign.heardLags(a: drums(0), b: drums(1), window: 2 * blendBar)
+                    if lags.count >= 2, BeatAlign.flam(lags) > 0.010 { align.topsSplit = true }
+                }
+            }
             var vocalIn: Double?, vocalOut: Double?
             var mashup = false
             // Bar (from B's entry) before which B's vocal stays out.
@@ -1696,7 +1800,18 @@ enum SetBuilder {
                                            vocalIn: vocalIn, vocalOut: vocalOut,
                                            mashup: mashup, dropMoment: dropMoment, rollBeat: rollBeat,
                                            vocalOutFade: outFade, vocalInFade: inFade, room: room,
-                                           carry: plan.placement.carry && !keysClash && !mashup)
+                                           carry: plan.placement.carry && !keysClash && !mashup, under: under)
+                }
+                // B's melody plays under A's voice for as long as A sings,
+                // from the two songs' levels there, and steps up as the
+                // voice leaves.
+                var under = 0.0
+                if edit.preset == .stemSwap, !keysClash, !mashup, let sa = a.loaded.analysis.structure,
+                   let sb = b.analysis.structure,
+                   let pa = AutoPlacement.powers(sa, trim: Float(MixMath.trimDB(a.loaded.analysis))),
+                   let pb = AutoPlacement.powers(sb, trim: Float(MixMath.trimDB(b.analysis))) {
+                    under = AutoPlacement.under(a: pa, e: edit.entryBar, b: pb, c: edit.cueBar, from: max(1, edit.bars / 4),
+                                                to: Int((vocalOut ?? switchBar).rounded(.up)))
                 }
                 // Room for B: A's EQ gives way as much as B's parts need to
                 // be heard, judged on the blend as it will play (B through

@@ -123,51 +123,7 @@ final class SetLab: XCTestCase {
                 renderer.render(left: &l, right: &r, count: n)
                 return zip(l, r).map { ($0 + $1) / 2 }
             }
-            guard let a = BeatAlign.attacks(mono(t.from)), let b = BeatAlign.attacks(mono(t.to)) else { return [] }
-            let fps = sr / Double(BeatAlign.onsetHop), reach = 40
-            let window = Int(2 * t.barSeconds * fps)
-            var out: [Double] = []
-            var w = 0
-            while w + window <= min(a.count, b.count) {
-                let ra = Array(a[w..<(w + window)]), rb = Array(b[w..<(w + window)])
-                let ea = ra.reduce(0, +), eb = rb.reduce(0, +)
-                // Both kits really there, not one side's bleed or echo.
-                if ea > 0, eb > 0, min(ea, eb) / max(ea, eb) > 0.2 {
-                    func at(_ lag: Int) -> Float {
-                        var dot: Float = 0
-                        for i in reach..<(window - reach) { dot += ra[i] * rb[i + lag] }
-                        return dot
-                    }
-                    let scores = (-reach...reach).map(at)
-                    let k = scores.indices.max { scores[$0] < scores[$1] }!
-                    let mean = scores.reduce(0, +) / Float(scores.count)
-                    // Playing at the same time and hitting together near
-                    // some lag (normalised correlation): a window with A's
-                    // drums in one half and B's in the other (a hard swap)
-                    // has nothing that could flam, and without a clear
-                    // common lag it's two patterns, not a flam.
-                    let norm = (ra.reduce(0) { $0 + $1 * $1 } * rb.reduce(0) { $0 + $1 * $1 }).squareRoot()
-                    guard norm > 0, scores[k] / norm > 0.2, scores[k] > 1.25 * mean else { w += window; continue }
-                    var lag = Double(k - reach)
-                    if k > 0, k < scores.count - 1 {
-                        let fall = scores[k] - min(scores[k - 1], scores[k + 1])
-                        if fall > 0 { lag += Double(0.5 * (scores[k + 1] - scores[k - 1]) / fall) }
-                    }
-                    // The other lags the hits meet at nearly as well, for a
-                    // window that reads as a flam: one pair of hits on the
-                    // beat and another off it looks like this.
-                    if abs(lag) > 10 * fps / 1000 {
-                        let rivals = scores.indices.filter { j in
-                            j > 0 && j < scores.count - 1 && scores[j] >= scores[j - 1] && scores[j] > scores[j + 1]
-                                && scores[j] >= 0.7 * scores[k]
-                        }.map { String(format: "%+d ms %.0f%%", $0 - reach, 100 * scores[$0] / scores[k]) }
-                        print(String(format: "      flam window %d of %d→%d: ", w / window, t.from + 1, t.to + 1) + rivals.joined(separator: ", "))
-                    }
-                    out.append(lag / fps * 1000)
-                }
-                w += window
-            }
-            return out
+            return BeatAlign.heardLags(a: mono(t.from), b: mono(t.to), window: 2 * t.barSeconds).map { $0 * 1000 }
         }
 
         print("\n==== TRANSITIONS ====")

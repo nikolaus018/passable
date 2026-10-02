@@ -420,19 +420,19 @@ struct TransitionShape {
 
     init(_ preset: TransitionPreset, bars n: Int, vocalBar: Int?, keysClash: Bool, lowSwap: Int?, mashup: Bool = false,
          drumsLayer: Bool = true, drumsLinger: Bool = true, room: Double = 0, dropMoment: Bool = false,
-         vocalIn: Double? = nil, vocalOut: Double? = nil, carry: Bool = false) {
+         vocalIn: Double? = nil, vocalOut: Double? = nil, carry: Bool = false, under: Double = 0) {
         self.init(lanes: TransitionBuilder.build(preset, lanes: Lane.allLanes(), start: 0, barSeconds: 1, bars: n,
                                                  vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap,
                                                  drumsLayer: drumsLayer, drumsLinger: drumsLinger, vocalIn: vocalIn,
                                                  vocalOut: vocalOut, mashup: mashup,
-                                                 dropMoment: dropMoment, room: room, carry: carry),
+                                                 dropMoment: dropMoment, room: room, carry: carry, under: under),
                   preset: preset, bars: n)
     }
 
     private struct Key: Hashable {
         let preset: TransitionPreset, bars: Int, vocalBar: Int?, keysClash: Bool, lowSwap: Int?, mashup: Bool
         let room: Double, dropMoment: Bool, vocalIn: Double?, drumsLayer: Bool, drumsLinger: Bool, vocalOut: Double?
-        let carry: Bool
+        let carry: Bool, under: Double
     }
     private final class Cache: @unchecked Sendable {
         let lock = NSLock()
@@ -446,16 +446,16 @@ struct TransitionShape {
     static func cached(_ preset: TransitionPreset, bars n: Int, vocalBar: Int?, keysClash: Bool, lowSwap: Int?,
                        mashup: Bool, room: Double, dropMoment: Bool, vocalIn: Double?,
                        drumsLayer: Bool = true, drumsLinger: Bool = true, vocalOut: Double? = nil,
-                       carry: Bool = false) -> TransitionShape {
+                       carry: Bool = false, under: Double = 0) -> TransitionShape {
         let key = Key(preset: preset, bars: n, vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap, mashup: mashup,
                       room: room, dropMoment: dropMoment, vocalIn: vocalIn, drumsLayer: drumsLayer,
-                      drumsLinger: drumsLinger, vocalOut: vocalOut, carry: carry)
+                      drumsLinger: drumsLinger, vocalOut: vocalOut, carry: carry, under: under)
         cache.lock.lock()
         if let shape = cache.shapes[key] { cache.lock.unlock(); return shape }
         cache.lock.unlock()
         let shape = TransitionShape(preset, bars: n, vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap,
                                     mashup: mashup, drumsLayer: drumsLayer, drumsLinger: drumsLinger, room: room,
-                                    dropMoment: dropMoment, vocalIn: vocalIn, vocalOut: vocalOut, carry: carry)
+                                    dropMoment: dropMoment, vocalIn: vocalIn, vocalOut: vocalOut, carry: carry, under: under)
         cache.lock.lock()
         cache.shapes[key] = shape
         cache.lock.unlock()
@@ -722,6 +722,24 @@ enum AutoPlacement {
         var out = [Float](repeating: 0, count: 12)
         for b in r { for p in 0..<12 { out[p] += chroma[b][p] } }
         return out.contains(where: { $0 > 0 }) ? out : nil
+    }
+
+    /// dB B's melody has to come down by to play under A's voice over
+    /// bars `from..<to` of the blend (see `TransitionBuilder.under`): to
+    /// 6 dB below the voice where A sings there, by 10 at most; whole dB.
+    /// A lead vocal sits about that far over what accompanies it in its
+    /// own song. 0 where A has no voice to speak of there.
+    static func under(a: [StemKind: [TransitionShape.Gains]], e: Int, b: [StemKind: [TransitionShape.Gains]], c: Int,
+                      from: Int, to: Int) -> Double {
+        guard to > from, let voice = a[.vocals], let melody = b[.other] else { return 0 }
+        func level(_ levels: [TransitionShape.Gains], _ first: Int) -> Float {
+            let bars = ((first + from)..<(first + to)).clamped(to: 0..<levels.count)
+            guard !bars.isEmpty else { return -120 }
+            return 10 * log10(max(bars.reduce(Float(0)) { $0 + levels[$1].low + levels[$1].high } / Float(bars.count), 1e-12))
+        }
+        let sung = level(voice, e), played = level(melody, c)
+        guard sung > -40 else { return 0 }
+        return Double(min(10, max(0, (played - (sung - 6)).rounded())))
     }
 
     /// Bars B's voice may wait for a clean line past the bar it's due on
@@ -1269,12 +1287,17 @@ enum AutoPlacement {
                         func judge(carry: Bool, bail: Bool) -> (penalty: Float, fewest: Int) {
                             var worstPenalty: Float = 0, fewest = Int.max
                             for plan in plans {
+                                // B's melody under A's voice for as long as it sings.
+                                let under = preset == .stemSwap && !clashHere && !plan.mashup
+                                    ? AutoPlacement.under(a: powerA, e: e, b: powerB, c: c, from: step,
+                                                          to: Int((plan.out ?? Double(sw ?? n)).rounded(.up)))
+                                    : 0
                                 func shape(room: Double) -> TransitionShape {
                                     TransitionShape.cached(preset, bars: n, vocalBar: plan.vocalBar, keysClash: clashHere,
                                                            lowSwap: sw, mashup: plan.mashup, room: room, dropMoment: drop,
                                                            vocalIn: echo ? nil : plan.vin, drumsLayer: plan.drumsLayer,
                                                            drumsLinger: !drumsLock || drumsLinger, vocalOut: plan.out,
-                                                           carry: carry && !plan.mashup)
+                                                           carry: carry && !plan.mashup, under: under)
                                 }
                                 let flat = shape(room: 0)
                                 let room = preset == .stemSwap
