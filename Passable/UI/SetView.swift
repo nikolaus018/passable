@@ -287,6 +287,16 @@ struct SetTransportBar: View {
                 .font(.system(.body, design: .monospaced))
                 .fixedSize()
 
+            // Playing the room: the next song now, or more of this one.
+            Button("Mix Now") { set.mixNow() }
+                .keyboardShortcut(.return, modifiers: [.command])
+                .disabled(!set.canPlayTheRoom)
+                .help("Bring the next song in on the next phrase instead of where it was planned (⌘↩)")
+            Button("Hold") { set.hold() }
+                .keyboardShortcut(.return, modifiers: [.command, .shift])
+                .disabled(!set.canPlayTheRoom)
+                .help("Keep this song playing: its way out starts at least sixteen bars later (⇧⌘↩)")
+
             if let hold = set.vocalHold {
                 Text(hold.solo ? "VOCALS ONLY" : "VOCALS OUT")
                     .font(.caption.bold()).foregroundStyle(.white)
@@ -299,7 +309,11 @@ struct SetTransportBar: View {
                    in: 0...max(1, set.length))
                 .disabled(set.mix == nil)
 
-            if let i = set.currentIndex, set.items.indices.contains(i) {
+            if let note = set.liveNote {
+                Text(note)
+                    .font(.caption).foregroundStyle(Theme.deckB).lineLimit(1)
+                    .frame(maxWidth: 260, alignment: .leading)
+            } else if let i = set.currentIndex, set.items.indices.contains(i) {
                 Text(set.items[i].title)
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     .frame(maxWidth: 220, alignment: .leading)

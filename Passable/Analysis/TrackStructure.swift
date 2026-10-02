@@ -14,6 +14,10 @@ struct TrackStructure: Codable, Equatable {
     /// measured before they existed still decode; the loader re-measures.
     var stemLevel: [String: [Float]]?
     var stemLowLevel: [String: [Float]]?
+    /// How "below 150 Hz" was measured (see `measure`); structures
+    /// measured another way are measured again on load.
+    var lowSplit: Int?
+    static let lowSplit = 2
     /// The vocal's level per beat, in dB: where its lines start and stop,
     /// which bars are too coarse for. Optional like the above.
     var vocalBeatLevel: [Float]?
@@ -39,6 +43,19 @@ struct TrackStructure: Codable, Equatable {
     /// The same of the melody alone: what sits on the other song's melody
     /// and bass line while its own bass line is still out.
     var melodyChroma: [[Float]]?
+    /// The vocal's lines as sung (see `Lyrics`): empty if no words were
+    /// heard in it; nil if it hasn't been listened to. `lyricsTried` is
+    /// the languages that were on the Mac when it was (see
+    /// `Lyrics.available`), so a song is heard again once its language
+    /// arrives.
+    var vocalLines: [VocalLine]?
+    var lyricsTried: String?
+    /// Those lines on the song's grid: the sixteenth (from its first
+    /// downbeat) each starts on and has ended by, in the order they're
+    /// sung; and per bar how much of what's sung there comes back
+    /// elsewhere in the song (0…1: a chorus; -1: nothing sung).
+    var lineStarts: [Int]?, lineEnds: [Int]?
+    var lyricRepeat: [Float]?
 
     /// How loud the track is when it's going: the level of its loud bars
     /// (80th percentile), which is what a DJ matches with the trim knob.
@@ -95,8 +112,15 @@ struct TrackStructure: Codable, Equatable {
         var stemLevel: [String: [Float]] = [:], stemLowLevel: [String: [Float]] = [:]
         for (kind, stem) in stems {
             var bars: [Float] = [], levels: [Float] = [], lows: [Float] = []
-            var lowPass = Biquad()
-            lowPass.set(.lowPass(frequency: 150, q: 0.707), sampleRate: sr)
+            // "Below 150 Hz" is what a low kill takes away: the stem less
+            // what the mixer's isolator leaves of it (see
+            // `MixRenderer.updateFilters`), so a killed stem is judged by
+            // exactly what's heard of it. (A gentle low-pass, as this
+            // was, counted much of a kick's body above 150 Hz as "the
+            // rest": drums with their lows killed were planned louder
+            // than they play.)
+            var isolator = [Biquad(), Biquad(), Biquad()]
+            for (i, q) in [0.5176, 0.7071, 1.9319].enumerated() { isolator[i].set(.highPass(frequency: 150, q: q), sampleRate: sr) }
             var bar = 0
             while true {
                 let start = Int(grid.downbeat(bar) * sr), end = Int(grid.downbeat(bar + 1) * sr)
@@ -110,12 +134,14 @@ struct TrackStructure: Codable, Equatable {
                 vDSP_measqv(stem.left.pointer + start, 1, &ml, vDSP_Length(n))
                 vDSP_measqv(stem.right.pointer + start, 1, &mr, vDSP_Length(n))
                 levels.append(10 * log10(max((ml + mr) / 2, 1e-9)))
-                var lowL = Array(UnsafeBufferPointer(start: stem.left.pointer + start, count: n))
-                var lowR = Array(UnsafeBufferPointer(start: stem.right.pointer + start, count: n))
-                lowPass.process(&lowL, &lowR, count: n)
-                vDSP_measqv(lowL, 1, &ml, vDSP_Length(n))
-                vDSP_measqv(lowR, 1, &mr, vDSP_Length(n))
-                lows.append(10 * log10(max((ml + mr) / 2, 1e-9)))
+                let total = (ml + mr) / 2
+                guard start >= 0 else { lows.append(-90); bar += 1; continue }
+                var restL = Array(UnsafeBufferPointer(start: stem.left.pointer + start, count: n))
+                var restR = Array(UnsafeBufferPointer(start: stem.right.pointer + start, count: n))
+                for i in isolator.indices { isolator[i].process(&restL, &restR, count: n) }
+                vDSP_measqv(restL, 1, &ml, vDSP_Length(n))
+                vDSP_measqv(restR, 1, &mr, vDSP_Length(n))
+                lows.append(10 * log10(max(total - (ml + mr) / 2, 1e-9)))
                 bar += 1
             }
             stemLevel[kind.rawValue] = levels
@@ -151,11 +177,11 @@ struct TrackStructure: Codable, Equatable {
         func vocalLevels(parts: Int) -> [Float] {
             guard let vocals = stems[.vocals] else { return [] }
             var out: [Float] = []
-            let step = grid.beatSeconds / Double(parts)
+            let perBar = Double(4 * parts)
             var i = 0
             while true {
-                let start = Int((grid.firstDownbeat + Double(i) * step) * sr)
-                let end = Int((grid.firstDownbeat + Double(i + 1) * step) * sr)
+                let start = Int(grid.time(bars: Double(i) / perBar) * sr)
+                let end = Int(grid.time(bars: Double(i + 1) / perBar) * sr)
                 guard end <= vocals.count else { break }
                 var l: Float = 0, r: Float = 0
                 vDSP_measqv(vocals.left.pointer + start, 1, &l, vDSP_Length(end - start))
@@ -187,7 +213,7 @@ struct TrackStructure: Codable, Equatable {
         }
         let chroma = stems[.other].map { chromaPerBar([$0] + [stems[.vocals]].compactMap { $0 }, normalised: true) } ?? []
         var structure = TrackStructure(activity: activity, loudness: loudness, stemLevel: stemLevel,
-                                       stemLowLevel: stemLowLevel, vocalBeatLevel: vocalBeats)
+                                       stemLowLevel: stemLowLevel, lowSplit: Self.lowSplit, vocalBeatLevel: vocalBeats)
         structure.hookStart = hookStarts(chroma: chroma, structure: structure)
         structure.barChroma = chroma
         // What the builder judges a blend's notes on: melody and bass line.
@@ -358,6 +384,114 @@ extension TrackStructure {
 
 }
 
+extension TrackStructure {
+    /// Puts the song's lines on its grid (see `lineStarts`). Again
+    /// whenever the grid changes.
+    mutating func setLines(_ lines: [VocalLine]?, tried: String?, grid: BeatGrid) {
+        vocalLines = lines
+        lyricsTried = tried
+        // (The words aren't used for the hooks: tried, lines that come
+        // back counting as much as harmony that does, placement chased
+        // hooks into worse handovers.)
+        if let chroma = barChroma { hookStart = Self.hookStarts(chroma: chroma, structure: self) }
+        guard let lines, !lines.isEmpty else {
+            (lineStarts, lineEnds, lyricRepeat) = (lines == nil ? nil : [], lines == nil ? nil : [], nil)
+            return
+        }
+        // (Each stretch between two pauses of a line counts as one: see
+        // `VocalLine.breaks`.)
+        func slot(_ t: Double) -> Int { Int((grid.bars(at: t) * Double(VocalPhrasing.slots)).rounded()) }
+        var starts: [Int] = [], ends: [Int] = []
+        for line in lines {
+            let marks = [line.start] + line.breaks.filter { $0 > line.start && $0 < line.end } + [line.end]
+            for (from, to) in zip(marks, marks.dropFirst()) where slot(to) > slot(from) {
+                starts.append(slot(from))
+                ends.append(slot(to))
+            }
+        }
+        (lineStarts, lineEnds) = (starts, ends)
+        lyricRepeat = (0..<loudness.count).map { g in
+            let from = grid.downbeat(g), to = grid.downbeat(g + 1), bar = to - from
+            var sung = 0.0, back = 0.0
+            for line in lines {
+                let overlap = min(to, line.end) - max(from, line.start)
+                guard overlap > 0 else { continue }
+                sung += overlap
+                back += overlap * min(1, Double(line.repeats) / 2)
+            }
+            return sung > 0.1 * bar ? Float(back / sung) : -1
+        }
+    }
+
+    /// Whether a line of the vocal starts on sixteenth `slot` of the song
+    /// or one has just ended there: a place between two lines, where a
+    /// voice can be cut whether or not it falls silent. False for a song
+    /// whose words weren't heard.
+    func lineTurns(at slot: Int) -> Bool {
+        guard let starts = lineStarts, let ends = lineEnds else { return false }
+        return starts.contains(slot) || ends.contains(slot)
+    }
+
+    /// Whether a line is being sung through sixteenth `slot`: it started
+    /// before it and goes on after (nil: the song's words weren't heard).
+    func midLine(at slot: Int) -> Bool? {
+        guard let starts = lineStarts, let ends = lineEnds, !starts.isEmpty else { return nil }
+        return starts.indices.contains { starts[$0] < slot - 1 && ends[$0] > slot + 1 }
+    }
+
+    /// The song as it plays when its beat is looped: up to bar `entry` as
+    /// it is; from there its drums, bass line and melody repeat the
+    /// `bars` bars before it, for as long as anyone listens (through bar
+    /// `through` at least), and its voice is gone. What a blend over the
+    /// loop is judged on.
+    /// - Parameter back: how many bars before `entry` the looped bars start
+    ///   (`bars`: its last ones; more: the phrase before those, so a fill
+    ///   that ends the part plays once, into the loop, and isn't repeated).
+    func looped(from entry: Int, bars: Int, back: Int, through: Int) -> TrackStructure {
+        guard bars > 0, back >= bars, entry >= back else { return self }
+        let count = max(through + 1, loudness.count)
+        func source(_ g: Int) -> Int { g < entry ? g : entry - back + (g - entry) % bars }
+        /// `x` with `per` values to the bar, looped; `gone`: what a part
+        /// that isn't looped reads from `entry` on.
+        func loop<T>(_ x: [T], per: Int = 1, gone: T? = nil) -> [T] {
+            guard !x.isEmpty else { return x }
+            return (0..<(count * per)).map { i -> T in
+                let g = i / per
+                if g >= entry, let gone { return gone }
+                return x[min(x.count - 1, source(g) * per + i % per)]
+            }
+        }
+        var s = self
+        let voice = StemKind.vocals.rawValue
+        s.activity = activity.reduce(into: [:]) { $0[$1.key] = loop($1.value, gone: $1.key == voice ? 0 : nil) }
+        s.stemLevel = stemLevel.map { $0.reduce(into: [:]) { $0[$1.key] = loop($1.value, gone: $1.key == voice ? -90 : nil) } }
+        s.stemLowLevel = stemLowLevel.map { $0.reduce(into: [:]) { $0[$1.key] = loop($1.value, gone: $1.key == voice ? -90 : nil) } }
+        s.vocalBeatLevel = vocalBeatLevel.map { loop($0, per: 4, gone: -90) }
+        s.vocalSixteenthLevel = vocalSixteenthLevel.map { loop($0, per: 16, gone: -90) }
+        let none = [Float](repeating: 0, count: 12)
+        s.vocalChroma = vocalChroma.map { loop($0, gone: none) }
+        s.hookStart = hookStart.map { loop($0, gone: 0) }
+        s.barChroma = barChroma.map { loop($0) }
+        s.harmonyChroma = harmonyChroma.map { loop($0) }
+        s.melodyChroma = melodyChroma.map { loop($0) }
+        // The level of what loops: the song there less its voice.
+        s.loudness = loop(loudness)
+        if let levels = s.stemLevel {
+            for g in entry..<s.loudness.count {
+                let power = levels.values.reduce(Float(0)) { $0 + (g < $1.count ? pow(10, $1[g] / 10) : 0) }
+                s.loudness[g] = 10 * log10(max(power, 1e-9))
+            }
+        }
+        return s
+    }
+
+    /// Whether the `bars` bars before bar `entry` make a bed to loop: the
+    /// song at full power all through them, beat and bass line going.
+    func loops(before entry: Int, bars: Int) -> Bool {
+        entry >= bars && ((entry - bars)..<entry).allSatisfy { !sags($0) }
+    }
+}
+
 /// Where a vocal is silent, beat by beat: where
 /// its lines can be let in or taken out cleanly.
 struct VocalPauses {
@@ -493,13 +627,13 @@ struct TransitionShape {
             low *= f <= 30 ? 1 : f >= 150 ? 0 : (30 / f) * (30 / f)
             high *= min(1, 300 / f)
         }
-        // As the mixer plays it: a kill is an isolator (the kick and bass
-        // line 20–50 dB down, half a dB off the highs), a
-        // lesser cut or a boost a shelf under 150 Hz.
+        // As the mixer plays it: a kill is an isolator, which leaves
+        // exactly what the song's levels call "the rest" (see
+        // `TrackStructure.measure`); a lesser cut or a boost is a shelf
+        // under 150 Hz.
         let lowDB = LaneParameter.eqDecibels(lane[.low].value(at: t, default: 0.5))
         if lowDB <= MixRenderer.killDB {
-            low *= pow(10, -25 / 10)
-            high *= pow(10, -0.5 / 10)
+            low *= 1e-4
         } else {
             low *= pow(10, lowDB / 10)
         }
@@ -708,7 +842,50 @@ enum AutoPlacement {
             let turns = g < boundary.count && boundary[g] >= 0.5 && corners.contains(g)
             edge[g] = g % 4 != p4 ? 0 : turns ? 1 : g % 8 == p8 ? 0.7 : 0.2
         }
-        return (edge, starts)
+        return (lyricEdges(s, edge: edge, starts: starts), starts)
+    }
+
+    /// `edge` with what the words say (see `Lyrics`), where they were
+    /// heard. What's playing can change in the middle of a sentence, and a
+    /// part of a song can end with nothing changing under the voice at
+    /// all; the lines themselves know better:
+    /// - a line sung through a phrase's downbeat (more than a pickup
+    ///   before it, more than a word after) makes it no edge at all: a
+    ///   voice handed over there is cut mid-sentence;
+    /// - the voice starting after bars of silence, or stopping for bars,
+    ///   is the edge of a part;
+    /// - so is the song going from lines it comes back to (a chorus) to
+    ///   lines it sings once (a verse), or the other way.
+    private static func lyricEdges(_ s: TrackStructure, edge: [Float], starts: [Bool]) -> [Float] {
+        guard let lineStarts = s.lineStarts, let lineEnds = s.lineEnds, !lineStarts.isEmpty,
+              lineStarts.count == lineEnds.count else { return edge }
+        let slots = VocalPhrasing.slots
+        var edge = edge
+        func repeats(_ bars: Range<Int>) -> Float? {
+            let sung = bars.clamped(to: 0..<(s.lyricRepeat?.count ?? 0)).compactMap { g in
+                s.lyricRepeat.flatMap { $0[g] >= 0 ? $0[g] : nil }
+            }
+            return sung.count >= 2 ? sung.reduce(0, +) / Float(sung.count) : nil
+        }
+        for g in edge.indices where starts[g] {
+            let one = slots * g
+            let lines = lineStarts.indices
+            // More than two beats of it before the one (a pickup is
+            // shorter), more than a beat after.
+            if lines.contains(where: { lineStarts[$0] < one - 8 && lineEnds[$0] > one + 4 }) {
+                edge[g] = min(edge[g], 0.1)
+                continue
+            }
+            func sung(_ range: Range<Int>) -> Bool { lines.contains { lineStarts[$0] < range.upperBound && lineEnds[$0] > range.lowerBound } }
+            let begins = !sung((one - 2 * slots)..<(one - 8)) && lines.contains { lineStarts[$0] >= one - 8 && lineStarts[$0] < one + slots }
+            let stops = !sung((one + 4)..<(one + 2 * slots)) && lines.contains { lineEnds[$0] > one - slots && lineEnds[$0] <= one + 4 }
+            if begins || stops {
+                edge[g] = max(edge[g], 0.9)
+            } else if let before = repeats((g - 4)..<g), let after = repeats(g..<(g + 4)), abs(after - before) >= 0.5 {
+                edge[g] = 1
+            }
+        }
+        return edge
     }
 
     /// The notes a song's voice sings over `bars`, per pitch class; nil if
@@ -742,6 +919,17 @@ enum AutoPlacement {
         return Double(min(10, max(0, (played - (sung - 6)).rounded())))
     }
 
+    /// What looping A's beat costs a spot. A loop makes a blend where the
+    /// song offers none (its voice done with a part, its beat held as a
+    /// bed for the next song, as a DJ loops the last bars of a chorus), but
+    /// it's the DJ's doing, not the record's: where A's own bars carry the
+    /// blend as well, they play.
+    static let loopCost: Float = 0.6
+
+    /// How far before the loop starts A's voice may leave, and how far
+    /// into it (bars): on the last word of the part that ends there.
+    static let loopExit = (before: 0.75, after: 0.25)
+
     /// Bars B's voice may wait for a clean line past the bar it's due on
     /// (where A's leaves): longer, and nobody sings for bars on end. It
     /// then comes in on the bar, eased in if it's mid-line.
@@ -767,7 +955,8 @@ enum AutoPlacement {
             return i >= 0 && i < beats.count ? beats[i] : -90
         }
         let found = VocalPhrasing.cut(opening: opening, from: Int((earliest * slots).rounded(.up)) - t,
-                                      through: Int((latest * slots).rounded(.down)) - t, reference: reference) {
+                                      through: Int((latest * slots).rounded(.down)) - t, reference: reference,
+                                      turns: { s.lineTurns(at: base + t + $0) }) {
             level(base + t + $0)
         }
         return found.map { (Double(t + $0.slot) / slots, $0.kind) } ?? (target, nil)
@@ -827,6 +1016,10 @@ enum AutoPlacement {
         /// A's melody makes way before B's comes in, so A's beat (and
         /// voice) carry B's parts: see `TransitionBuilder.carry`.
         var carry = false
+        /// A's beat loops under the blend: bars to the loop (0: A plays
+        /// on as its song goes), and how many bars before the entry they
+        /// start (see `TransitionBuilder.loop`).
+        var loopBars = 0, loopBack = 0
     }
 
     /// Bars (from B's entry) in which the two melodies are heard together,
@@ -872,15 +1065,18 @@ enum AutoPlacement {
     /// stretches of `melodyOverlap`, each judged on what plays in it (a
     /// bass line that's still out doesn't vouch for its melody). nil if
     /// there are no notes to compare.
+    /// - Parameter measure: `Harmony.clash` (how far the two are from one
+    ///   scale) or `Harmony.roughness` (how many of their notes grate).
     static func overlapClash(a: TrackStructure, aShift: Int = 0, entry e: Int, b: TrackStructure, bShift: Int = 0,
-                             cue c: Int, preset: TransitionPreset, bars n: Int, lowSwap: Int?) -> Float? {
+                             cue c: Int, preset: TransitionPreset, bars n: Int, lowSwap: Int?,
+                             measure: ([Float], [Float]) -> Float = Harmony.clash) -> Float? {
         let overlap = melodyOverlap(preset, bars: n, lowSwap: lowSwap)
         func clash(_ bars: Range<Int>, lowEndIsAs: Bool) -> Float? {
             guard !bars.isEmpty,
                   let na = notes(a, bars: (e + bars.lowerBound)..<(e + bars.upperBound), shift: aShift, melodyOnly: !lowEndIsAs),
                   let nb = notes(b, bars: (c + bars.lowerBound)..<(c + bars.upperBound), shift: bShift, melodyOnly: lowEndIsAs)
             else { return nil }
-            return Harmony.clash(na, nb)
+            return measure(na, nb)
         }
         return [clash(overlap.before, lowEndIsAs: true), clash(overlap.after, lowEndIsAs: false)].compactMap { $0 }.max()
     }
@@ -919,34 +1115,53 @@ enum AutoPlacement {
                       keysClash: Bool = false, clashAbove: Float? = nil, mashup: Bool = false, soloFrom: Int? = nil,
                       skip: Range<Int>? = nil, aShift: Int = 0, bShift: Int = 0, drumsLock: Bool = false,
                       drumsLinger: Bool = true, at spot: (entry: Int, cue: Int)? = nil, glide: Int = 0,
-                      runUp: Int = 0) -> Result {
+                      runUp: Int = 0, loop: Int = 0) -> Result {
         let barsA = a.grid.barCount(duration: a.duration)
         let barsB = b.grid.barCount(duration: b.duration)
-        guard let sa = a.structure, let sb = b.structure, !sa.loudness.isEmpty, !sb.loudness.isEmpty else {
+        guard let whole = a.structure, let sb = b.structure, !whole.loudness.isEmpty, !sb.loudness.isEmpty else {
             return Result(entryBar: max(0, barsA - n - 8), cueBar: 0, vocalHandoff: n, reason: "")
         }
         let echo = preset == .echoOut
+        // Looped, A's beat (drums, bass line, melody) repeats its last full
+        // bars from the entry on and its voice is gone: what plays under B
+        // is that bed, not what the song goes on to.
+        let loop = preset == .stemSwap ? loop : 0
+        /// Bars before the entry the loop's bars start: the phrase before
+        /// the last where that's as full, so the fill that ends a part
+        /// plays once, into the loop, and isn't repeated every four bars.
+        func loopBack(_ e: Int) -> Int { whole.loops(before: e, bars: 2 * loop) ? 2 * loop : loop }
+        /// A as it plays through a blend that starts on its bar `e`.
+        func playing(_ e: Int) -> TrackStructure {
+            loop > 0 ? whole.looped(from: e, bars: loop, back: loopBack(e), through: e + n + 12) : whole
+        }
         // Bar (from B's entry) at which A's vocal is taken out and B's comes in.
         let swap = echo ? 0 : n / 2
         let vocalIn = echo ? 0 : n
-        let mash = mashup && preset == .stemSwap && n >= 16 ? Int(TransitionBuilder.mashupWindow(bars: n).earliest) : nil
+        // (Over a loop B's voice comes in early wherever it sits, see below:
+        // there is no voice of A's to wait for.)
+        let mash = mashup && preset == .stemSwap && n >= 16 && loop == 0
+            ? Int(TransitionBuilder.mashupWindow(bars: n).earliest) : nil
         let handoffs = (swap == vocalIn ? [vocalIn] : [vocalIn, swap]) + (mash.map { [$0] } ?? [])
         let span = echo ? 0 : n
-        let boundA = sa.boundaryStrength(), boundB = sb.boundaryStrength()
+        let boundA = whole.boundaryStrength(), boundB = sb.boundaryStrength()
         // Each song's phrases, counted from its own section changes: the
         // transition starts on one of A's and B is cued on one of its own,
         // and the voices hand over where parts end and begin.
-        let (partsA, startsA) = AutoPlacement.phrases(sa, boundary: boundA)
+        let (partsA, startsA) = AutoPlacement.phrases(whole, boundary: boundA)
         let (partsB, startsB) = AutoPlacement.phrases(sb, boundary: boundB)
         func onPhrase(_ starts: [Bool], _ g: Int) -> Bool { g >= 0 && g < starts.count ? starts[g] : g % 4 == 0 }
-        let refA = sa.referenceLoudness + trimA, refB = sb.referenceLoudness + trimB
+        let refA = whole.referenceLoudness + trimA, refB = sb.referenceLoudness + trimB
         func bound(_ x: [Float], _ i: Int) -> Float { i >= 0 && i < x.count ? x[i] : 0 }
 
         // A must still be playing music when the transition ends (a video's
         // spoken outro or fade doesn't count).
         // Nor fading out: the whole blend sits in A's full-level part.
-        let musicEndA = (sa.loudness.lastIndex { $0 + trimA > refA - 5 } ?? barsA - 1) + 1
-        let latest = max(0, min(barsA, musicEndA) - max(1, span))
+        let musicEndA = (whole.loudness.lastIndex { $0 + trimA > refA - 5 } ?? barsA - 1) + 1
+        // (A loop needs none of A's music past the entry.)
+        let latest = max(0, min(barsA, musicEndA) - (loop > 0 ? 0 : max(1, span)))
+        // The entry is someone's say (a spot chosen in the editor, the
+        // next song brought in now): not for placement to pick.
+        let given = spot != nil || entryRange.map { $0.lowerBound == $0.upperBound } ?? false
         // A Wash Out's bridge starts its bars before the entry: A's own
         // time on its own comes before that, not under it.
         let bridge = echo ? min(n, 8) : 0
@@ -955,12 +1170,26 @@ enum AutoPlacement {
         // The jump on offer, unless it turns out to leave A no phrase to go
         // out on (see below).
         var skip = skip
+        // A bar that isn't four beats long (see `BeatGrid.wanders`) has no
+        // place in a blend or just before it: the two songs' bars are
+        // counted off against each other from the entry and the cue.
+        func plainA(_ e: Int) -> Bool { a.grid.isRegular((e - max(8, bridge))..<(e + span + 1)) }
+        func plainB(_ c: Int) -> Bool { b.grid.isRegular(c..<(c + span + 9)) }
         func onGrid(_ from: Int, _ through: Int) -> [Int] {
             guard from <= through else { return [] }
             // (Nor do the bars a jump leaves out count as A's time on its
             // own: past it, A has still played what it's owed.)
             let owed = entryRange?.lowerBound ?? 0
-            return (from...through).filter { onPhrase(startsA, $0) }
+            return (from...through).filter { onPhrase(startsA, $0) && plainA($0) }
+                // A bed to loop: full bars, played at the blend's tempo (A
+                // has to get there first, on its own time). And where a
+                // part of A ends (that's what a loop is set on: the last
+                // bars of a chorus, not the middle of a verse), unless the
+                // entry is given or A's music ends under the blend.
+                .filter { e in
+                    loop == 0 || (whole.loops(before: e, bars: loop) && e - loopBack(e) - runUp >= (soloFrom ?? 0)
+                                  && (given || e + n > musicEndA || bound(partsA, e) >= 0.7))
+                }
                 .filter { e in
                     skip.map { e + span <= $0.lowerBound || (e - bridge - 8 >= $0.upperBound && e - $0.count >= owed) } ?? true
                 }
@@ -969,7 +1198,11 @@ enum AutoPlacement {
         // The blend doesn't fit into what's left of A's music.
         var overruns = false
         if let spot {
-            entries = [spot.entry]
+            entries = loop == 0 || whole.loops(before: spot.entry, bars: loop) ? [spot.entry] : []
+        } else if loop > 0 {
+            // Only where there's a bed to loop, after A's time on its own.
+            let from = (entryRange?.lowerBound ?? Int(Double(barsA) * 0.45))
+            entries = onGrid(from, min(entryRange?.upperBound ?? latest, latest))
         } else if let entryRange {
             // After A's time on its own; if A hasn't the bars left for
             // that and this blend, on the last phrase the blend still fits
@@ -1010,7 +1243,7 @@ enum AutoPlacement {
         let room = barsB - n - 8
         let lastCue = max(0, min(Int(Double(barsB) * 0.45), room,
                                  min(barsB, musicEndB) - span - glide - SetBuilder.minimumSoloBars(b.grid) - 16))
-        var cues = (0...lastCue).filter { onPhrase(startsB, $0) }
+        var cues = (0...lastCue).filter { onPhrase(startsB, $0) && plainB($0) }
         // Too short for a cue on its phrase grid within that: its first
         // phrase if the song has the bars for it, else its first bar.
         if cues.isEmpty { cues = [(0...max(0, min(3, room))).first { onPhrase(startsB, $0) } ?? 0] }
@@ -1025,7 +1258,11 @@ enum AutoPlacement {
         // doesn't leave the floor without a kick and bass for bars just
         // to swap them on a later downbeat.
         let step = max(1, n / 4)
-        func lowSwap(entry e: Int, cue c: Int) -> Int? {
+        // Nowhere to loop: not a plan.
+        guard loop == 0 || !entries.isEmpty else {
+            return Result(entryBar: max(0, barsA - n - 8), cueBar: 0, vocalHandoff: n, reason: "", score: -.infinity)
+        }
+        func lowSwap(_ sa: TrackStructure, entry e: Int, cue c: Int) -> Int? {
             guard !echo else { return nil }
             // A Drop Swap flips everything half-way, low end included; a
             // Long Blend trades the lows half-way.
@@ -1051,7 +1288,7 @@ enum AutoPlacement {
         /// pickup or a break before the section proper: a roll and a
         /// silence into two quiet bars is an anticlimax). Decided with the
         /// spot, since A is gone at such a switch rather than lingering.
-        func dropMoment(e: Int, c: Int, switchAt: Int) -> Bool {
+        func dropMoment(_ sa: TrackStructure, e: Int, c: Int, switchAt: Int) -> Bool {
             // A Stem Swap builds into one only from a blend long enough to
             // be a build (as the set builder plays it).
             guard !echo, switchAt >= 4, preset == .dropSwap || n >= SetBuilder.dropMomentBars,
@@ -1064,40 +1301,48 @@ enum AutoPlacement {
             return preset == .dropSwap || sb.hook(from: c + switchAt) >= 0.4
                 || (bound(boundB, c + switchAt) >= 0.5 && rise >= 3)
         }
-        let powerA = AutoPlacement.powers(sa, trim: trimA), powerB = AutoPlacement.powers(sb, trim: trimB)
+        let wholePower = AutoPlacement.powers(whole, trim: trimA), powerB = AutoPlacement.powers(sb, trim: trimB)
         /// Whether the melodies clash at this spot, heard in the notes both
         /// songs play where they'd overlap (as the builder will judge it on
         /// the audio), not only guessed from the two keys. Where they do,
         /// B's melody and voice wait for the swap, and the spot is judged
         /// as that: planned as a blend, it would play as A alone.
-        func notesClash(e: Int, c: Int, sw: Int?) -> Bool {
+        func notesClash(_ sa: TrackStructure, e: Int, c: Int, sw: Int?) -> Bool {
             // A Wash Out never plays the two songs' notes together.
             guard !echo else { return false }
             // Songs analysed before per-bar notes existed: the keys are
             // all there is.
-            guard sa.harmonyChroma ?? sa.barChroma != nil, sb.harmonyChroma ?? sb.barChroma != nil else { return keysClash }
+            guard whole.harmonyChroma ?? whole.barChroma != nil, sb.harmonyChroma ?? sb.barChroma != nil else { return keysClash }
             // No notes where the melodies would overlap: nothing to clash.
             guard let clash = overlapClash(a: sa, aShift: aShift, entry: e, b: sb, bShift: bShift, cue: c,
                                            preset: preset, bars: n, lowSwap: sw) else { return false }
-            return clash > clashAbove ?? (keysClash ? Harmony.keysClashTolerance : Harmony.clashTolerance)
+            if clash > clashAbove ?? (keysClash ? Harmony.keysClashTolerance : Harmony.clashTolerance) { return true }
+            // Or their notes grate, whatever scales they're in.
+            let rough = overlapClash(a: sa, aShift: aShift, entry: e, b: sb, bShift: bShift, cue: c, preset: preset, bars: n,
+                                     lowSwap: sw, measure: Harmony.roughness)
+            return rough.map { $0 > Harmony.roughTolerance } ?? false
         }
 
         var best = (entry: entries.last ?? max(0, barsA - n), cue: cues.first ?? 0, handoff: vocalIn,
-                    lowSwap: lowSwap(entry: entries.last ?? 0, cue: cues.first ?? 0), score: -Float.infinity)
+                    lowSwap: lowSwap(playing(entries.last ?? 0), entry: entries.last ?? 0, cue: cues.first ?? 0),
+                    score: -Float.infinity)
         var bestHeard: Int?, bestVocal: Double?, bestCarry = false
         for e in entries.isEmpty ? [max(0, latest)] : entries {
+            let sa = playing(e)
+            let powerA = loop > 0 ? AutoPlacement.powers(sa, trim: trimA) : wholePower
             // A side: beat under the first half, energy before and during.
             let drumsA = min(1.2, sa.meanActivity(.drums, bars: e..<(e + max(1, span / 2))))
             // Before the transition: for a Wash Out, before its bars.
             let lead = echo ? min(n, 8) : 0
             let preA = sa.meanLoudness(bars: (e - lead - 8)..<(e - lead)) + trimA
             let duringA = sa.meanLoudness(bars: e..<(e + max(1, span / 2))) + trimA
-            var scoreA: Float = (echo ? 0 : drumsA) - (overruns ? 4 : 0)
+            var scoreA: Float = (echo ? 0 : drumsA) - (overruns ? 4 : 0) - (loop > 0 ? AutoPlacement.loopCost : 0)
             // Leaving out of a breakdown starts the transition on a floor
             // that has already cooled.
             scoreA -= 0.2 * max(0, refA - preA - 2)
             scoreA -= 0.10 * max(0, preA - duringA - 3)
-            scoreA += 0.6 * bound(boundA, e) + 0.3 * bound(boundA, e + span)
+            // (Looped, A has no section of its own ending with the blend.)
+            scoreA += 0.6 * bound(boundA, e) + (loop > 0 ? 0 : 0.3 * bound(boundA, e + span))
             if let soloFrom {
                 scoreA -= pacing(sa, from: soloFrom, to: e - lead, barSeconds: a.grid.barSeconds,
                                  skipping: skip.flatMap { e >= $0.upperBound ? $0 : nil })
@@ -1110,7 +1355,7 @@ enum AutoPlacement {
             }
             // A new, louder section of A starting inside the blend would be
             // thrown away a few bars in: its drop cut short.
-            for k in stride(from: 2, to: span, by: 1) where bound(boundA, e + k) > 0.5 {
+            for k in stride(from: 2, to: span, by: 1) where loop == 0 && bound(boundA, e + k) > 0.5 {
                 let jump = sa.meanLoudness(bars: (e + k)..<(e + k + 4)) - sa.meanLoudness(bars: (e + k - 4)..<(e + k))
                 if jump > 3 { scoreA -= 0.5 * bound(boundA, e + k) }
             }
@@ -1132,12 +1377,12 @@ enum AutoPlacement {
                 }
                 score += 0.4 * bound(boundB, c) + 0.8 * bound(boundB, c + span)
                 score -= 0.4 * Float(c) / Float(max(1, barsB))
-                let sw = lowSwap(entry: e, cue: c)
-                let clashHere = notesClash(e: e, c: c, sw: sw)
+                let sw = lowSwap(sa, entry: e, cue: c)
+                let clashHere = notesClash(sa, e: e, c: c, sw: sw)
                 // The payoff: B's hook lands right as B takes over (a Wash
                 // Out drops straight into it), or B has a real drop there.
                 let switchAt = switchBar(sw)
-                let drop = dropMoment(e: e, c: c, switchAt: switchAt)
+                let drop = dropMoment(sa, e: e, c: c, switchAt: switchAt)
                 score += 1.2 * sb.hook(from: c + switchAt)
                 if preset == .stemSwap {
                     let rise = sb.meanLoudness(bars: (c + switchAt)..<(c + switchAt + 8))
@@ -1160,7 +1405,7 @@ enum AutoPlacement {
                 if let sw, sw < span {
                     // The real change happens at the swap: best on a new
                     // section of B and the end of one of A's.
-                    score += 0.4 * bound(boundB, c + sw) + 0.3 * bound(boundA, e + sw)
+                    score += 0.4 * bound(boundB, c + sw) + (loop > 0 ? 0 : 0.3 * bound(boundA, e + sw))
                 }
                 // B's vocal may also come in right on the switch, so a hook
                 // landing there isn't muted until the end of the blend.
@@ -1219,6 +1464,13 @@ enum AutoPlacement {
                         /// to a bar before, or a little after while nobody
                         /// else is singing yet.
                         func exit(for vin: Double) -> (bar: Double, kind: VocalPhrasing.Cut?) {
+                            // Looped, A's voice goes as the loop starts: on
+                            // the last word of the part that ends there.
+                            if loop > 0 {
+                                return AutoPlacement.vocalCut(whole, at: e, opening: false, target: 0,
+                                                              earliest: -AutoPlacement.loopExit.before,
+                                                              latest: AutoPlacement.loopExit.after)
+                            }
                             let limit = Double(min(n, sw ?? n))
                             let untilB = AutoPlacement.vocalSounds(sb, cue: c, from: vin, limit: max(vin + 4, Double(n)))
                             let target = AutoPlacement.phraseEnd(before: min(untilB, limit))
@@ -1258,11 +1510,23 @@ enum AutoPlacement {
                         /// and bass line: only where it sits on them (as
                         /// the builder checks on the audio). Otherwise it
                         /// waits for the swap.
-                        func sitsOnA(until swap: Int) -> Bool {
-                            guard swap > n / 2, let chords = AutoPlacement.notes(sa, bars: (e + n / 2)..<(e + swap)),
-                                  let voice = AutoPlacement.vocalNotes(sb, bars: (c + n / 2)..<(c + swap)) else { return true }
+                        func sitsOnA(from first: Int, until swap: Int) -> Bool {
+                            guard swap > first, let chords = AutoPlacement.notes(sa, bars: (e + first)..<(e + swap)),
+                                  let voice = AutoPlacement.vocalNotes(sb, bars: (c + first)..<(c + swap)) else { return true }
                             return Harmony.clash(chords, voice) <= Harmony.fitTolerance
                         }
+                        // Over A's beat looped, with A's voice gone, B's
+                        // may come in with its melody a quarter in: the
+                        // loop is a bed for the new song, not a part of
+                        // the old one to sing against. (Where a quarter in
+                        // is a phrase of B's: in a blend of sixteen bars.
+                        // From the first bar was tried: it left fewer bars
+                        // with nobody singing, and thinner blends with
+                        // more voices let in mid-line.)
+                        let floor = clashHere ? swap
+                            : early ?? (echo ? n / 2
+                                        : loop > 0 && n >= 16 && sitsOnA(from: n / 4, until: swap) ? n / 4
+                                        : sitsOnA(from: n / 2, until: swap) ? n / 2 : swap)
                         func plan(from first: Int, drumsLayer: Bool) -> Plan {
                             let vin = entry(from: first)
                             let out = echo ? AutoPlacement.vocalCut(sa, at: e, opening: false, target: -1, earliest: -3, latest: 0)
@@ -1270,8 +1534,7 @@ enum AutoPlacement {
                             return Plan(vocalBar: v, mashup: false, vin: vin.bar, drumsLayer: drumsLayer,
                                         out: echo ? nil : out.bar, inCut: vin.kind, outCut: out.kind)
                         }
-                        plans.append(plan(from: clashHere || (early == nil && !echo && !sitsOnA(until: swap)) ? swap : early ?? n / 2,
-                                          drumsLayer: true))
+                        plans.append(plan(from: floor, drumsLayer: true))
                         if preset == .stemSwap, !drumsLock {
                             // First: usually the worst, so the rest can be
                             // skipped once the spot can't win.
@@ -1297,7 +1560,7 @@ enum AutoPlacement {
                                                            lowSwap: sw, mashup: plan.mashup, room: room, dropMoment: drop,
                                                            vocalIn: echo ? nil : plan.vin, drumsLayer: plan.drumsLayer,
                                                            drumsLinger: !drumsLock || drumsLinger, vocalOut: plan.out,
-                                                           carry: carry && !plan.mashup, under: under)
+                                                           carry: (carry || loop > 0) && !plan.mashup, under: under)
                                 }
                                 let flat = shape(room: 0)
                                 let room = preset == .stemSwap
@@ -1338,7 +1601,7 @@ enum AutoPlacement {
                         // A's bare beat for). A remedy, not a habit: only
                         // for a blend that falls short, where it clearly
                         // gains and opens no hole.
-                        if preset == .stemSwap, !clashHere, handoff != mash, fewest < aim {
+                        if preset == .stemSwap, !clashHere, handoff != mash, fewest < aim, loop == 0 {
                             let carried = judge(carry: true, bail: false)
                             if carried.fewest >= fewest + 2, carried.penalty <= worstPenalty + 0.5 {
                                 (worstPenalty, fewest) = carried
@@ -1399,6 +1662,7 @@ enum AutoPlacement {
         }
         var notes: [String] = []
         let handoff = best.handoff
+        let sa = playing(best.entry)
         if handoff < vocalIn { notes.append("vocal handoff at bar \(handoff + 1)") }
         if sb.meanActivity(.vocals, bars: best.cue..<(best.cue + handoff)) > TrackStructure.threshold {
             notes.append("B sings early; muted until the handoff")
@@ -1421,14 +1685,14 @@ enum AutoPlacement {
         if sb.hook(from: best.cue + switchAt) >= 0.4 { payoff.append(echo ? "drops into B's hook" : "B's hook on the switch") }
         let isMashup = handoff == mash
         if isMashup { payoff.append("mashup: B sings over A's beat") }
-        let drops = dropMoment(e: best.entry, c: best.cue, switchAt: switchAt)
+        let drops = dropMoment(sa, e: best.entry, c: best.cue, switchAt: switchAt)
         if drops { payoff.append("roll into the drop") }
         notes.insert(contentsOf: payoff, at: 0)
         return Result(entryBar: best.entry, cueBar: best.cue, vocalHandoff: handoff, lowSwap: best.lowSwap,
                       reason: notes.joined(separator: " · "), score: best.score, mashup: isMashup,
                       dropMoment: drops, payoff: payoff, together: bestHeard, expectedVocalIn: bestVocal,
-                      notesClash: notesClash(e: best.entry, c: best.cue, sw: best.lowSwap), overruns: overruns,
+                      notesClash: notesClash(sa, e: best.entry, c: best.cue, sw: best.lowSwap), overruns: overruns,
                       jumps: skip != nil,
-                      carry: bestCarry)
+                      carry: bestCarry, loopBars: loop, loopBack: loop > 0 ? loopBack(best.entry) : 0)
     }
 }

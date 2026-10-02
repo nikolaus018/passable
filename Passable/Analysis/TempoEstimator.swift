@@ -3,25 +3,229 @@ import Accelerate
 /// A constant-tempo grid: beat `i` falls at `firstDownbeat + i · beatSeconds`,
 /// and every fourth beat from there is a downbeat. Negative indices are the
 /// pickup beats before the first downbeat.
+///
+/// A song played by a drummer has no constant tempo: its beats wander a
+/// tenth of a second and more around any such grid. It carries its bars'
+/// downbeats one by one instead (`downbeats`, see `Steadiness`), and beats
+/// and bars are read off those; `bpm` is then its tempo on the whole. Such
+/// a song is never beat-matched (see `MixMath.preset`): it's mixed in and
+/// out on its downbeats, where they really are.
 struct BeatGrid: Codable, Equatable {
     var bpm: Double
     /// Seconds from the start of the file to the first downbeat (< one bar).
     var firstDownbeat: Double
+    /// Each bar's downbeat (seconds), for a song whose bars aren't all
+    /// four beats of one tempo; nil for one whose are.
+    var downbeats: [Double]? = nil
+    /// With `downbeats`: false if the tempo is steady all the same and
+    /// only the count of the bars isn't (a song with a bar of two beats
+    /// in it: from there on its ones fall where a constant grid has its
+    /// threes; see `Steadiness.oddBars`). Its beats are still the grid's.
+    var wanders: Bool? = nil
 
     var beatSeconds: Double { 60 / bpm }
     var barSeconds: Double { 4 * beatSeconds }
+    var isSteady: Bool { (downbeats?.count ?? 0) < 2 || wanders == false }
 
-    func beat(_ index: Int) -> Double { firstDownbeat + Double(index) * beatSeconds }
-    func downbeat(_ bar: Int) -> Double { firstDownbeat + Double(bar) * barSeconds }
+    func beat(_ index: Int) -> Double {
+        isSteady ? firstDownbeat + Double(index) * beatSeconds : time(bars: Double(index) / 4)
+    }
+
+    /// Whether `bars` are all ordinary ones: four beats long, give or
+    /// take what a drummer does.
+    func isRegular(_ bars: Range<Int>) -> Bool {
+        guard let d = downbeats, d.count >= 2 else { return true }
+        return bars.clamped(to: 0..<(d.count - 1)).allSatisfy { abs(d[$0 + 1] - d[$0] - barSeconds) < 0.2 * barSeconds }
+    }
+    func downbeat(_ bar: Int) -> Double { time(bars: Double(bar)) }
+
+    /// Seconds at which the song is `bars` bars past its first downbeat.
+    func time(bars: Double) -> Double {
+        guard let d = downbeats, d.count >= 2 else { return firstDownbeat + bars * barSeconds }
+        // Between two downbeats, evenly; outside them, at the tempo of the
+        // first or last bar.
+        let k = min(d.count - 2, max(0, Int(bars.rounded(.down))))
+        return d[k] + (bars - Double(k)) * (d[k + 1] - d[k])
+    }
+
+    /// Bars past its first downbeat the song is at `seconds`.
+    func bars(at seconds: Double) -> Double {
+        guard let d = downbeats, d.count >= 2 else { return (seconds - firstDownbeat) / barSeconds }
+        var k = d.lastIndex { $0 <= seconds } ?? 0
+        k = min(d.count - 2, k)
+        return Double(k) + (seconds - d[k]) / (d[k + 1] - d[k])
+    }
 
     /// Whole bars that start inside a file of this length.
     func barCount(duration: Double) -> Int {
-        max(1, Int(((duration - firstDownbeat) / barSeconds).rounded(.down)))
+        max(1, Int(bars(at: duration).rounded(.down)))
     }
 
     /// The grid as it would be heard played `rate` times faster.
     func scaled(by rate: Double) -> BeatGrid {
-        BeatGrid(bpm: bpm * rate, firstDownbeat: firstDownbeat / rate)
+        BeatGrid(bpm: bpm * rate, firstDownbeat: firstDownbeat / rate, downbeats: downbeats.map { $0.map { $0 / rate } })
+    }
+}
+
+/// Whether a song keeps the tempo of its grid, and its bars one by one if
+/// it doesn't.
+enum Steadiness {
+    /// The downbeat of every bar of a steady song that doesn't count in
+    /// fours throughout: one with a bar of two beats (or six) somewhere,
+    /// after which a grid of four-beat bars has its ones on the song's
+    /// threes, and every phrase placed there starts in the middle of a
+    /// bar. nil for a song whose bars are all the grid's.
+    ///
+    /// The tracker's downbeats say where: a stretch of eight bars or more
+    /// in which they fall on another beat of the grid's bar than before.
+    /// A tracker can be half a bar out on its own account, though (a beat
+    /// that's the same on the one and the three), so each such stretch
+    /// has to be borne out by the song's harmony: chords change on the
+    /// one more than on the three.
+    /// - Parameter turns: how much the harmony changes on beat `i` of the
+    ///   grid (from the beat before; nil where there are no notes).
+    static func oddBars(grid: BeatGrid, heard: BeatTracker.Beats, duration: Double, turns: (Int) -> Float?) -> [Double]? {
+        let beat = grid.beatSeconds
+        // Each tracked downbeat as a beat of the grid (those on one).
+        let ones = heard.downbeats.compactMap { t -> Int? in
+            let i = ((t - grid.firstDownbeat) / beat).rounded()
+            return abs(t - (grid.firstDownbeat + i * beat)) < 0.25 * beat ? Int(i) : nil
+        }
+        guard ones.count >= 16 else { return nil }
+        func phase(_ i: Int) -> Int { ((i % 4) + 4) % 4 }
+        // Runs of downbeats on the same beat of the bar; shorter than
+        // eight bars is the tracker's slip, not the song's.
+        var runs: [(first: Int, phase: Int, count: Int)] = []
+        for i in ones {
+            if let last = runs.last, last.phase == phase(i) { runs[runs.count - 1].count += 1 } else { runs.append((i, phase(i), 1)) }
+        }
+        runs = runs.filter { $0.count >= 8 }
+        guard runs.contains(where: { $0.phase != 0 }) else { return nil }
+        /// How much more the harmony turns on the run's ones than half a
+        /// bar (or whatever the difference is) away, over its first 32 bars.
+        func borneOut(_ run: (first: Int, phase: Int, count: Int), against other: Int) -> Bool {
+            var here: Float = 0, there: Float = 0, n: Float = 0
+            for bar in 0..<min(run.count, 32) {
+                let i = run.first + 4 * bar
+                guard let a = turns(i), let b = turns(i + ((other - run.phase) % 4 + 4) % 4) else { continue }
+                here += a
+                there += b
+                n += 1
+            }
+            return n >= 6 && here > 1.15 * there
+        }
+        // The grid's own count holds until a run on another beat is borne
+        // out; from there that run's, until the next that is.
+        var changes: [(from: Int, phase: Int)] = []
+        var current = 0
+        for run in runs where run.phase != current {
+            if borneOut(run, against: current) {
+                changes.append((run.first, run.phase))
+                current = run.phase
+            }
+        }
+        guard !changes.isEmpty else { return nil }
+        var bars: [Double] = []
+        var i = 0, next = 0
+        let last = Int((duration - grid.firstDownbeat) / beat) + 4
+        while i <= last {
+            bars.append(grid.firstDownbeat + Double(i) * beat)
+            if next < changes.count, changes[next].from - i <= 5 {
+                // The odd bar: two beats (or three, or five) up to the
+                // first one of the new count.
+                i = max(i + 1, changes[next].from)
+                next += 1
+            } else {
+                i += 4
+            }
+        }
+        return bars
+    }
+
+    /// The downbeat of every bar of a song whose beats, as a trained
+    /// tracker hears them, don't stay on its constant grid (a drummer's
+    /// tempo breathes; a sequencer's doesn't); nil for a song that does.
+    ///
+    /// Not steady means both that the tracked beats lie well off the grid
+    /// much of the time and that the tempo they keep really changes
+    /// through the song, a little at a time (measured sixteen beats at a
+    /// time: a drummer's moves a few percent). A tracker that hears
+    /// another pulse for some bars gives the first without the second (its
+    /// beats are off the grid there, at the same tempo), and one that
+    /// counts in double time is no further off the grid's eighths. Where
+    /// the tracked tempo jumps about by more than a drummer's would, the
+    /// tracker is the one that's lost, and its beats aren't bars to go by.
+    /// - Parameter attacks: the drums' hits (`BeatAlign.attacks`), which
+    ///   each tracked beat is moved onto (the tracker answers in 20 ms
+    ///   frames).
+    static func downbeats(grid: BeatGrid, heard: BeatTracker.Beats, duration: Double, attacks: [Float]?) -> [Double]? {
+        let beat = grid.beatSeconds
+        guard heard.beats.count >= 64 else { return nil }
+        func median(_ x: [Double]) -> Double { x.sorted()[x.count / 2] }
+        let gaps = zip(heard.beats.dropFirst(), heard.beats).map { $0 - $1 }
+        let pulse = median(gaps)
+        // (Against the grid's eighths where the tracker counts those.)
+        let step = beat / max(1, (beat / pulse).rounded())
+        let off = heard.beats.map { t in t - (grid.firstDownbeat + ((t - grid.firstDownbeat) / step).rounded() * step) }
+        let middle = median(off)
+        let spread = off.map { abs($0 - middle) }.sorted()[off.count * 9 / 10]
+        guard spread > 0.06 else { return nil }
+        // The tempo over every sixteen beats tracked without a gap.
+        var tempos: [Double] = []
+        for i in stride(from: 0, to: gaps.count - 15, by: 8) where gaps[i..<(i + 16)].allSatisfy({ abs($0 - pulse) < 0.3 * pulse }) {
+            tempos.append(gaps[i..<(i + 16)].reduce(0, +) / 16)
+        }
+        guard tempos.count >= 4 else { return nil }
+        tempos.sort()
+        let range = (tempos[tempos.count - 1 - tempos.count / 20] - tempos[tempos.count / 20]) / pulse
+        // (And only a song tracked on the beat: one counted in double time
+        // has no bars to read off the tracked beats.)
+        guard range > 0.015, abs(pulse - beat) < 0.1 * beat else { return nil }
+        // A tempo that moves by more than a drummer's: the song changes
+        // tempo, or the tracker loses it. Either way the grid isn't to be
+        // beat-matched on (Ski Aggu's Geld drifted 50 ms against its
+        // partner over eight bars), but nor are the tracker's beats bars
+        // to go by: the grid's bars, bridged in and out.
+        if range >= 0.08 {
+            let count = Int((duration - grid.firstDownbeat) / grid.barSeconds) + 2
+            return (0..<count).map { grid.firstDownbeat + Double($0) * grid.barSeconds }
+        }
+
+        // Every beat of the song: the tracked ones, each on the drum hit
+        // nearest it, and where the tracker heard none (a break), as many
+        // as fit at the tempo around.
+        let perSecond = AudioIO.sampleRate / Double(BeatAlign.onsetHop)
+        func onHit(_ t: Double) -> Double {
+            guard let attacks else { return t }
+            let centre = Int(t * perSecond), reach = Int(0.03 * perSecond)
+            guard centre - reach >= 0, centre + reach < attacks.count else { return t }
+            let k = ((centre - reach)...(centre + reach)).max { attacks[$0] < attacks[$1] }!
+            return attacks[k] > 0 ? Double(k) / perSecond : t
+        }
+        var beats: [Double] = []
+        for t in heard.beats.map(onHit) {
+            if let last = beats.last {
+                let missing = Int(((t - last) / beat).rounded()) - 1
+                if missing > 0 { for k in 1...missing { beats.append(last + (t - last) * Double(k) / Double(missing + 1)) } }
+                guard t - last > 0.5 * beat else { continue }
+            }
+            beats.append(t)
+        }
+        // Which of them are the ones: where most of the tracker's downbeats fall.
+        var votes = [Int](repeating: 0, count: 4)
+        for d in heard.downbeats {
+            if let i = beats.indices.min(by: { abs(beats[$0] - d) < abs(beats[$1] - d) }), abs(beats[i] - d) < 0.5 * beat {
+                votes[i % 4] += 1
+            }
+        }
+        let phase = votes.indices.max { votes[$0] < votes[$1] } ?? 0
+        var bars = stride(from: phase, to: beats.count, by: 4).map { beats[$0] }
+        guard bars.count >= 8 else { return nil }
+        // To both ends of the file, at the tempo of the first and last bars.
+        let first = bars[1] - bars[0], last = bars[bars.count - 1] - bars[bars.count - 2]
+        while bars[0] - first >= 0 { bars.insert(bars[0] - first, at: 0) }
+        while bars[bars.count - 1] + last <= duration + last { bars.append(bars[bars.count - 1] + last) }
+        return bars
     }
 }
 

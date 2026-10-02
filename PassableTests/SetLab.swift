@@ -22,7 +22,10 @@ final class SetLab: XCTestCase {
         let urls = list.split(separator: "\n").map(String.init).filter { !$0.isEmpty && !$0.hasPrefix("#") }
             .map { URL(fileURLWithPath: $0) }
         let set = SetSession(persists: false)
-        set.add(urls)
+        // $PASSABLE_SET_FIXED: the songs play in the order listed, so two
+        // runs measure the same pairs.
+        let fixed = ProcessInfo.processInfo.environment["PASSABLE_SET_FIXED"] != nil
+        set.add(urls, asListed: fixed)
         let deadline = Date().addingTimeInterval(3600)
         while set.mix == nil || set.buildStatus != nil {
             if Date() > deadline { XCTFail("timeout"); return }
@@ -135,6 +138,7 @@ final class SetLab: XCTestCase {
         var held: [Int] = [], alone: [Int] = []
         var resumes: [Double] = [], silences: [Double] = []
         var partEdges: [(Float, Float)] = []
+        var lyricCuts: [String: Int] = [:]
         for t in mix.transitions {
             let bar = t.barSeconds
             // A Wash Out happens in the bars before B's downbeat.
@@ -234,7 +238,8 @@ final class SetLab: XCTestCase {
                 for rel in 0..<min(t.edit.bars + 4, all.count - lead) {
                     let k = lead + rel
                     let silent = vocA[k] <= -40 && vocB[k] <= -40
-                    runA = silent && sa.isActive(.vocals, bar: t.edit.entryBar + rel) ? runA + 1 : 0
+                    // (Looped, A's song isn't singing on: its part was over.)
+                    runA = silent && t.loopBars == 0 && sa.isActive(.vocals, bar: t.edit.entryBar + rel) ? runA + 1 : 0
                     runB = silent && sb.isActive(.vocals, bar: t.edit.cueBar + rel) ? runB + 1 : 0
                     if rel < t.edit.bars { vocalGap = max(vocalGap, runA) }
                     heldBack = max(heldBack, runB)
@@ -271,8 +276,14 @@ final class SetLab: XCTestCase {
                 let out = t.vocalOut ?? min(vin, t.start + sw * t.barSeconds)
                 // A blended out or B blended in on purpose isn't a cut; B
                 // opening on a word's attack is sounding by design.
-                if t.vocalOutKind != "bar", sounding(t.from, at: out) { phrasing += " A-CUT" }
-                if t.vocalInKind == "grid", sounding(t.to, at: vin) { phrasing += " B-MIDLINE" }
+                // (Nor is a voice cut between two lines of its words,
+                // sounding or not: a rapper leaves no breath there.)
+                func midLine(_ track: Int, _ bar0: Int, at master: Double) -> Bool {
+                    let k = VocalPhrasing.slots * bar0 + Int(((master - t.start) / t.barSeconds * Double(VocalPhrasing.slots)).rounded())
+                    return mix.tracks[track].loaded.analysis.structure?.midLine(at: k) ?? true
+                }
+                if t.vocalOutKind != "bar", sounding(t.from, at: out), midLine(t.from, t.edit.entryBar, at: out) { phrasing += " A-CUT" }
+                if t.vocalInKind == "grid", sounding(t.to, at: vin), midLine(t.to, t.edit.cueBar, at: vin) { phrasing += " B-MIDLINE" }
             }
             // A Wash Out never layers two beats: its bridge is the blend.
             if together < min(6, t.edit.bars / 2 + 2), t.edit.preset != .echoOut { phrasing += " STRUNG-TOGETHER" }
@@ -300,6 +311,7 @@ final class SetLab: XCTestCase {
                       + t.grooveLags.map { String(format: "%.0f", $0 * 1000) }.joined(separator: " "))
             }
             let shift = (t.edit.semitones != 0 ? String(format: "  B %+d st", t.edit.semitones) : "")
+                + (t.loopBars > 0 ? "  A loops \(t.loopBars) bars from \(t.plan.placement.loopBack) before" : "")
                 + (t.skippedBars > 0 ? "  A skipped \(t.skippedBars) bars before" : "")
             if t.skippedBars > 0 { payoffCounts["club edit", default: 0] += 1 }
             print("      payoff: " + (t.payoff.isEmpty ? "none" : t.payoff.joined(separator: " · ")) + shift
@@ -358,6 +370,16 @@ final class SetLab: XCTestCase {
                     note += String(format: " B in on %@, silent for %.1f beats before, sings %.1f beats after", t.vocalInKind ?? "-", silent,
                                    Double(first - k) / 4)
                 }
+                // And by the words, where they were heard: a voice taken
+                // out or let in while a line is being sung.
+                func words(_ st: TrackStructure, _ k: Int?) -> String {
+                    guard let k, let mid = st.midLine(at: k) else { return "?" }
+                    return mid ? "MID-LINE" : "between lines"
+                }
+                let wa = words(fa, slot(t.vocalOut, t.edit.entryBar)), wb = words(fb, slot(t.vocalIn, t.edit.cueBar))
+                note += "  words: A out \(wa), B in \(wb)"
+                lyricCuts[wa, default: 0] += 1
+                lyricCuts[wb, default: 0] += 1
                 print(note)
             }
             vocalCuts["B in on \(t.vocalInKind ?? "-")", default: 0] += 1
@@ -440,6 +462,8 @@ final class SetLab: XCTestCase {
         print("Beats B's voice had been silent before it came in: " + silences.map { String(format: "%.1f", $0) }.joined(separator: " "))
         print("Bars nobody sings while B's voice is held back: " + held.map(String.init).joined(separator: " "))
         print("Seconds each song plays on its own before its way out: " + alone.map(String.init).joined(separator: " "))
+        print("Voices by the words (both sides): " + lyricCuts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+        print("Looped: \(mix.transitions.filter { $0.loopBars > 0 }.count) of \(mix.transitions.count)")
         print("Payoffs over \(mix.transitions.count) transitions: "
               + payoffCounts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
 

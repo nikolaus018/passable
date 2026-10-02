@@ -66,13 +66,33 @@ final class TrackProcessor: @unchecked Sendable {
                     if analysis.structure?.stemLevel == nil || analysis.structure?.vocalBeatLevel == nil
                         || analysis.structure?.hookStart == nil || analysis.structure?.barChroma == nil
                         || analysis.structure?.harmonyChroma == nil || analysis.structure?.melodyChroma == nil
-                        || analysis.structure?.vocalSixteenthLevel == nil || analysis.structure?.vocalChroma == nil {
+                        || analysis.structure?.vocalSixteenthLevel == nil || analysis.structure?.vocalChroma == nil
+                        || analysis.structure?.lowSplit != TrackStructure.lowSplit {
+                        let old = analysis.structure
                         analysis.structure = TrackStructure.measure(stems: stems, grid: analysis.grid)
+                        analysis.structure?.setLines(old?.vocalLines, tried: old?.lyricsTried, grid: analysis.grid)
                         StemCache.saveAnalysis(analysis, to: directory)
                     }
                 } else {
                     progress(.analyzing)
                     analysis = TrackAnalyzer.analyze(stems: stems)
+                    StemCache.saveAnalysis(analysis, to: directory)
+                }
+                if analysis.tempoCheck != TrackAnalysis.tempoCheck {
+                    progress(.analyzing)
+                    let checked = TrackAnalyzer.checkingTempo(analysis, stems: stems)
+                    if checked != analysis {
+                        analysis = checked
+                        StemCache.saveAnalysis(analysis, to: directory)
+                    }
+                }
+                // The words, once per song (and again when the languages
+                // on the Mac have changed since: it may be in a new one).
+                let languages = Lyrics.available()
+                if !languages.isEmpty, let vocals = stems[.vocals], let structure = analysis.structure,
+                   structure.vocalLines == nil || structure.lyricsTried != languages {
+                    progress(.analyzing)
+                    analysis.structure?.setLines(Lyrics.lines(vocals: vocals)?.lines ?? [], tried: languages, grid: analysis.grid)
                     StemCache.saveAnalysis(analysis, to: directory)
                 }
                 return Loaded(directory: directory, stems: stems, analysis: analysis,

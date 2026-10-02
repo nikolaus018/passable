@@ -22,6 +22,10 @@ final class MixSnapshot: @unchecked Sendable {
     /// A `Roll` on the master timeline, in frames.
     struct FrameRoll {
         let start: Int, end: Int, anchor: Int, length: Int
+        /// Frames over which each repeat of a loop is crossfaded in out of
+        /// what the pass before runs on into; 0 for a stutter, whose
+        /// repeats start from nothing.
+        let crossfade: Int
 
         /// nil when it's too short to play.
         init?(_ roll: Roll, sampleRate: Double) {
@@ -30,6 +34,7 @@ final class MixSnapshot: @unchecked Sendable {
             anchor = Int((roll.anchor * sampleRate).rounded())
             length = Int((roll.length * sampleRate).rounded())
             guard end > start, length >= 2 * MixRenderer.declick else { return nil }
+            crossfade = roll.seamless == true ? min(MixRenderer.loopCrossfade, length / 4) : 0
         }
     }
 
@@ -62,6 +67,10 @@ final class MixRenderer: @unchecked Sendable {
     /// Frames (~2 ms) over which a roll's every jump is faded out and in,
     /// so its repeats don't click.
     static let declick = 96
+    /// Frames (~8 ms) over which a loop's repeat is crossfaded in. The
+    /// loop is written to turn round that long before its downbeat (see
+    /// `TransitionBuilder.loopLead`), so the kick on the one is whole.
+    static let loopCrossfade = 352
     let sampleRate = AudioIO.sampleRate
 
     private struct LaneDSP {
@@ -215,10 +224,12 @@ final class MixRenderer: @unchecked Sendable {
             for (i, lane) in snap.lanes.enumerated() {
                 guard lane.audible, let audio = lane.audio else { continue }
                 let src = position - lane.offset
-                guard src + n > 0, src < audio.count else { continue }
+                // (A loop plays on past the end of its song's file.)
+                let rolling = lane.rolls.contains { $0.start - Self.declick < position + n && $0.end + Self.declick > position }
+                guard src + n > 0, src < audio.count || rolling else { continue }
 
                 // Copy the stem's frames for this block, zero outside the file.
-                if lane.rolls.contains(where: { $0.start - Self.declick < position + n && $0.end + Self.declick > position }) {
+                if rolling {
                     Self.copyRolled(lane, audio: audio, from: position, count: n, left: ll, right: lr)
                 } else {
                     ll.update(repeating: 0, count: n)
@@ -282,24 +293,50 @@ final class MixRenderer: @unchecked Sendable {
             let p = position + j
             var s = p - lane.offset
             var g: Float = 1
+            // A loop's seam: the frame the pass before would have carried
+            // on with, and how much of it is still in (1…0).
+            var tail = -1, tailGain: Float = 0
             for r in lane.rolls {
-                if p >= r.start && p < r.end {
+                if p >= r.start && p < r.end, r.crossfade > 0 {
+                    let phase = (p - r.start) % r.length
+                    // The first pass comes out of the stem where it really
+                    // was; the later ones out of the loop's own end.
+                    let from = p - r.start < r.length ? s : r.anchor - lane.offset + r.length + phase
+                    s = r.anchor - lane.offset + phase
+                    if phase < r.crossfade {
+                        tail = from
+                        tailGain = 1 - Float(phase) / Float(r.crossfade)
+                    } else {
+                        tail = -1
+                    }
+                    g = min(g, Float(r.end - p) / xf)
+                } else if p >= r.start && p < r.end {
                     let phase = (p - r.start) % r.length
                     s = r.anchor - lane.offset + phase
+                    tail = -1
                     g = min(g, Float(min(phase, r.length - phase, r.end - p)) / xf)
+                } else if r.crossfade > 0 && p < r.start {
+                    // Nothing to fade before a loop: it's crossfaded into.
                 } else if p >= r.start - declick && p < r.start {
                     g = min(g, Float(r.start - p) / xf)
                 } else if p >= r.end && p < r.end + declick {
                     g = min(g, Float(p - r.end) / xf)
                 }
             }
+            var l: Float = 0, r: Float = 0
             if s >= 0 && s < audio.count {
-                left[j] = audio.left.pointer[s] * g
-                right[j] = audio.right.pointer[s] * g
-            } else {
-                left[j] = 0
-                right[j] = 0
+                l = audio.left.pointer[s]
+                r = audio.right.pointer[s]
             }
+            if tail >= 0 && tail < audio.count {
+                l = l * (1 - tailGain) + audio.left.pointer[tail] * tailGain
+                r = r * (1 - tailGain) + audio.right.pointer[tail] * tailGain
+            } else if tail >= 0 {
+                l *= 1 - tailGain
+                r *= 1 - tailGain
+            }
+            left[j] = l * g
+            right[j] = r * g
         }
     }
 

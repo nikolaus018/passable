@@ -56,6 +56,14 @@ enum MixMath {
         tempoMultiplier(a: a, b: b) != 1 ? .echoOut : recommendedPreset(rate: rate(a: a, b: b))
     }
 
+    /// The preset for two songs: as their tempos say, unless one of them
+    /// has no steady tempo at all (a drummer's: see `BeatGrid.downbeats`).
+    /// Two beats can't be laid over each other where one of them wanders;
+    /// such a song is bridged in and out on its downbeats.
+    static func preset(_ a: TrackAnalysis, _ b: TrackAnalysis) -> TransitionPreset {
+        a.grid.isSteady && b.grid.isSteady ? recommendedPreset(a: a.grid.bpm, b: b.grid.bpm) : .echoOut
+    }
+
     /// Bars B takes to glide from A's tempo back to its own once A is gone:
     /// about 1.5 % per bar, so the change is felt as a lift, not heard as a
     /// wobble.
@@ -99,6 +107,11 @@ enum MixMath {
     /// Tempos this close layer a vocal over the other song's beat without
     /// the stretch being heard.
     static let mashupStretch = 0.05
+
+    /// Bars to a loop of the outgoing song's beat: one four-bar phrase,
+    /// which is what a DJ loops (shorter is a stutter, longer goes round
+    /// too seldom to be a bed).
+    static let loopBars = 4
 }
 
 /// Everything decided about one transition, from the two analyses alone.
@@ -136,7 +149,11 @@ struct PairPlan: Equatable {
                      soloFrom: Int? = nil, skip: Range<Int>? = nil, drums: (a: [Float], b: [Float])? = nil,
                      fixed: TransitionEdit? = nil) -> PairPlan {
         let rate = MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)
-        let preset = fixed?.preset ?? MixMath.recommendedPreset(a: a.grid.bpm, b: b.grid.bpm)
+        // (A song without a steady tempo is bridged whatever was chosen
+        // for it: there is no beat to lay another on.)
+        let steady = a.grid.isSteady && b.grid.isSteady
+        let fixed = steady || fixed?.preset == .echoOut ? fixed : nil
+        let preset = fixed?.preset ?? MixMath.preset(a, b)
         let aKey = a.key.transposed(by: aShift)
         // Where the keys clash, B could be pitched into A's key (up to
         // `MixMath.maxKeyShift`, which allows none): then the melodies can
@@ -150,7 +167,7 @@ struct PairPlan: Equatable {
         }
         func clash(_ shift: Int) -> Bool { MixMath.keysClash(aKey, b.key.transposed(by: shift)) }
         func place(_ preset: TransitionPreset, _ bars: Int, _ shift: Int, _ drumsLock: Bool,
-                   _ drumsLinger: Bool) -> AutoPlacement.Result {
+                   _ drumsLinger: Bool, _ loop: Int) -> AutoPlacement.Result {
             AutoPlacement.place(a: a, b: b, bars: bars, preset: preset,
                                 trimA: Float(MixMath.trimDB(a)), trimB: Float(MixMath.trimDB(b)),
                                 entryRange: entryRange, keysClash: clash(shift),
@@ -159,7 +176,7 @@ struct PairPlan: Equatable {
                                 skip: skip, aShift: aShift, bShift: shift, drumsLock: drumsLock, drumsLinger: drumsLinger,
                                 at: fixed.map { ($0.entryBar, $0.cueBar) },
                                 glide: preset == .echoOut ? 0 : MixMath.glideBars(rate: MixMath.shared(rate).b),
-                                runUp: preset == .echoOut ? 0 : MixMath.runUpBars(rate: rate))
+                                runUp: preset == .echoOut ? 0 : MixMath.runUpBars(rate: rate), loop: loop)
         }
         // The key estimate only proposes the shift; the notes that will
         // overlap at the spot it was placed on decide. B keeps its own key
@@ -190,29 +207,36 @@ struct PairPlan: Equatable {
         // towards that; the simulation decides.
         let barSeconds = a.grid.barSeconds
         func length(_ bars: Int) -> Float { -0.03 * Float(abs(Double(bars) * barSeconds - 24)) }
-        var options = [(preset: preset, bars: preset.defaultBars, prior: preset == .echoOut ? 0 : length(preset.defaultBars))]
+        var options = [(preset: preset, bars: preset.defaultBars, prior: preset == .echoOut ? 0 : length(preset.defaultBars),
+                        loop: 0)]
         if preset == .echoOut {
             // A shorter bridge too (two bars for A's beat to leave, two of
             // its melody floating on): which one leaves less of a hole
             // where it's placed is for the simulation to say.
-            options.append((.echoOut, 4, 0))
+            options.append((.echoOut, 4, 0, 0))
         }
         if preset == .stemSwap {
-            options.append((.stemSwap, 8, length(8)))
-            options.append((.dropSwap, 16, length(16) - 0.2))
-            options.append((.dropSwap, 8, length(8) - 0.2))
+            options.append((.stemSwap, 8, length(8), 0))
+            options.append((.dropSwap, 16, length(16) - 0.2, 0))
+            options.append((.dropSwap, 8, length(8) - 0.2, 0))
+            // And each Stem Swap over A's beat looped (see
+            // `TransitionBuilder.loop`): four bars, the phrase a DJ loops.
+            options.append((.stemSwap, 16, length(16), MixMath.loopBars))
+            options.append((.stemSwap, 8, length(8), MixMath.loopBars))
         }
         options = options.filter { $0.preset == .echoOut || Double($0.bars) * barSeconds <= MixMath.maxBlendSeconds
             || $0.bars <= 8 }
         if let fixed {
-            options = [(fixed.preset, fixed.bars, 0)]
+            options = [(fixed.preset, fixed.bars, 0, 0)]
+            if fixed.preset == .stemSwap { options.append((fixed.preset, fixed.bars, 0, MixMath.loopBars)) }
             shifts = [fixed.semitones]
         }
         typealias Candidate = (preset: TransitionPreset, bars: Int, shift: Int, placement: AutoPlacement.Result, prior: Float)
         func search(drumsLock: Bool, drumsLinger: Bool = true) -> Candidate {
             options.flatMap { option in shifts.map { (option, $0) } }
                 .map { option, shift -> Candidate in
-                    (option.preset, option.bars, shift, place(option.preset, option.bars, shift, drumsLock, drumsLinger),
+                    (option.preset, option.bars, shift,
+                     place(option.preset, option.bars, shift, drumsLock, drumsLinger, option.loop),
                      option.prior - 1.0 * Float(abs(shift)))
                 }
                 .filter { $0.shift == 0 || fixed != nil || shiftPays($0.preset, $0.bars, $0.shift, $0.placement) }
@@ -227,7 +251,10 @@ struct PairPlan: Equatable {
             let lock = BeatAlign.predicted(a: drums.a, b: drums.b, from: start, to: start + Double(c.bars) * barSeconds,
                                            split: start + sw * barSeconds,
                                            bOffset: start - b.grid.scaled(by: rate).downbeat(c.placement.cueBar),
-                                           rate: rate)
+                                           rate: rate,
+                                           loop: c.placement.loopBars > 0
+                                               ? (Double(c.placement.loopBack) * barSeconds, Double(c.placement.loopBars) * barSeconds)
+                                               : nil)
             return (lock.clearlyGrooves, lock.groovesAfter)
         }
         // Without knowing whether the grooves lock, every spot is judged by
@@ -343,7 +370,7 @@ enum SetOrdering {
     /// Which ordered pairs can only be a Wash Out (tempos too far apart).
     static func washOuts(_ analyses: [TrackAnalysis]) -> [[Bool]] {
         analyses.map { a in
-            analyses.map { b in MixMath.recommendedPreset(a: a.grid.bpm, b: b.grid.bpm) == .echoOut }
+            analyses.map { b in MixMath.preset(a, b) == .echoOut }
         }
     }
 
@@ -374,6 +401,18 @@ enum SetOrdering {
         // Two songs have an order too: whichever leads into the other best.
         guard n > 1 else { return Array(0..<n) }
         if n <= 12 { return exact(costs, washOuts, energies) }
+        return search(costs, washOuts, energies)
+    }
+
+    /// `order` for a set too long to try every order of: the best of a
+    /// greedy chain from every song, each tidied by moving single songs;
+    /// then, from there, shaken and settled again and again (runs of songs
+    /// moved or turned round as one, and a few runs swapped at random to
+    /// get out of an order no single move improves), keeping what's
+    /// better. Always the same for the same songs.
+    static func search(_ costs: [[Double]], _ washOuts: [[Bool]]? = nil, _ energies: [Double]? = nil) -> [Int] {
+        let n = costs.count
+        guard n > 2 else { return Array(0..<n) }
         var best = Array(0..<n), bestCost = Double.infinity
         for start in 0..<n {
             var path = greedy(costs, from: start)
@@ -383,7 +422,75 @@ enum SetOrdering {
         }
         // Then runs of two and three songs that belong together, moved as one.
         improve(&best, costs, washOuts, energies, blocks: 3)
+        bestCost = settle(&best, costs, washOuts, energies)
+        guard n >= 8 else { return best }
+        var random = SplitMix(state: 0x9E37_79B9_7F4A_7C15)
+        // About as much work whatever the set's length.
+        for _ in 0..<max(24, min(400, 400_000 / (n * n))) {
+            // Three cuts, the two middle runs swapped: a change no move of
+            // one run undoes in one step.
+            var cuts = (0..<3).map { _ in 1 + Int(random.next() % UInt64(n - 1)) }.sorted()
+            guard cuts[0] < cuts[1], cuts[1] < cuts[2] else { continue }
+            if cuts[2] == n { cuts[2] = n - 1; guard cuts[1] < cuts[2] else { continue } }
+            var path = Array(best[..<cuts[0]]) + best[cuts[1]..<cuts[2]] + best[cuts[0]..<cuts[1]] + best[cuts[2]...]
+            let cost = settle(&path, costs, washOuts, energies)
+            if cost < bestCost - 1e-9 { (best, bestCost) = (path, cost) }
+        }
         return best
+    }
+
+    /// A small, fixed random sequence (the same set always gets the same
+    /// order).
+    private struct SplitMix {
+        var state: UInt64
+        mutating func next() -> UInt64 {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return z ^ (z >> 31)
+        }
+    }
+
+    /// Takes the best single move there is (a run of up to three songs
+    /// moved elsewhere, either way round, or any run turned round where
+    /// it is) until none improves the order; returns its cost.
+    private static func settle(_ path: inout [Int], _ costs: [[Double]], _ washOuts: [[Bool]]?,
+                               _ energies: [Double]?) -> Double {
+        let n = path.count
+        var current = total(path, costs, washOuts, energies)
+        while true {
+            var best: (cost: Double, path: [Int])?
+            func consider(_ p: [Int]) {
+                let c = total(p, costs, washOuts, energies)
+                if c < (best?.cost ?? current) - 1e-9 { best = (c, p) }
+            }
+            for length in 1...min(3, n - 1) {
+                for i in 0...(n - length) {
+                    var rest = path
+                    let block = Array(rest[i..<(i + length)])
+                    rest.removeSubrange(i..<(i + length))
+                    for j in 0...rest.count where j != i {
+                        var p = rest
+                        p.insert(contentsOf: block, at: j)
+                        consider(p)
+                        if length > 1 {
+                            p.replaceSubrange(j..<(j + length), with: block.reversed())
+                            consider(p)
+                        }
+                    }
+                }
+            }
+            for i in 0..<(n - 1) {
+                for j in (i + 1)..<n {
+                    var p = path
+                    p[i...j].reverse()
+                    consider(p)
+                }
+            }
+            guard let best else { return current }
+            (path, current) = (best.path, best.cost)
+        }
     }
 
     /// Songs added to a set that already has its order go where they fit
@@ -589,6 +696,10 @@ struct SetMix: @unchecked Sendable {
         /// first straight to the second. Always where it plays at its own
         /// tempo, so it's the same length in the set.
         var skip: (from: Double, to: Double)?
+        /// Its automation and rolls from its way in alone, as written
+        /// before its way out was added: what's reused of it when the set
+        /// is built again and its way in hasn't changed.
+        var incoming: (envelopes: [StemKind: [Envelope]], rolls: [Roll]) = ([:], [])
 
         var stems: [StemKind: StemAudio] { matched?.stems ?? loaded.stems }
 
@@ -613,19 +724,19 @@ struct SetMix: @unchecked Sendable {
     }
 
     struct Transition {
-        let from: Int, to: Int
+        var from: Int, to: Int
         let plan: PairPlan
         /// What was actually used: the plan's, or the hand edit's.
         let edit: TransitionEdit
         let isEdited: Bool
         /// Master seconds.
-        let start: Double, end: Double
+        var start: Double, end: Double
         /// Master seconds at which the incoming song is back at its own tempo.
-        let settled: Double
+        var settled: Double
         let barSeconds: Double
         /// Master seconds minus A's own seconds around the transition (A is
         /// at its own tempo there), i.e. set time minus editor time.
-        let delta: Double
+        var delta: Double
         /// Bars of A the transition may start on: not before A is back at its
         /// own tempo.
         let entryRange: ClosedRange<Int>
@@ -674,6 +785,36 @@ struct SetMix: @unchecked Sendable {
         var melodiesClash = false
         /// dB A's drums and melody made way for B's (EQ).
         var room = 0.0
+        /// Bars of A's beat that loop under the blend (0: none).
+        var loopBars = 0
+        /// What it was built from and what it wrote on the outgoing song:
+        /// built again from the same, it's taken over as it is, moved to
+        /// where it then plays (see `SetBuilder.build(previous:)`).
+        var made: Made?
+
+        struct Made {
+            let key: SetBuilder.BuildKey
+            let outgoing: [StemKind: [Envelope]]
+            let outgoingRolls: [Roll]
+        }
+
+        /// The same transition `seconds` later in the set.
+        func moved(by seconds: Double, from: Int, to: Int) -> Transition {
+            var t = self
+            (t.from, t.to) = (from, to)
+            t.start += seconds
+            t.end += seconds
+            t.settled += seconds
+            t.delta += seconds
+            t.vocalOut = vocalOut.map { $0 + seconds }
+            t.vocalIn = vocalIn.map { $0 + seconds }
+            t.dropAt = dropAt.map { $0 + seconds }
+            t.made = made.map {
+                Made(key: $0.key, outgoing: $0.outgoing.mapValues { $0.map { $0.shifted(by: seconds) } },
+                     outgoingRolls: $0.outgoingRolls.map { $0.shifted(by: seconds) })
+            }
+            return t
+        }
     }
 
     var tracks: [Track]
@@ -792,9 +933,22 @@ enum BeatAlign {
     ///   - from, to, split: on A's own clock (seconds).
     ///   - bOffset: A's clock at which B's first frame plays.
     ///   - rate: B's rate through the blend.
+    ///   - loop: A's beat loops from `from` on (seconds before `from` its
+    ///     looped stretch starts, and how long that is): its hits there
+    ///     are those of the loop, over and over.
     static func predicted(a: [Float], b: [Float], from: Double, to: Double, split: Double?, bOffset: Double,
-                          rate: Double) -> Result {
+                          rate: Double, loop: (back: Double, length: Double)? = nil) -> Result {
         let perSecond = AudioIO.sampleRate / Double(onsetHop)
+        if let loop {
+            let source = Int((from - loop.back) * perSecond), length = Int(loop.length * perSecond)
+            let count = Int((to - from) * perSecond)
+            guard source >= 0, length > 0, source + length <= a.count, Double(count) > perSecond else {
+                return Result(nudge: 0, lock: 1)
+            }
+            let looped = (0..<count).map { a[source + $0 % length] }
+            return nudge(ea: looped, eb: b, from: from, to: to, split: split, scale: rate * perSecond,
+                         shift: -bOffset * rate * perSecond)
+        }
         let first = max(0, Int(from * perSecond)), last = min(a.count, Int(to * perSecond))
         guard Double(last - first) > perSecond else { return Result(nudge: 0, lock: 1) }
         // B's own time at A's clock t is (t − bOffset) · rate.
@@ -902,9 +1056,23 @@ enum BeatAlign {
             for w in windows { for k in sum.indices { sum[k] += w.curve[k] } }
             let common = peak(sum)
             let near = windows.map(\.lag).filter { abs($0 - common) <= 0.008 }
-            guard let low = near.min(), let high = near.max() else { return nil }
-            let lag = (low + high) / 2
-            return 4 * windows.filter { sits($0, at: lag) }.count >= 3 * windows.count ? lag : nil
+            if let low = near.min(), let high = near.max() {
+                let lag = (low + high) / 2
+                if 4 * windows.filter({ sits($0, at: lag) }).count >= 3 * windows.count { return lag }
+            }
+            // The windows can also sit in two groups a little apart (bars at
+            // 14 and at 24 ms: the peak of them all is one group's, and the
+            // other is 10 off it), all of them within 8 ms of the middle:
+            // the most windows that fit a span of 16 ms, if that's a clear
+            // majority, and the middle of that span.
+            let lags = windows.map(\.lag).sorted()
+            var best: (count: Int, lag: Double)?
+            for (i, low) in lags.enumerated() {
+                let group = lags[i...].prefix { $0 - low <= 0.016 }
+                if group.count > best?.count ?? 0 { best = (group.count, (low + group.last!) / 2) }
+            }
+            guard let best, 4 * best.count >= 3 * windows.count else { return nil }
+            return best.lag
         }
         let half = split.map { min(ea.count, max(0, Int((($0 - from) * sr / hop).rounded()))) } ?? ea.count / 2
         let first = curves(0..<half), second = curves(half..<ea.count)
@@ -945,6 +1113,9 @@ enum BeatAlign {
         /// were heard to flam (see `SetBuilder`): they come in whole on
         /// the switch instead.
         var topsSplit = false
+        /// The same of A's drums playing on under B's after the swap:
+        /// they stop on it instead.
+        var lingerSplit = false
         /// Two patterns that differ (a dancehall riddim over a straight
         /// beat) leave some windows without a clear lag, and those don't
         /// vote. Of the windows that do, a clear majority has to sit
@@ -952,7 +1123,7 @@ enum BeatAlign {
         /// layer under A's kit if the first half grooves.
         var grooves: Bool { lockBefore >= 0.75 && !topsSplit }
         /// A's drums play on under B's after the swap.
-        var groovesAfter: Bool { grooves && lockAfter >= 0.75 }
+        var groovesAfter: Bool { grooves && lockAfter >= 0.75 && !lingerSplit }
         /// For a lock predicted from the songs' own hits rather than
         /// measured on the rendition: by a clear margin, since the rendition
         /// can still smear the soft hits a bare majority rests on. And on
@@ -1125,6 +1296,32 @@ enum Harmony {
         return min(best(a), best(b)) - best(both)
     }
 
+    /// How rough the two sound together, note against note: how much of
+    /// A's notes and B's (each as a share of its own) lie a semitone
+    /// apart, or a tritone (counted for half), whatever scale either is
+    /// in. `clash` asks whether the two share a scale, which a song in no
+    /// plain major or minor (a Phrygian riff, a blues) answers wrongly,
+    /// and which two songs a semitone apart can pass on a stretch that
+    /// uses few notes.
+    ///
+    /// Measured on 80 songs (HarmonyProbe): eight bars of one song's melody
+    /// and bass line against eight of another's melody, moved into its
+    /// key and then by 0 to 11 semitones. Same key: the middle one reads
+    /// 0.175, nine in ten under 0.20. A semitone or a tritone off: the
+    /// middle one 0.24, nine in ten over 0.21. At `roughTolerance`, 3 % of
+    /// each are on the wrong side; `clash` at its own best threshold
+    /// misses 11 % of those clashes, and at the tolerance a blend of
+    /// neighbouring keys is given, about a third.
+    static func roughness(_ a: [Float], _ b: [Float]) -> Float {
+        let sa = max(1e-6, a.reduce(0, +)), sb = max(1e-6, b.reduce(0, +))
+        var rough: Float = 0
+        for p in 0..<12 {
+            let x = a[p] / sa
+            rough += x * (b[(p + 1) % 12] + b[(p + 11) % 12]) / sb + 0.5 * x * b[(p + 6) % 12] / sb
+        }
+        return rough
+    }
+
     /// Pitch classes moved up by `semitones`.
     static func transposed(_ chroma: [Float], by semitones: Int) -> [Float] {
         (0..<12).map { chroma[(($0 - semitones) % 12 + 12) % 12] }
@@ -1171,6 +1368,19 @@ enum Harmony {
         case 2: return keysClashTolerance
         default: return -.infinity
         }
+    }
+
+    /// Past this `roughness`, two songs' notes grate: their melodies swap
+    /// rather than layer, whatever their keys were read as.
+    static let roughTolerance: Float = 0.206
+
+    /// `roughness` of what two sets of stems play from master `from` to
+    /// `to`; nil unless both have notes there.
+    static func roughness(_ a: [StemAudio], aOffset: Double, _ b: [StemAudio], bOffset: Double, from: Double,
+                          to: Double) -> Float? {
+        guard let ca = chroma(a, offset: aOffset, from: from, to: to),
+              let cb = chroma(b, offset: bOffset, from: from, to: to) else { return nil }
+        return roughness(ca, cb)
     }
 
     /// A voice over the other song's chords (a mashup, an a cappella) has
@@ -1240,7 +1450,12 @@ enum VocalPhrasing {
     /// `from...through`.
     /// - Parameter level: the voice's level (dB) over sixteenth k.
     /// - Parameter reference: the level it sings at.
-    static func cut(opening: Bool, from: Int, through: Int, reference: Float,
+    /// - Parameter turns: whether one line of the lyrics ends and the next
+    ///   starts at sixteenth k (see `TrackStructure.lineTurns`): between
+    ///   two sentences is a line's end whether or not the voice breathes
+    ///   there, which a rapper, or a chorus over its own backing voices,
+    ///   doesn't.
+    static func cut(opening: Bool, from: Int, through: Int, reference: Float, turns: ((Int) -> Bool)? = nil,
                     level: (Int) -> Float) -> (slot: Int, kind: Cut)? {
         guard from <= through else { return nil }
         func silent(_ k: Int) -> Bool { quiet(level(k), reference) }
@@ -1248,10 +1463,15 @@ enum VocalPhrasing {
         for k in from...through {
             let gap = opening ? k - 1 : k
             var kind: Cut?, extra = 0.0
+            let turn = turns?(k) ?? false
             if silent(gap) {
-                kind = silent(gap - 1) || silent(gap + 1) ? .line : .word
+                kind = silent(gap - 1) || silent(gap + 1) || turn ? .line : .word
             } else if opening ? level(k) - level(k - 1) >= 10 : level(k - 1) - level(k) >= 10 {
-                (kind, extra) = (.word, 0.25)
+                (kind, extra) = turn ? (.line, 0.1) : (.word, 0.25)
+            } else if turn {
+                // (A breath, where there is one as near, is still the
+                // cleaner cut.)
+                (kind, extra) = (.line, 0.2)
             }
             guard let kind else { continue }
             // Taken out late, it sings over the song that has taken over;
@@ -1286,11 +1506,16 @@ enum VocalPhrasing {
     /// `latest` (master seconds).
     /// - Parameter offset: master time of the stem's output frame 0.
     /// - Parameter bar: seconds to a bar where it plays.
+    /// - Parameter lines: the song's structure and the sixteenth of the
+    ///   song that plays at `target`, to cut between its lines (see
+    ///   `turns` above).
     static func cut(_ stem: StemAudio, offset: Double, reference: Float, opening: Bool, target: Double,
-                    earliest: Double, latest: Double, bar: Double) -> (time: Double, kind: Cut)? {
+                    earliest: Double, latest: Double, bar: Double,
+                    lines: (song: TrackStructure, slot: Int)? = nil) -> (time: Double, kind: Cut)? {
         let slot = bar / Double(slots)
+        let turns: ((Int) -> Bool)? = lines.map { lines in { lines.song.lineTurns(at: lines.slot + $0) } }
         let found = cut(opening: opening, from: Int(((earliest - target) / slot).rounded(.up)),
-                        through: Int(((latest - target) / slot).rounded(.down)), reference: reference) { k in
+                        through: Int(((latest - target) / slot).rounded(.down)), reference: reference, turns: turns) { k in
             level(stem, at: target + Double(k) * slot - offset, length: slot)
         }
         return found.map { (target + Double($0.slot) * slot, $0.kind) }
@@ -1318,6 +1543,33 @@ enum SetBuilder {
         max(8, Int((minimumSoloSeconds / grid.barSeconds).rounded(.up)))
     }
 
+    /// When the outgoing song of a pair leaves, by the say of whoever is
+    /// playing the set: the bars the transition may start on (one bar: the
+    /// next song is brought in there; from a bar on: this song is held
+    /// until then), and the jump the song had been given when that was
+    /// said (kept as it was: the song is playing).
+    struct Exit: Equatable {
+        var range: ClosedRange<Int>
+        var skip: Range<Int>?
+    }
+
+    /// Everything a transition is built from (see `build(previous:)`).
+    struct BuildKey: Equatable {
+        let a: URL, b: URL
+        let analysisA: TrackAnalysis, analysisB: TrackAnalysis
+        /// A's rendition; B's way in (its way out is the next transition's).
+        let renditionA: TrackProcessor.MatchPlan
+        let rateB: Double, rampStartB: Double, rampLengthB: Double
+        let skip: Range<Int>?
+        let plan: PairPlan
+        let edit: TransitionEdit
+        let isEdited: Bool
+        let entryRange: ClosedRange<Int>
+        let rateA: Double, barSeconds: Double
+        let shiftA: Int
+        let drops: Bool
+    }
+
     /// A Stem Swap rolls into a drop only from a blend at least this long:
     /// shorter, and there is no build for the roll to end.
     static let dropMomentBars = 16
@@ -1326,8 +1578,19 @@ enum SetBuilder {
     ///   - edits: hand-shaped transitions, by pair.
     ///   - reuse: renditions from the last build, reused when their plan
     ///     still matches, so an edit re-renders only what it changed.
+    ///   - previous: the set as last built. A transition planned from the
+    ///     same two songs, at the same spot and tempo, is taken over from
+    ///     it rather than measured again: a change to one transition (an
+    ///     edit, a request, the next song brought in now) then builds in a
+    ///     moment, whatever the set's length.
+    ///   - exits: when a song leaves, where that was said while it played
+    ///     (see `Exit`).
+    ///   - unlocked: pairs whose grooves were predicted to lock and then,
+    ///     measured on the audio that plays, didn't: planned without
+    ///     counting on B's drums building in under A's (see the end).
     static func build(_ tracks: [(url: URL, loaded: TrackProcessor.Loaded)], edits: [PairKey: TransitionEdit] = [:],
-                      reuse: [URL: TrackProcessor.Matched] = [:], processor: TrackProcessor,
+                      reuse: [URL: TrackProcessor.Matched] = [:], previous: SetMix? = nil,
+                      exits: [PairKey: Exit] = [:], unlocked: Set<PairKey> = [], processor: TrackProcessor,
                       progress: @escaping @Sendable (String) -> Void) async throws -> SetMix {
         precondition(!tracks.isEmpty)
         let sr = AudioIO.sampleRate
@@ -1377,8 +1640,9 @@ enum SetBuilder {
                 // A club edit: once A has the floor, jump over its verse and
                 // breakdown to where it repeats the part it's in. Not the
                 // opener's (its intro is the set's), not under a hand edit.
+                let asked = isEdited ? nil : exits[key]
                 let skip = isEdited || k == 1 ? nil
-                    : a.analysis.structure?.skip(from: settledBar + 4, landingBy: barsA - 24)
+                    : asked.map(\.skip) ?? a.analysis.structure?.skip(from: settledBar + 4, landingBy: barsA - 24)
                 let lastBar = max(0, barsA - 1)
                 let entryRange = min(settledBar, lastBar)...lastBar
                 /// A Wash Out's bridge starts before its entry: not inside
@@ -1396,9 +1660,11 @@ enum SetBuilder {
                 // audio below.
                 let byHand = edits[key]?.byHand ?? false
                 let chosen = edits[key].flatMap { $0.byHand ? nil : inRange($0) }
-                let plan = PairPlan.make(a: a.analysis, b: b.analysis, entryRange: (settledBar + soloBars)...Int.max,
+                let plan = PairPlan.make(a: a.analysis, b: b.analysis,
+                                         entryRange: asked?.range ?? (settledBar + soloBars)...Int.max,
                                          aShift: shifts[k - 1], soloFrom: settledBar, skip: skip,
-                                         drums: hits[k - 1].flatMap { x in hits[k].map { (a: x, b: $0) } },
+                                         drums: unlocked.contains(key) ? nil
+                                             : hits[k - 1].flatMap { x in hits[k].map { (a: x, b: $0) } },
                                          fixed: chosen)
                 let edit = inRange(byHand ? edits[key]! : TransitionEdit(
                     entryBar: plan.placement.entryBar, cueBar: plan.placement.cueBar, preset: plan.preset,
@@ -1412,8 +1678,14 @@ enum SetBuilder {
                 let bar = ga.barSeconds / share.a
                 let span = edit.preset == .echoOut ? 0 : edit.bars
                 if share.a != 1 {
-                    let runUp = min(MixMath.glideBars(rate: share.a), max(0, edit.entryBar - settledBar))
-                    let from = plans[k - 1].map.output(ga.downbeat(edit.entryBar - runUp) * sr)
+                    // (A loop repeats bars from before the entry: A is at
+                    // the blend's tempo by where those start. A loop drawn
+                    // over by hand is still in the edit's rolls.)
+                    let drawn = edit.rolls.first { $0.side == .a && $0.seamless == true }
+                    let back = byHand ? drawn.map { Int((($0.start - $0.anchor) / bar).rounded()) } ?? 0
+                        : plan.placement.loopBack
+                    let runUp = min(MixMath.glideBars(rate: share.a), max(0, edit.entryBar - back - settledBar))
+                    let from = plans[k - 1].map.output(ga.downbeat(edit.entryBar - back - runUp) * sr)
                     // (As many output frames as play `runUp` bars of A while
                     // its rate goes from 1 to its share.)
                     let length = runUp == 0 ? 1 : 2 * Double(runUp) * ga.barSeconds * sr / (1 + share.a)
@@ -1473,6 +1745,8 @@ enum SetBuilder {
                                     offset: -first.analysis.grid.downbeat(startBar), envelopes: [:])]
         var shifts = [0]
         var sinceDrop = 3
+        // Pairs planned for grooves that lock which turned out not to.
+        var broken: Set<PairKey> = []
 
         for k in 1..<tracks.count {
             if Task.isCancelled { throw CancellationError() }
@@ -1503,18 +1777,64 @@ enum SetBuilder {
             // Where A's stems sound from around its exit: placement keeps the
             // transition, and the bars heard before it, past any jump.
             let aOffset = a.stemOffset(at: start)
+            // A's beat looped under the blend (see `TransitionBuilder.loop`):
+            // everything heard of A's drums, bass line and melody from here
+            // on is the loop, so that is what's measured, and the song's
+            // bar-by-bar levels and notes are read the same way.
+            let loop = byHand ? 0 : plan.placement.loopBars, loopBack = plan.placement.loopBack
+            var aStems = a.stems, aPlays = aOffset
+            if loop > 0 {
+                aPlays = start - Double(loopBack) * blendBar
+                aStems = looped(a.stems, offset: aOffset, from: start, back: Double(loopBack) * blendBar,
+                                length: Double(loop) * blendBar, until: end + 4 * blendBar)
+            }
+            let saPlays = a.loaded.analysis.structure.map {
+                loop > 0 ? $0.looped(from: edit.entryBar, bars: loop, back: loopBack, through: edit.entryBar + edit.bars + 12) : $0
+            }
             let offset = start - gb.scaled(by: draft.rateB).downbeat(edit.cueBar)
             let map = plans[k].map
             let matched = try await rendition(k)
+            // A roll into the drop is a moment only if it isn't every
+            // transition: three without one in between, and only after a blend
+            // long enough to be one. A Drop Swap is built on it, but
+            // never right after another roll: two in a row is a routine.
+            let drops = !byHand && plan.placement.dropMoment && edit.preset != .echoOut
+                && (edit.preset == .dropSwap ? sinceDrop >= 1 : edit.bars >= dropMomentBars && sinceDrop >= 3)
+            let buildKey = BuildKey(a: a.url, b: tracks[k].url, analysisA: a.loaded.analysis, analysisB: b.analysis,
+                                    renditionA: plans[k - 1], rateB: map.rate, rampStartB: map.rampStart,
+                                    rampLengthB: map.rampLength, skip: skippedBars > 0 ? draft.skip : nil, plan: plan,
+                                    edit: draft.edit, isEdited: isEdited, entryRange: entryRange, rateA: draft.rateA,
+                                    barSeconds: blendBar, shiftA: shifts[k - 1], drops: drops)
+            if let previous, let old = previous.transitions.first(where: { $0.made?.key == buildKey }), let made = old.made,
+               previous.tracks.indices.contains(old.to) {
+                // Built before from exactly this: the same transition, at
+                // wherever it now plays.
+                let by = start - old.start
+                let was = previous.tracks[old.to]
+                var incoming = SetMix.Track(url: tracks[k].url, loaded: b, map: map, matched: matched, offset: was.offset + by,
+                                            envelopes: was.incoming.envelopes.mapValues { $0.map { shift($0, by: by) } },
+                                            rolls: was.incoming.rolls.map { $0.shifted(by: by) })
+                incoming.incoming = (incoming.envelopes, incoming.rolls)
+                for (stem, envelopes) in made.outgoing {
+                    planned[k - 1].envelopes[stem] = merge(planned[k - 1].envelopes[stem], envelopes.map { shift($0, by: by) })
+                }
+                planned[k - 1].rolls += made.outgoingRolls.map { $0.shifted(by: by) }
+                planned.append(incoming)
+                transitions.append(old.moved(by: by, from: k - 1, to: k))
+                shifts.append(old.edit.semitones)
+                sinceDrop = byHand ? (old.edit.rolls.contains { $0.seamless != true } ? 0 : sinceDrop + 1)
+                    : drops ? 0 : sinceDrop + 1
+                continue
+            }
 
             // Measured on the audio that plays: B's stretched drums against
             // A's. The glide may start a few ms off after the nudge; nobody
             // hears that, while re-stretching would cost a second render.
             var align = BeatAlign.Result(nudge: 0, lock: 1)
-            if span > 0, let drumsA = a.stems[.drums], let drumsB = matched.stems[.drums] {
+            if span > 0, let drumsA = aStems[.drums], let drumsB = matched.stems[.drums] {
                 // Where the builder hands the drums over (its `sw`).
                 let handover = TransitionBuilder.switchBar(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
-                align = BeatAlign.nudge(a: drumsA, aOffset: aOffset, b: drumsB, bOffset: offset, from: start, to: end,
+                align = BeatAlign.nudge(a: drumsA, aOffset: aPlays, b: drumsB, bOffset: offset, from: start, to: end,
                                         split: byHand ? nil : start + handover * blendBar)
             }
             let nudge = align.nudge
@@ -1529,20 +1849,31 @@ enum SetBuilder {
             // A's melody on B's melody and bass line until it has dissolved.
             // B's bass line is out before the switch: counted there, it
             // vouched for a melody it wasn't playing under.
-            if !byHand, span > 0, let otherA = a.stems[.other], let otherB = matched.stems[.other] {
+            if !byHand, span > 0, let otherA = aStems[.other], let otherB = matched.stems[.other] {
                 let bar = blendBar
                 let overlap = AutoPlacement.melodyOverlap(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
-                func heard(_ bars: Range<Int>, _ partsA: [StemAudio?], _ partsB: [StemAudio?]) -> Float? {
-                    guard !bars.isEmpty else { return nil }
-                    return Harmony.clash(partsA.compactMap { $0 }, aOffset: aOffset,
-                                         partsB.compactMap { $0 }, bOffset: offset + nudge,
-                                         from: start + Double(bars.lowerBound) * bar, to: start + Double(bars.upperBound) * bar)
+                /// How far from one scale the two are over `bars`, and how
+                /// much their notes grate (see `Harmony.roughness`).
+                func heard(_ bars: Range<Int>, _ partsA: [StemAudio?], _ partsB: [StemAudio?]) -> (clash: Float, rough: Float)? {
+                    guard !bars.isEmpty,
+                          let ca = Harmony.chroma(partsA.compactMap { $0 }, offset: aPlays,
+                                                  from: start + Double(bars.lowerBound) * bar, to: start + Double(bars.upperBound) * bar),
+                          let cb = Harmony.chroma(partsB.compactMap { $0 }, offset: offset + nudge,
+                                                  from: start + Double(bars.lowerBound) * bar, to: start + Double(bars.upperBound) * bar)
+                    else { return nil }
+                    return (Harmony.clash(ca, cb), Harmony.roughness(ca, cb))
                 }
-                let worst = [heard(overlap.before, [otherA, a.stems[.bass]], [otherB]),
-                             heard(overlap.after, [otherA], [otherB, matched.stems[.bass]])].compactMap { $0 }.max()
+                let both = [heard(overlap.before, [otherA, aStems[.bass]], [otherB]),
+                            heard(overlap.after, [otherA], [otherB, matched.stems[.bass]])].compactMap { $0 }
                 // No notes to compare: nothing to clash (as placement
                 // judges it, see `AutoPlacement.notesClash`).
-                keysClash = worst.map { $0 > Harmony.tolerance(keyA, keyB) } ?? false
+                // (How much the notes grate reads a little differently on
+                // the audio than on the song's bars, and most stretches
+                // are near the line: the blend was placed as layered or
+                // swapped by the bars, and plays as placed unless the
+                // audio is clearly over.)
+                keysClash = plan.placement.notesClash == true
+                    || both.contains { $0.clash > Harmony.tolerance(keyA, keyB) || $0.rough > Harmony.roughTolerance + 0.02 }
             } else if span == 0 {
                 // A Wash Out never plays the two songs' notes together.
                 keysClash = false
@@ -1556,14 +1887,15 @@ enum SetBuilder {
             // aren't layered. B's beat then comes in whole on the switch.
             if !byHand, span > 0, align.grooves {
                 let sw = TransitionBuilder.switchBar(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
-                func lanes(room: Double, start: Double, bar: Double) -> [Lane] {
+                func written(room: Double, start: Double, bar: Double) -> TransitionBuilder.Made {
                     TransitionBuilder.make(edit.preset, lanes: Lane.allLanes(), start: start, barSeconds: bar, bars: edit.bars,
                                            vocalBar: max(edit.bars / 2, plan.placement.vocalHandoff), keysClash: keysClash,
                                            lowSwap: plan.placement.lowSwap, drumsLayer: true, drumsLinger: align.groovesAfter,
-                                           dropMoment: plan.placement.dropMoment, room: room).lanes
+                                           dropMoment: plan.placement.dropMoment, room: room, loop: loop, loopBack: loopBack)
                 }
+                func lanes(room: Double, start: Double, bar: Double) -> [Lane] { written(room: room, start: start, bar: bar).lanes }
                 var room = 0.0
-                if edit.preset == .stemSwap, let sa = a.loaded.analysis.structure, let sb = b.analysis.structure,
+                if edit.preset == .stemSwap, let sa = saPlays, let sb = b.analysis.structure,
                    let pa = AutoPlacement.powers(sa, trim: Float(MixMath.trimDB(a.loaded.analysis))),
                    let pb = AutoPlacement.powers(sb, trim: Float(MixMath.trimDB(b.analysis))) {
                     let q = max(1, edit.bars / 4)
@@ -1573,7 +1905,8 @@ enum SetBuilder {
                 var outgoing = a
                 var incoming = SetMix.Track(url: tracks[k].url, loaded: b, map: map, matched: matched, offset: offset + nudge,
                                             envelopes: [:])
-                for lane in lanes(room: room, start: native, bar: blendBar) where lane.stem == .drums {
+                let trial = written(room: room, start: native, bar: blendBar)
+                for lane in trial.lanes where lane.stem == .drums {
                     let shifted = lane.envelopes.map { shift($0, by: delta) }
                     if lane.side == .a {
                         outgoing.envelopes[.drums] = merge(outgoing.envelopes[.drums], shifted)
@@ -1581,8 +1914,12 @@ enum SetBuilder {
                         incoming.envelopes[.drums] = shifted
                     }
                 }
+                // (A's loop: its drums as they'll really play.)
+                for roll in trial.rolls where roll.side == .a && roll.seamless == true {
+                    outgoing.rolls.append(placed(roll, by: delta, on: a))
+                }
                 let pair = SetMix(tracks: [outgoing, incoming], transitions: [], length: end + 1)
-                let frames = Int(min(sw, Double(edit.bars)) * blendBar * sr)
+                let frames = Int(Double(edit.bars) * blendBar * sr), swap = min(frames, Int(sw * blendBar * sr))
                 func drums(_ track: Int) -> [Float] {
                     let renderer = MixRenderer(snapshot: pair.snapshot(masterGain: 1) { i, stem in i == track && stem == .drums })
                     renderer.setPositionImmediately(Int(start * sr))
@@ -1592,9 +1929,33 @@ enum SetBuilder {
                     return l
                 }
                 if frames > 0 {
-                    let lags = BeatAlign.heardLags(a: drums(0), b: drums(1), window: 2 * blendBar)
-                    if lags.count >= 2, BeatAlign.flam(lags) > 0.010 { align.topsSplit = true }
+                    let da = drums(0), db = drums(1)
+                    // One stretch of the two hitting clearly apart is
+                    // heard (there are only two or four to a blend).
+                    let before = BeatAlign.heardLags(a: Array(da[0..<swap]), b: Array(db[0..<swap]), window: 2 * blendBar)
+                    if !before.isEmpty, BeatAlign.flam(before) > 0.010 { align.topsSplit = true }
+                    // The same for A's drums playing on under B's after the
+                    // swap: where they flam there, they stop on it.
+                    let after = BeatAlign.heardLags(a: Array(da[swap...]), b: Array(db[swap...]), window: 2 * blendBar)
+                    if !after.isEmpty, BeatAlign.flam(after) > 0.010 { align.lingerSplit = true }
                 }
+            }
+            /// The sixteenth of each song that plays at master `t`, with
+            /// its lines (see `VocalPhrasing.cut`): the blend's bars are
+            /// the songs' own; a Wash Out's B plays at its own tempo.
+            func linesA(_ t: Double) -> (song: TrackStructure, slot: Int)? {
+                a.loaded.analysis.structure.map {
+                    ($0, VocalPhrasing.slots * edit.entryBar + Int(((t - start) / blendBar * Double(VocalPhrasing.slots)).rounded()))
+                }
+            }
+            func linesB(_ t: Double) -> (song: TrackStructure, slot: Int)? {
+                let bar = span > 0 ? blendBar : gb.barSeconds
+                return b.analysis.structure.map {
+                    ($0, VocalPhrasing.slots * edit.cueBar + Int(((t - start) / bar * Double(VocalPhrasing.slots)).rounded()))
+                }
+            }
+            if !byHand, span > 0, plan.drumsLock, !align.grooves {
+                broken.insert(PairKey(from: a.url, to: tracks[k].url))
             }
             var vocalIn: Double?, vocalOut: Double?
             var mashup = false
@@ -1610,14 +1971,14 @@ enum SetBuilder {
                 // open, or with it joining on its next word.
                 if let vocalsA = a.stems[.vocals], let ref = VocalPhrasing.reference(a.loaded.analysis.structure),
                    let cut = VocalPhrasing.cut(vocalsA, offset: aOffset, reference: ref, opening: false, target: start - blendBar,
-                                               earliest: start - 3 * blendBar, latest: start, bar: blendBar) {
+                                               earliest: start - 3 * blendBar, latest: start, bar: blendBar, lines: linesA(start - blendBar)) {
                     vocalOut = (cut.time - start) / blendBar
                     vocalOutKind = cut.kind.rawValue
                 }
                 if let vocalsB = matched.stems[.vocals], let ref = VocalPhrasing.reference(b.analysis.structure),
                    let cut = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: ref, opening: true, target: start,
                                                earliest: start, latest: start + AutoPlacement.vocalWait * blendBar,
-                                               bar: blendBar) {
+                                               bar: blendBar, lines: linesB(start)) {
                     vocalIn = (cut.time - start) / blendBar
                     vocalInKind = cut.kind == .line ? "breath" : "word"
                 }
@@ -1627,6 +1988,17 @@ enum SetBuilder {
                 let v = min(n, max(n / 2, Double(plan.placement.vocalHandoff)))
                 let sw = TransitionBuilder.switchBar(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
                 let refA = VocalPhrasing.reference(a.loaded.analysis.structure)
+                if loop > 0 {
+                    // A's voice goes as its beat starts to loop: on the last
+                    // word of the part that ends there (or on the one).
+                    let cut = refA.flatMap {
+                        VocalPhrasing.cut(vocalsA, offset: aOffset, reference: $0, opening: false, target: start,
+                                          earliest: start - AutoPlacement.loopExit.before * bar,
+                                          latest: start + AutoPlacement.loopExit.after * bar, bar: bar, lines: linesA(start))
+                    }
+                    vocalOut = cut.map { ($0.time - start) / bar } ?? 0
+                    vocalOutKind = cut?.kind.rawValue
+                }
                 // A mashup moment: B's vocal sings over A's beat from early
                 // in the blend, where placement found it pays off. Only if
                 // it can't go wrong as it plays: the grooves lock, B's line
@@ -1635,21 +2007,21 @@ enum SetBuilder {
                 // B's voice has to sit on A's chords, as they play there.
                 if plan.placement.mashup, edit.preset == .stemSwap, !keysClash, align.grooves,
                    let refB = VocalPhrasing.reference(b.analysis.structure),
-                   Harmony.fits([a.stems[.other], a.stems[.bass]].compactMap { $0 }, aOffset: aOffset,
+                   Harmony.fits([aStems[.other], aStems[.bass]].compactMap { $0 }, aOffset: aPlays,
                                 [vocalsB], bOffset: offset + nudge,
                                 from: start + n / 4 * bar, to: start + n / 2 * bar) {
                     let window = TransitionBuilder.mashupWindow(bars: edit.bars)
                     if let entry = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: refB, opening: true,
                                                      target: start + window.earliest * bar,
                                                      earliest: start + window.earliest * bar,
-                                                     latest: start + window.latest * bar, bar: bar), entry.kind == .line {
+                                                     latest: start + window.latest * bar, bar: bar, lines: linesB(start + window.earliest * bar)), entry.kind == .line {
                         let tin = entry.time
-                        if let refA {
+                        if let refA, loop == 0 {
                             // A's line has to end right before B's starts:
                             // cutting it bars early to fit B in is a hole,
                             // not a mashup.
                             if let exit = VocalPhrasing.cut(vocalsA, offset: aOffset, reference: refA, opening: false, target: tin,
-                                                            earliest: tin - bar, latest: tin, bar: bar), exit.kind == .line {
+                                                            earliest: tin - bar, latest: tin, bar: bar, lines: linesA(tin)), exit.kind == .line {
                                 vocalIn = (tin - start) / bar
                                 vocalOut = (exit.time - start) / bar
                                 vocalOutKind = exit.kind.rawValue
@@ -1679,7 +2051,7 @@ enum SetBuilder {
                 /// a beat it grooves with: a voice phrased against another
                 /// groove sounds off time.
                 func carries(until: Double) -> Bool {
-                    !keysClash && align.grooves && until > sw
+                    loop == 0 && !keysClash && align.grooves && until > sw
                         && Harmony.fits([vocalsA], aOffset: aOffset,
                                         [matched.stems[.other], matched.stems[.bass]].compactMap { $0 },
                                         bOffset: offset + nudge, from: start + sw * bar, to: start + min(until, n) * bar)
@@ -1690,22 +2062,26 @@ enum SetBuilder {
                         // bass line: only where the grooves lock and it sits
                         // on A's chords (as a mashup must). Otherwise, and
                         // on clashing keys, it waits for the swap.
-                        let overA = !keysClash && align.grooves && sw > n / 2
-                            && Harmony.fits([a.stems[.other], a.stems[.bass]].compactMap { $0 }, aOffset: aOffset,
-                                            [vocalsB], bOffset: offset + nudge,
-                                            from: start + n / 2 * bar, to: start + sw * bar)
+                        func overA(from first: Double) -> Bool {
+                            !keysClash && align.grooves && sw > first
+                                && Harmony.fits([aStems[.other], aStems[.bass]].compactMap { $0 }, aOffset: aPlays,
+                                                [vocalsB], bOffset: offset + nudge,
+                                                from: start + first * bar, to: start + sw * bar)
+                        }
                         // Where B takes the low end before half-way (A's own
                         // beat left early), B has the floor from there: its
                         // voice may come in on its own beat.
-                        let first = sw < n / 2 ? sw : overA ? n / 2 : max(n / 2, sw)
+                        // (Over A's beat looped, with A's voice gone, as
+                        // early as its melody: a quarter in.)
+                        let first = sw < n / 2 ? sw : loop > 0 && n >= 16 && overA(from: n / 4) ? n / 4 : overA(from: n / 2) ? n / 2
+                            : max(n / 2, sw)
                         vocalFloor = first
                         // Aim for the planned handoff while A still sings
                         // there, but never past the swap: A's voice leaves
                         // there (bar a cappella), so B's arrives there too.
                         // Where A has nothing to sing (or has had to leave on
                         // an early swap), B's next line from its floor.
-                        let sa = a.loaded.analysis.structure
-                        let aSings = sa?.isActive(.vocals, bar: edit.entryBar + Int(first)) ?? true
+                        let aSings = saPlays?.isActive(.vocals, bar: edit.entryBar + Int(first)) ?? true
                         let aim = aSings && first >= n / 2 ? min(max(v, first), max(first, sw)) : first
                         // On the breath before a line or, failing that,
                         // in the gap before a word, as near as it comes to
@@ -1720,7 +2096,7 @@ enum SetBuilder {
                         if let cut = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: ref, opening: true,
                                                        target: start + aim * bar,
                                                        earliest: start + max(first, aim - (keysClash ? 0 : 0.5)) * bar,
-                                                       latest: start + (aim + AutoPlacement.vocalWait) * bar, bar: bar) {
+                                                       latest: start + (aim + AutoPlacement.vocalWait) * bar, bar: bar, lines: linesB(start + aim * bar)) {
                             vocalIn = (cut.time - start) / bar
                             vocalInKind = cut.kind == .line ? "breath" : "word"
                         } else {
@@ -1758,12 +2134,12 @@ enum SetBuilder {
                     // (At the end of the phrase it's in rather than a bar or two
                     // into the next: see `AutoPlacement.phraseEnd`.)
                     let target = acappella ? untilB : AutoPlacement.phraseEnd(before: min(untilB, sw))
-                    if let refA {
+                    if let refA, loop == 0 {
                         let after = acappella || keysClash ? 0 : target >= sw ? 0.5 : 2
                         let cut = VocalPhrasing.cut(vocalsA, offset: aOffset, reference: refA, opening: false,
                                                     target: start + target * bar,
                                                     earliest: start + (target - min(1, target)) * bar,
-                                                    latest: start + min(target + after, max(target, untilB), n) * bar, bar: bar)
+                                                    latest: start + min(target + after, max(target, untilB), n) * bar, bar: bar, lines: linesA(start + target * bar))
                         // (No cut to be found: on the nearest downbeat.)
                         vocalOut = cut.map { ($0.time - start) / bar } ?? min(max(target.rounded(), 0), max(target, untilB), n)
                         vocalOutKind = cut?.kind.rawValue
@@ -1777,16 +2153,11 @@ enum SetBuilder {
                 // Grooves that won't lock (a swung beat against a straight
                 // one) aren't layered: A's beat plays on and B's drums come
                 // in whole on the swap.
-                // A roll into the drop is a moment only if it isn't every
-                // transition: three without one in between, and only after a blend
-                // long enough to be one. A Drop Swap is built on it, but
-                // never right after another roll: two in a row is a routine.
-                let dropMoment = plan.placement.dropMoment && edit.preset != .echoOut
-                    && (edit.preset == .dropSwap ? sinceDrop >= 1 : edit.bars >= dropMomentBars && sinceDrop >= 3)
+                let dropMoment = drops
                 sinceDrop = dropMoment ? 0 : sinceDrop + 1
                 let switchBar = TransitionBuilder.switchBar(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
-                let rollBeat = dropMoment ? a.stems[.drums].flatMap {
-                    BeatAlign.snareBeat($0, offset: aOffset, barStart: start + (switchBar - 1) * blendBar,
+                let rollBeat = dropMoment ? aStems[.drums].flatMap {
+                    BeatAlign.snareBeat($0, offset: aPlays, barStart: start + (switchBar - 1) * blendBar,
                                         beat: blendBar / 4)
                 } : nil
                 func make(outFade: Double, inFade: Double, room: Double, start: Double? = nil,
@@ -1800,13 +2171,14 @@ enum SetBuilder {
                                            vocalIn: vocalIn, vocalOut: vocalOut,
                                            mashup: mashup, dropMoment: dropMoment, rollBeat: rollBeat,
                                            vocalOutFade: outFade, vocalInFade: inFade, room: room,
-                                           carry: plan.placement.carry && !keysClash && !mashup, under: under)
+                                           carry: (plan.placement.carry || loop > 0) && !keysClash && !mashup, under: under,
+                                           loop: loop, loopBack: loopBack)
                 }
                 // B's melody plays under A's voice for as long as A sings,
                 // from the two songs' levels there, and steps up as the
                 // voice leaves.
                 var under = 0.0
-                if edit.preset == .stemSwap, !keysClash, !mashup, let sa = a.loaded.analysis.structure,
+                if edit.preset == .stemSwap, !keysClash, !mashup, let sa = saPlays,
                    let sb = b.analysis.structure,
                    let pa = AutoPlacement.powers(sa, trim: Float(MixMath.trimDB(a.loaded.analysis))),
                    let pb = AutoPlacement.powers(sb, trim: Float(MixMath.trimDB(b.analysis))) {
@@ -1816,7 +2188,7 @@ enum SetBuilder {
                 // Room for B: A's EQ gives way as much as B's parts need to
                 // be heard, judged on the blend as it will play (B through
                 // its entry filters, its drums in or not, A's voice on).
-                if edit.preset == .stemSwap, let sa = a.loaded.analysis.structure, let sb = b.analysis.structure,
+                if edit.preset == .stemSwap, let sa = saPlays, let sb = b.analysis.structure,
                    let pa = AutoPlacement.powers(sa, trim: Float(MixMath.trimDB(a.loaded.analysis))),
                    let pb = AutoPlacement.powers(sb, trim: Float(MixMath.trimDB(b.analysis))) {
                     let q = max(1, edit.bars / 4)
@@ -1862,32 +2234,35 @@ enum SetBuilder {
                 if dropMoment { payoff.append("roll into the drop") }
                 if dropMoment { dropAt = start + switchBar * blendBar }
                 if plan.placement.carry && !keysClash && !mashup { payoff.append("A's beat carries B in") }
+                if loop > 0 { payoff.append("A's beat loops under B") }
             } else {
                 // A hand-shaped transition's roll counts too: the next
                 // automatic one isn't a second in a row.
-                sinceDrop = edit.rolls.isEmpty ? sinceDrop + 1 : 0
+                sinceDrop = edit.rolls.contains { $0.seamless != true } ? 0 : sinceDrop + 1
             }
             var incoming = SetMix.Track(url: tracks[k].url, loaded: b, map: map, matched: matched, offset: offset + nudge,
                                         envelopes: [:])
+            // (What it writes on the outgoing song is kept too, for the
+            // next build to take over: see `Transition.made`.)
+            var outgoing: [StemKind: [Envelope]] = [:], outgoingRolls: [Roll] = []
             for lane in edit.lanes {
                 let shifted = lane.envelopes.map { shift($0, by: delta) }
                 if lane.side == .a {
                     planned[k - 1].envelopes[lane.stem] = merge(planned[k - 1].envelopes[lane.stem], shifted)
+                    outgoing[lane.stem] = shifted
                 } else {
                     incoming.envelopes[lane.stem] = shifted
                 }
             }
             for roll in edit.rolls {
                 if roll.side == .a {
-                    // Past a jump the stems sound further on than set time
-                    // says; the roll's loop has to be found there too.
-                    var shifted = roll.shifted(by: delta)
-                    if let jump = a.skip, let at = a.skipAt, shifted.start >= at { shifted.anchor += jump.to - jump.from }
-                    planned[k - 1].rolls.append(shifted)
+                    planned[k - 1].rolls.append(placed(roll, by: delta, on: a))
+                    outgoingRolls.append(placed(roll, by: delta, on: a))
                 } else {
                     incoming.rolls.append(roll.shifted(by: delta))
                 }
             }
+            incoming.incoming = (incoming.envelopes, incoming.rolls)
             let settled = map.hasGlide ? offset + nudge + map.rampEnd / sr : end
             planned.append(incoming)
             transitions.append(.init(from: k - 1, to: k, plan: plan, edit: edit, isEdited: isEdited, start: start,
@@ -1898,8 +2273,20 @@ enum SetBuilder {
                                      vocalIn: vocalIn.map { start + $0 * blendBar }, payoff: payoff, dropAt: dropAt,
                                      vocalInKind: vocalInKind, vocalOutKind: vocalOutKind,
                                      skippedBars: skippedBars,
-                                     melodiesClash: keysClash, room: room))
+                                     melodiesClash: keysClash, room: room, loopBars: loop,
+                                     made: .init(key: buildKey, outgoing: outgoing, outgoingRolls: outgoingRolls)))
             shifts.append(edit.semitones)
+        }
+
+        // A blend placed for B's drums building in under A's that then
+        // don't (the two grooves don't sit on the audio as it plays) is a
+        // blend placed for something else: both songs were to be heard
+        // where now one is. Those pairs are planned again as what they
+        // are, and the rest of the set is taken over as built.
+        if !broken.isSubset(of: unlocked) {
+            return try await build(tracks, edits: edits, reuse: renditions,
+                                   previous: SetMix(tracks: planned, transitions: transitions, length: 0), exits: exits,
+                                   unlocked: unlocked.union(broken), processor: processor, progress: progress)
         }
 
         // The last record plays out to the end of its music, fading over the
@@ -1932,6 +2319,40 @@ enum SetBuilder {
         guard from < end else { return }
         volume.insert(AutomationPoint(time: from, value: volume.value(at: from, default: 1), curve: .logarithmic))
         volume.insert(AutomationPoint(time: end, value: 0))
+    }
+
+    /// A roll of the outgoing track's, moved from the editor's clock to the
+    /// set's. Past a jump the stems sound further on than set time says;
+    /// the roll's loop has to be found there too.
+    private static func placed(_ roll: Roll, by delta: Double, on track: SetMix.Track) -> Roll {
+        var shifted = roll.shifted(by: delta)
+        if let jump = track.skip, let at = track.skipAt, shifted.start >= at { shifted.anchor += jump.to - jump.from }
+        return shifted
+    }
+
+    /// `stems` (drums, bass line, melody) as they sound when they loop from
+    /// master `from` on, repeating the `length` seconds that start `back`
+    /// seconds before it, up to master `until`: held in memory, frame 0 at
+    /// master `from - back`. For measuring what will play; the mix itself
+    /// loops the stems in place (see `Roll.seamless`).
+    /// - Parameter offset: master time of the stems' own frame 0.
+    private static func looped(_ stems: [StemKind: StemAudio], offset: Double, from: Double, back: Double,
+                               length: Double, until: Double) -> [StemKind: StemAudio] {
+        let sr = AudioIO.sampleRate
+        let source = Int(((from - back - offset) * sr).rounded()), lead = Int((back * sr).rounded())
+        let period = max(1, Int((length * sr).rounded())), count = lead + max(0, Int((until - from) * sr))
+        var out = stems
+        for stem in [StemKind.drums, .bass, .other] {
+            guard let audio = stems[stem] else { continue }
+            func copy(_ channel: MappedChannel) -> MappedChannel {
+                MappedChannel(samples: (0..<count).map { i in
+                    let j = source + (i < lead ? i : (i - lead) % period)
+                    return j >= 0 && j < channel.count ? channel.pointer[j] : 0
+                })
+            }
+            out[stem] = StemAudio(left: copy(audio.left), right: copy(audio.right))
+        }
+        return out
     }
 
     private static func shift(_ envelope: Envelope, by delta: Double) -> Envelope {

@@ -94,6 +94,13 @@ struct Envelope: Codable, Equatable {
 
     mutating func removeAll() { points.removeAll() }
 
+    /// The same automation `seconds` later.
+    func shifted(by seconds: Double) -> Envelope {
+        var moved = self
+        for i in moved.points.indices { moved.points[i].time += seconds }
+        return moved
+    }
+
     /// Removes points inside `range` (inclusive), used when a preset
     /// rewrites a region.
     mutating func clear(_ range: ClosedRange<Double>) {
@@ -238,6 +245,12 @@ struct Roll: Codable, Equatable {
     var end: Double
     var anchor: Double
     var length: Double
+    /// A loop rather than a stutter: bars of the stem played over and over
+    /// as a bed, each repeat crossfaded out of where the last would have
+    /// carried on, so the seam isn't heard. (A stutter's repeats are meant
+    /// to be heard: each starts from nothing.) Optional so rolls saved
+    /// before loops existed still decode.
+    var seamless: Bool? = nil
 
     func shifted(by delta: Double) -> Roll {
         var r = self

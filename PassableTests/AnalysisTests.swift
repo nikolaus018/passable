@@ -141,4 +141,83 @@ final class KeyLimitTests: XCTestCase {
         // F minor (4A) is already a neighbour of 3A: no shift needed.
         XCTAssertEqual(MusicalKey(tonicPitchClass: 5, isMajor: false).harmonicShift(toMatch: aSharpMinor, limit: 2), 0)
     }
+
+    /// A drummer's song gets its bars one by one; a sequenced one, and one
+    /// the tracker merely loses for a few bars, keeps its constant grid.
+    func testASongThatWandersGetsItsOwnBars() {
+        let grid = BeatGrid(bpm: 120, firstDownbeat: 0.1)
+        // Beats that breathe: up to 150 ms off the grid, slowly.
+        let wandering: [Double] = (0..<400).map { i in
+            let drift: Double = 0.15 * sin(Double(i) / 25)
+            return 0.1 + 0.5 * Double(i) + drift
+        }
+        let heard = BeatTracker.Beats(beats: wandering, downbeats: stride(from: 0, to: 400, by: 4).map { wandering[$0] })
+        let bars = try! XCTUnwrap(Steadiness.downbeats(grid: grid, heard: heard, duration: 200.5, attacks: nil))
+        XCTAssertEqual(bars[0], wandering[0], accuracy: 1e-9)
+        XCTAssertEqual(bars[40], wandering[160], accuracy: 1e-9)
+        XCTAssertGreaterThanOrEqual(bars.last!, 200.5)
+        var own = grid
+        own.downbeats = bars
+        XCTAssertFalse(own.isSteady)
+        XCTAssertEqual(own.downbeat(40), wandering[160], accuracy: 1e-9)
+        let halfway: Double = wandering[160] + (wandering[164] - wandering[160]) / 2
+        XCTAssertEqual(own.beat(162), halfway, accuracy: 1e-9)
+        XCTAssertEqual(own.bars(at: own.time(bars: 17.25)), 17.25, accuracy: 1e-9)
+        XCTAssertEqual(own.barCount(duration: 200.5), Int(own.bars(at: 200.5)))
+        // On the grid give or take the tracker's frames: steady.
+        let steady: [Double] = (0..<400).map { i in
+            let jitter: Double = i % 3 == 0 ? 0.015 : -0.01
+            return 0.1 + 0.5 * Double(i) + jitter
+        }
+        XCTAssertNil(Steadiness.downbeats(grid: grid, heard: .init(beats: steady, downbeats: []), duration: 200.5, attacks: nil))
+        // Half a beat off for sixteen bars (another pulse heard in a break): still steady.
+        let lost: [Double] = (0..<400).map { i in
+            let off: Double = (100..<164).contains(i) ? 0.25 : 0
+            return 0.1 + 0.5 * Double(i) + off
+        }
+        XCTAssertNil(Steadiness.downbeats(grid: grid, heard: .init(beats: lost, downbeats: []), duration: 200.5, attacks: nil))
+        // Counted in double time, on the grid's eighths: steady.
+        let double: [Double] = (0..<800).map { 0.1 + 0.25 * Double($0) }
+        XCTAssertNil(Steadiness.downbeats(grid: grid, heard: .init(beats: double, downbeats: []), duration: 200.5, attacks: nil))
+        // A tempo that jumps by a sixth is no drummer's: not beat-matched,
+        // but its bars stay the grid's.
+        let jumping: [Double] = (0..<400).reduce(into: [0.1]) { beats, i in beats.append(beats[i] + ((i / 64) % 2 == 0 ? 0.5 : 0.42)) }
+        let kept = try! XCTUnwrap(Steadiness.downbeats(grid: grid, heard: .init(beats: jumping, downbeats: []), duration: 200.5,
+                                                       attacks: nil))
+        XCTAssertEqual(kept[10], grid.downbeat(10), accuracy: 1e-9)
+        XCTAssertTrue(grid.isSteady)
+        // Such a song is never beat-matched.
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        let a = TrackAnalysis(grid: grid, key: c, duration: 200, structure: nil, version: TrackAnalysis.currentVersion)
+        let b = TrackAnalysis(grid: own, key: c, duration: 200, structure: nil, version: TrackAnalysis.currentVersion)
+        XCTAssertEqual(MixMath.preset(a, a), .stemSwap)
+        XCTAssertEqual(MixMath.preset(a, b), .echoOut)
+        XCTAssertEqual(MixMath.preset(b, a), .echoOut)
+    }
+
+    /// A steady song with a bar of two beats in it counts its bars from
+    /// there as the song does, if the harmony bears the tracker out.
+    func testAnOddBarMovesTheOnes() throws {
+        let grid = BeatGrid(bpm: 120, firstDownbeat: 0)
+        // Ones every four beats for twenty bars, then two beats on.
+        let ones: [Int] = (0..<20).map { 4 * $0 } + (0..<20).map { 82 + 4 * $0 }
+        let heard = BeatTracker.Beats(beats: (0..<170).map { 0.5 * Double($0) }, downbeats: ones.map { 0.5 * Double($0) })
+        func turns(_ i: Int) -> Float? { ones.contains(i) ? 1 : 0.2 }
+        let bars = try XCTUnwrap(Steadiness.oddBars(grid: grid, heard: heard, duration: 85, turns: turns))
+        XCTAssertTrue(bars.contains(38) && bars.contains(40) && bars.contains(41) && bars.contains(43))
+        XCTAssertFalse(bars.contains(42), "the old count runs on")
+        var own = grid
+        (own.downbeats, own.wanders) = (bars, false)
+        XCTAssertTrue(own.isSteady, "its beats are still the grid's")
+        XCTAssertEqual(own.beat(83), 41.5)
+        XCTAssertEqual(own.downbeat(21), 41)
+        XCTAssertTrue(own.isRegular(0..<20))
+        XCTAssertFalse(own.isRegular(18..<22))
+        // The harmony doesn't say so: the tracker's slip, not the song's.
+        XCTAssertNil(Steadiness.oddBars(grid: grid, heard: heard, duration: 85, turns: { _ in 0.5 }))
+        // Nor do a few bars counted otherwise.
+        let blip: [Int] = (0..<40).map { 4 * $0 + ((10..<14).contains($0) ? 2 : 0) }
+        XCTAssertNil(Steadiness.oddBars(grid: grid, heard: .init(beats: heard.beats, downbeats: blip.map { 0.5 * Double($0) }),
+                                        duration: 85, turns: { _ in 1 }))
+    }
 }

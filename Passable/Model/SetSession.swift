@@ -91,12 +91,16 @@ final class SetSession: ObservableObject {
 
     // MARK: - Tracks
 
-    func add(_ urls: [URL]) {
+    /// - Parameter asListed: the songs keep the order they come in (a
+    ///   measurement comparing the same pairs from run to run).
+    func add(_ urls: [URL], asListed: Bool = false) {
         for url in urls where !items.contains(where: { $0.url == url }) {
             let item = Item(url: url)
             items.append(item)
-            unplaced.insert(item.id)
-            needsOrdering = true
+            if !asListed {
+                unplaced.insert(item.id)
+                needsOrdering = true
+            }
             load(item.id)
         }
         invalidate()
@@ -170,11 +174,134 @@ final class SetSession: ObservableObject {
         return true
     }
 
+    // MARK: - Playing the room
+
+    /// When a song leaves, where that was said while it played (see
+    /// `mixNow` and `hold`): kept for as long as the two songs stay
+    /// neighbours, so what has played stays as it played.
+    private var exits: [PairKey: SetBuilder.Exit] = [:]
+    /// The change the build under way is for: what the pair's exit was
+    /// before, how often bringing the next song in may still be tried a
+    /// phrase later, and which of the two it is.
+    private var adjusting: (key: PairKey, was: SetBuilder.Exit?, tries: Int, now: Bool)?
+    /// The set as last built, for the next build to take over what holds.
+    private var lastBuilt: SetMix?
+    /// What came of the last such change, in words.
+    @Published private(set) var liveNote: String?
+    /// Seconds a change needs before the transition it moves: the set is
+    /// planned and the next song rendered at the blend's tempo meanwhile.
+    private static let liveLead = 16.0
+
+    /// The way out of the song that's playing, while it can still be
+    /// changed: an automatic one that hasn't begun.
+    private var upcoming: (transition: SetMix.Transition, key: PairKey)? {
+        guard let mix, isReady, adjusting == nil, placing == nil, let i = currentIndex,
+              let t = mix.transitions.first(where: { $0.from == i }), !(t.isEdited && t.edit.byHand),
+              transport.seconds < t.begins - Self.liveLead else { return nil }
+        return (t, PairKey(from: mix.tracks[t.from].url, to: mix.tracks[t.to].url))
+    }
+
+    /// Whether `mixNow` and `hold` have anything to change.
+    var canPlayTheRoom: Bool { upcoming != nil }
+
+    /// The bars a jump leaves out of a track (see `SetMix.Track.skip`).
+    private func skippedBars(_ track: SetMix.Track) -> Range<Int>? {
+        let grid = track.loaded.analysis.grid
+        return track.skip.map {
+            Int(grid.bars(at: $0.from).rounded())..<Int(grid.bars(at: $0.to).rounded())
+        }
+    }
+
+    /// Brings the next song in now: on the first phrase of the playing
+    /// song that's far enough ahead to get the set ready for (see
+    /// `liveLead`), instead of where it was planned. What a DJ does when
+    /// the floor has had enough of a record. The music never stops for it.
+    func mixNow() {
+        guard let (t, key) = upcoming else { return }
+        bringIn(t, key, tries: 2)
+    }
+
+    private func bringIn(_ t: SetMix.Transition, _ key: PairKey, tries: Int) {
+        guard let mix, let s = mix.tracks[t.from].loaded.analysis.structure else { return }
+        let track = mix.tracks[t.from], grid = track.loaded.analysis.grid
+        let starts = AutoPlacement.phrases(s, boundary: s.boundaryStrength()).starts
+        let skipped = skippedBars(track), now = transport.seconds
+        guard let bar = starts.indices.first(where: { g in
+            starts[g] && g < t.edit.entryBar && !(skipped?.contains(g) ?? false)
+                && track.master(grid.downbeat(g)) >= now + Self.liveLead
+        }) else {
+            say("“\(SongTitle.of(key.to))” is about to come in as it is")
+            return
+        }
+        adjusting = (key, exits[key], tries, true)
+        exits[key] = .init(range: bar...bar, skip: skipped)
+        say("Bringing in “\(SongTitle.of(key.to))”…", lasting: false)
+        rebuild()
+    }
+
+    /// Keeps the song that's playing for longer: its way out starts at
+    /// least sixteen bars later than planned (wherever suits from there),
+    /// if it has that much left to play. What a DJ does when the floor
+    /// loves a record. Again for longer still.
+    func hold() {
+        guard let (t, key) = upcoming, let mix else { return }
+        let track = mix.tracks[t.from], analysis = track.loaded.analysis
+        let later = t.edit.entryBar + 16
+        guard later <= analysis.grid.barCount(duration: analysis.duration) - 4 else {
+            say("“\(SongTitle.of(key.from))” has nothing more to play")
+            return
+        }
+        adjusting = (key, exits[key], 0, false)
+        exits[key] = .init(range: later...Int.max, skip: skippedBars(track))
+        say("Holding “\(SongTitle.of(key.from))”…", lasting: false)
+        rebuild()
+    }
+
+    /// Whether the mix built for a change of exit (if that's what it was
+    /// built for) can take over from `old`: the music hasn't caught up
+    /// with what it changed, and it changed something. If not, the change
+    /// is undone (or, bringing the next song in, tried a phrase later) and
+    /// the set plays on as it was.
+    private func adjusted(_ old: SetMix, into new: SetMix) -> Bool {
+        guard let change = adjusting else { return true }
+        adjusting = nil
+        let was = old.transitions.first { old.tracks[$0.from].url == change.key.from && old.tracks[$0.to].url == change.key.to }
+        let now = new.transitions.first { new.tracks[$0.from].url == change.key.from && new.tracks[$0.to].url == change.key.to }
+        let moved = was.flatMap { w in now.map { change.now ? $0.start < w.start - 1 : $0.start > w.start + 1 } } ?? false
+        if moved, continues(old, into: new) {
+            say(change.now ? "“\(SongTitle.of(change.key.to))” comes in at \(Theme.time(now?.begins ?? 0))"
+                : "“\(SongTitle.of(change.key.from))” plays until \(Theme.time(now?.begins ?? 0))")
+            return true
+        }
+        exits[change.key] = change.was
+        buildStatus = nil
+        if moved, change.now, change.tries > 0, let (t, key) = upcoming {
+            bringIn(t, key, tries: change.tries - 1)
+        } else {
+            say(moved ? "Too late: “\(SongTitle.of(change.key.to))” is on its way in"
+                : change.now ? "“\(SongTitle.of(change.key.to))” can't come in sooner"
+                : "“\(SongTitle.of(change.key.from))” has nothing more to play")
+        }
+        return false
+    }
+
+    private var noteTask: Task<Void, Never>?
+
+    private func say(_ note: String, lasting: Bool = true) {
+        liveNote = note
+        noteTask?.cancel()
+        guard lasting else { return }
+        noteTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if !Task.isCancelled { self?.liveNote = nil }
+        }
+    }
+
     /// Whether `b` can follow `a` on a shared beat: anything but a pair
     /// whose tempos are too far apart to match.
     private func mixes(_ a: TrackAnalysis?, _ b: TrackAnalysis) -> Bool {
         guard let a else { return true }
-        return MixMath.recommendedPreset(a: a.grid.bpm, b: b.grid.bpm) != .echoOut
+        return MixMath.preset(a, b) != .echoOut
     }
 
     /// The first place a requested song may go: after the song that's
@@ -216,7 +343,9 @@ final class SetSession: ObservableObject {
     /// over to it mid-song and nobody hears it.
     private func continues(_ old: SetMix, into new: SetMix) -> Bool {
         let now = transport.seconds, ahead = now + 5
-        for (k, t) in new.transitions.enumerated() where t.cue <= ahead {
+        // (A transition touches nothing before the two bars ahead of where
+        // it begins: the outgoing voice's echo opens there at the earliest.)
+        for (k, t) in new.transitions.enumerated() where t.begins - 2 * t.barSeconds <= ahead {
             guard k < old.transitions.count else { return false }
             let was = old.transitions[k]
             guard old.tracks[was.from].url == new.tracks[t.from].url, old.tracks[was.to].url == new.tracks[t.to].url,
@@ -378,6 +507,9 @@ final class SetSession: ObservableObject {
 
     /// The song list changed: the old mix no longer applies.
     private func invalidate() {
+        // (A Hold or Mix Now was said of the set as it was.)
+        adjusting = nil
+        exits = [:]
         orderTask?.cancel()
         pause()
         mix = nil
@@ -400,14 +532,19 @@ final class SetSession: ObservableObject {
         let tracks = items.compactMap { item in item.loaded.map { (url: item.url, loaded: $0) } }
         var reuse: [URL: TrackProcessor.Matched] = [:]
         for t in mix?.tracks ?? [] { if let m = t.matched { reuse[t.url] = m } }
-        let edits = self.edits
+        let edits = self.edits, exits = self.exits
+        // (Whatever of the last build still holds is taken over from it.)
+        let previous = mix ?? lastBuilt
         if mix == nil { buildStatus = "Planning transitions…" }
         let processor = self.processor
+        // A change made while the music plays is wanted now, not after a pause.
+        let wait: UInt64 = adjusting == nil ? 250_000_000 : 0
         buildTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            try? await Task.sleep(nanoseconds: wait)
             guard !Task.isCancelled else { return }
             do {
-                let mix = try await SetBuilder.build(tracks, edits: edits, reuse: reuse, processor: processor) { text in
+                let mix = try await SetBuilder.build(tracks, edits: edits, reuse: reuse, previous: previous, exits: exits,
+                                                     processor: processor) { text in
                     Task { @MainActor in if self?.mix == nil { self?.buildStatus = text } }
                 }
                 guard !Task.isCancelled, let self else { return }
@@ -415,6 +552,10 @@ final class SetSession: ObservableObject {
                 // has moved on into what it changed, it goes a song later.
                 if self.placing != nil, let old = self.mix, !self.continues(old, into: mix), self.moveRequestLater() { return }
                 self.placing = nil
+                // The same for a change of when the playing song leaves:
+                // too late, it plays as it was going to.
+                if let old = self.mix, !self.adjusted(old, into: mix) { return }
+                self.lastBuilt = mix
                 self.mix = mix
                 self.buildStatus = nil
                 self.refreshSnapshot()

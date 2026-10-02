@@ -90,6 +90,13 @@ struct TransitionBuilder {
     /// a fight (and shows up every note that doesn't sit). It steps up to
     /// full as A's voice leaves. Set from the two songs' levels there.
     let under: Double
+    /// A's beat loops under the blend: from B's entry on, A's drums, bass
+    /// line and melody repeat `loop` bars of themselves (those starting
+    /// `loopBack` bars before the entry) instead of going where the song
+    /// goes, so the blend plays over a steady bed whatever A does next (a
+    /// verse, a breakdown, its ending). What a DJ sets a loop on the last
+    /// bars of a chorus for. 0: A plays on.
+    let loop: Int, loopBack: Int
     /// Where A's vocal ended up leaving and B's coming in (bars from B's
     /// entry), for the caller to check against the audio.
     private(set) var vocalExit: Double?, vocalEntry: Double?
@@ -102,7 +109,10 @@ struct TransitionBuilder {
     init(lanes: [Lane], start: Double, barSeconds: Double, bars: Int, vocalBar: Int? = nil, keysClash: Bool = false,
          lowSwap: Int? = nil, drumsLayer: Bool = true, drumsLinger: Bool = true, vocalIn: Double? = nil,
          vocalOut: Double? = nil, mashup: Bool = false, dropMoment: Bool = false, rollBeat: Int? = nil,
-         vocalOutFade: Double = 0, vocalInFade: Double = 0, room: Double = 0, carry: Bool = false, under: Double = 0) {
+         vocalOutFade: Double = 0, vocalInFade: Double = 0, room: Double = 0, carry: Bool = false, under: Double = 0,
+         loop: Int = 0, loopBack: Int = 0) {
+        self.loop = loop
+        self.loopBack = max(loop, loopBack)
         self.room = room
         self.under = under
         self.carry = carry
@@ -128,11 +138,12 @@ struct TransitionBuilder {
                       vocalBar: Int? = nil, keysClash: Bool = false, lowSwap: Int? = nil,
                       drumsLayer: Bool = true, drumsLinger: Bool = true, vocalIn: Double? = nil, vocalOut: Double? = nil,
                       mashup: Bool = false, dropMoment: Bool = false, room: Double = 0, carry: Bool = false,
-                      under: Double = 0) -> [Lane] {
+                      under: Double = 0, loop: Int = 0, loopBack: Int = 0) -> [Lane] {
         make(preset, lanes: lanes, start: start, barSeconds: barSeconds, bars: bars, vocalBar: vocalBar,
              keysClash: keysClash, lowSwap: lowSwap, drumsLayer: drumsLayer, drumsLinger: drumsLinger,
              vocalIn: vocalIn, vocalOut: vocalOut,
-             mashup: mashup, dropMoment: dropMoment, room: room, carry: carry, under: under).lanes
+             mashup: mashup, dropMoment: dropMoment, room: room, carry: carry, under: under,
+             loop: loop, loopBack: loopBack).lanes
     }
 
     /// The automation and the beat rolls of a preset.
@@ -141,16 +152,17 @@ struct TransitionBuilder {
                      drumsLayer: Bool = true, drumsLinger: Bool = true, vocalIn: Double? = nil,
                      vocalOut: Double? = nil, mashup: Bool = false, dropMoment: Bool = false, rollBeat: Int? = nil,
                      vocalOutFade: Double = 0, vocalInFade: Double = 0, room: Double = 0, carry: Bool = false,
-                     under: Double = 0) -> Made {
+                     under: Double = 0, loop: Int = 0, loopBack: Int = 0) -> Made {
         var builder = TransitionBuilder(lanes: lanes, start: start, barSeconds: barSeconds, bars: bars,
                                         vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap,
                                         drumsLayer: drumsLayer, drumsLinger: drumsLinger,
                                         vocalIn: vocalIn, vocalOut: vocalOut,
                                         mashup: mashup, dropMoment: dropMoment, rollBeat: rollBeat,
                                         vocalOutFade: vocalOutFade, vocalInFade: vocalInFade, room: room, carry: carry,
-                                        under: under)
+                                        under: under, loop: preset == .stemSwap ? loop : 0, loopBack: loopBack)
         builder.clearAll()
         builder.write(preset)
+        builder.writeLoop()
         for (side, stem, from, to) in builder.silences { builder.silence(side, stem, from: from, to: to) }
         return Made(lanes: builder.lanes, rolls: builder.rolls, vocalExit: builder.vocalExit,
                     vocalEntry: builder.vocalEntry)
@@ -199,6 +211,23 @@ struct TransitionBuilder {
         if mashup { return min(sw, max(q, n - 2)) }
         if carry { return max(0, q - 2) }
         return min(max(sw, q + 2), max(q + 2, 2 * q))
+    }
+
+    /// Seconds before its downbeat a loop turns round: the seam's
+    /// crossfade (see `MixRenderer.loopCrossfade`) is over before the kick
+    /// on the one, which plays whole.
+    static let loopLead = 0.012
+
+    /// A's drums, bass line and melody loop from B's entry until they're
+    /// out (see `loop`). The voice isn't looped: it has left.
+    private mutating func writeLoop() {
+        guard loop > 0 else { return }
+        let from = start - Self.loopLead
+        for stem in [StemKind.drums, .bass, .other] {
+            rolls.append(Roll(side: .a, stem: stem, start: from, end: start + Double(bars + 4) * barSeconds,
+                              anchor: from - Double(loopBack) * barSeconds, length: Double(loop) * barSeconds,
+                              seamless: true))
+        }
     }
 
     private mutating func clearAll() {
@@ -312,7 +341,10 @@ struct TransitionBuilder {
         // music stops: its first repeat fills the silence, and what's left
         // by the drop is faint, so B lands clean instead of under a smear.
         automate(.a, .drums, .delay, [(s - 0.25, 0, .hold), (s - 0.249, 0.3, .hold), (s - 0.125, 0, .linear)])
-        let backbeat = s - 1 + 0.25 * Double(rollBeat ?? 1)
+        // (Over a loop, the hit that's rolled is the loop's: A's drums
+        // themselves are somewhere else in the song by now.)
+        var backbeat = s - 1 + 0.25 * Double(rollBeat ?? 1)
+        if loop > 0, backbeat >= 0 { backbeat = Double(-loopBack) + backbeat.truncatingRemainder(dividingBy: Double(loop)) }
         for (from, to, length) in [(s - 1, s - 0.5, 0.125), (s - 0.5, s - 0.25, 0.0625), (s - 0.25, s - 0.125, 0.03125)] {
             rolls.append(Roll(side: .a, stem: .drums, start: start + from * barSeconds, end: start + to * barSeconds,
                               anchor: start + backbeat * barSeconds, length: length * barSeconds))

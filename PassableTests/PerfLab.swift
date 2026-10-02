@@ -31,11 +31,20 @@ final class PerfLab: XCTestCase {
 
         let analyses = loaded.map(\.analysis)
         t = clock()
-        let costs = SetOrdering.costMatrix(analyses)
+        let hits = BeatAlign.attacks(of: loaded)
+        print(String(format: "PERF drum hits: %.2f s", clock() - t))
+        t = clock()
+        let costs = SetOrdering.costMatrix(analyses, drums: hits)
         print(String(format: "PERF cost matrix %dx%d: %.2f s", costs.count, costs.count, clock() - t))
         t = clock()
-        _ = SetOrdering.order(costs)
+        _ = SetOrdering.order(costs, washOuts: SetOrdering.washOuts(analyses), energies: analyses.map(SetOrdering.energy))
         print(String(format: "PERF order: %.2f s", clock() - t))
+        t = clock()
+        for k in 1..<min(9, analyses.count) {
+            _ = PairPlan.make(a: analyses[k - 1], b: analyses[k], entryRange: 40...Int.max, soloFrom: 20,
+                              drums: hits[k - 1].flatMap { x in hits[k].map { (a: x, b: $0) } })
+        }
+        print(String(format: "PERF plan one pair: %.3f s", (clock() - t) / Double(min(9, analyses.count) - 1)))
 
         t = clock()
         _ = try await SetBuilder.build(Array(zip(urls, loaded)).map { (url: $0.0, loaded: $0.1) }, processor: processor) { _ in }

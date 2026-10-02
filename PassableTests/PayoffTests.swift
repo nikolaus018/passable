@@ -237,7 +237,7 @@ final class PayoffTests: XCTestCase {
         // swap); only A's drums and melody give way (its bass and voice
         // stay), about 0.55 dB per dB of EQ.
         XCTAssertEqual(room(-11), 0, "two parts of B are already within reach")
-        XCTAssertEqual(room(-13), 7)
+        XCTAssertEqual(room(-13), 5)
         XCTAssertEqual(room(-20), 12, "at most 12 dB of EQ")
         XCTAssertEqual(room(-100), 0, "nothing to make room for")
     }
@@ -627,7 +627,8 @@ final class PayoffTests: XCTestCase {
         let plan = PairPlan.make(a: a, b: b, entryRange: 31...Int.max, soloFrom: 23)
         XCTAssertGreaterThanOrEqual(plan.placement.entryBar, 23)
         XCTAssertEqual(plan.placement.entryBar % 4, 0)
-        XCTAssertLessThanOrEqual(plan.placement.entryBar + plan.bars, 40)
+        // (Within its music, or over its last bars looped once it's done.)
+        XCTAssertLessThanOrEqual(plan.placement.entryBar + (plan.placement.loopBars > 0 ? 0 : plan.bars), 40)
         XCTAssertFalse(plan.placement.overruns)
         // Nothing fits a song that is over as it comes home: said, and on a phrase.
         let late = PairPlan.make(a: a, b: b, entryRange: 46...Int.max, soloFrom: 38)
@@ -809,5 +810,169 @@ final class PayoffTests: XCTestCase {
         XCTAssertEqual(AutoPlacement.vocalSounds(s, cue: 0, from: 4, limit: 16), 8)
         XCTAssertEqual(AutoPlacement.vocalSounds(s, cue: 0, from: 9.5, limit: 16), 9.5)
         XCTAssertEqual(AutoPlacement.vocalSounds(s, cue: 0, from: 2, limit: 6), 6, "not found by then: that's where it's taken to start")
+    }
+
+    /// A loop in the renderer: the stem repeats the looped bars, each
+    /// repeat crossfaded in out of what the last ran on into, so the seam
+    /// doesn't click and nothing starts from silence.
+    func testLoopRepeatsWithoutASeam() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let n = 80_000
+        let ramp = (0..<n).map { 0.5 + Float($0) / 1_000_000 }
+        try StemAudio.save(StereoBuffer(left: ramp, right: ramp), directory: dir, name: "x")
+        let stem = try StemAudio.load(directory: dir, name: "x")
+        let sr = AudioIO.sampleRate
+        // From frame 30 000 on, frames 20 000..<30 000 over and over.
+        let loop = Roll(side: .a, stem: .drums, start: 30_000 / sr, end: 70_000 / sr, anchor: 20_000 / sr,
+                        length: 10_000 / sr, seamless: true)
+        let snapshot = MixSnapshot(lanes: [.init(audio: stem, offset: 0, envelopes: Lane(side: .a, stem: .drums).envelopes,
+                                                  audible: true, rolls: [MixSnapshot.FrameRoll(loop, sampleRate: sr)!])],
+                                   length: n, delaySeconds: 0.3, masterGain: 1)
+        let renderer = MixRenderer(snapshot: snapshot)
+        var l = [Float](repeating: 0, count: n), r = l
+        renderer.render(left: &l, right: &r, count: n)
+        XCTAssertEqual(l[29_000], ramp[29_000], accuracy: 1e-6, "untouched before the loop")
+        XCTAssertEqual(l[31_000], ramp[21_000], accuracy: 1e-6)
+        XCTAssertEqual(l[45_000], ramp[25_000], accuracy: 1e-6, "the second time round")
+        XCTAssertEqual(l[65_000], ramp[25_000], accuracy: 1e-6, "and the fourth")
+        XCTAssertEqual(l[75_000], ramp[75_000], accuracy: 1e-6, "back where the stem is, once it ends")
+        // Never from nothing at a seam (a stutter's repeats are), and no step.
+        XCTAssertGreaterThan(l[30_000..<69_000].min()!, 0.5)
+        let steps = (1..<69_000).map { abs(l[$0] - l[$0 - 1]) }
+        XCTAssertLessThan(steps.max()!, 5e-4, "the seam clicks")
+    }
+
+    /// A song looped from a bar on: its beat, bass line and melody repeat
+    /// the bars before, its voice is gone, and it goes on past its end.
+    func testLoopedStructureRepeatsItsLastBars() {
+        var s = popSong()
+        s.stemLevel = ["drums": (0..<64).map { Float($0) }, "vocals": [Float](repeating: -20, count: 64)]
+        let looped = s.looped(from: 32, bars: 4, back: 4, through: 80)
+        XCTAssertEqual(looped.loudness.count, 81)
+        XCTAssertEqual(Array(looped.activity(.drums)[0..<32]), Array(s.activity(.drums)[0..<32]))
+        XCTAssertEqual(looped.stemLevel?["drums"]?[32], 28)
+        XCTAssertEqual(looped.stemLevel?["drums"]?[37], 29)
+        XCTAssertEqual(looped.stemLevel?["drums"]?[79], 31)
+        XCTAssertEqual(looped.activity(.vocals)[31], 1)
+        XCTAssertEqual(looped.activity(.vocals)[32], 0)
+        XCTAssertEqual(looped.barChroma?[33], s.barChroma?[29])
+        // From the phrase before the last: the fill that ends the part isn't repeated.
+        XCTAssertEqual(s.looped(from: 32, bars: 4, back: 8, through: 80).stemLevel?["drums"]?[36], 24)
+        // A chorus is a bed to loop; a verse without its bass line isn't.
+        XCTAssertTrue(s.loops(before: 32, bars: 4))
+        XCTAssertFalse(s.loops(before: 24, bars: 4))
+    }
+
+    /// The loop is written for A's drums, bass line and melody from B's
+    /// entry, turning round just before the downbeat; its voice isn't
+    /// looped.
+    func testLoopIsWrittenForTheBeatNotTheVoice() {
+        let made = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 100, barSeconds: 2, bars: 16,
+                                          vocalOut: 0, loop: 4, loopBack: 8)
+        let loops = made.rolls.filter { $0.seamless == true }
+        XCTAssertEqual(Set(loops.map(\.stem)), [.drums, .bass, .other])
+        XCTAssertTrue(loops.allSatisfy { $0.side == .a && abs($0.length - 8) < 1e-9 && abs($0.start - $0.anchor - 16) < 1e-9 })
+        XCTAssertTrue(loops.allSatisfy { $0.start < 100 && $0.start > 99.98 && $0.end >= 100 + 16 * 2 })
+        XCTAssertEqual(value(made.lanes, .a, .vocals, bar: 0.1, start: 100), 0, accuracy: 0.01)
+        // No loop without one asked for, and none for a Wash Out.
+        XCTAssertTrue(TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16).rolls.isEmpty)
+        XCTAssertTrue(TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 8, loop: 4,
+                                             loopBack: 4).rolls.isEmpty)
+    }
+
+    /// A long set's order (too many songs to try every order of) is as
+    /// good as the best there is, on sets small enough to know that.
+    func testSearchFindsTheBestOrderOfSmallSets() {
+        var state: UInt64 = 42
+        func random() -> Double {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return Double(state >> 33) / Double(1 << 31)
+        }
+        var found = 0
+        for _ in 0..<12 {
+            let n = 10
+            let costs = (0..<n).map { i in (0..<n).map { j in i == j ? 0 : 4 * random() - 1 } }
+            let energies = (0..<n).map { _ in random() }
+            let washOuts = (0..<n).map { i in (0..<n).map { j in i != j && random() < 0.15 } }
+            let exact = SetOrdering.order(costs, washOuts: washOuts, energies: energies)
+            let searched = SetOrdering.search(costs, washOuts, energies)
+            XCTAssertEqual(Set(searched), Set(0..<n))
+            let best = SetOrdering.total(exact, costs, washOuts, energies)
+            let got = SetOrdering.total(searched, costs, washOuts, energies)
+            XCTAssertGreaterThanOrEqual(got, best - 1e-9, "better than the exact order")
+            if got <= best + 1e-9 { found += 1 }
+        }
+        XCTAssertGreaterThanOrEqual(found, 11, "the search missed the best order")
+    }
+
+    /// Words into lines: a sentence or what's sung between two pauses, its
+    /// commas kept as places it can be cut, and lines that come back
+    /// counted (a chorus), however the recogniser spelt them.
+    func testLyricsBecomeLines() {
+        func words(_ text: String, from: Double) -> [Lyrics.Word] {
+            text.split(separator: " ").enumerated().map { i, w in
+                Lyrics.Word(start: from + 0.4 * Double(i), end: from + 0.4 * Double(i + 1), text: String(w))
+            }
+        }
+        let heard = words("Can you blow my whistle, baby?", from: 0) + words("Here we go.", from: 2.5)
+            + words("Look I'm betting you like people", from: 10)
+            + words("Can you blow mine whistle, baby?", from: 20)
+        let lines = Lyrics.lines(from: heard)
+        XCTAssertEqual(lines.count, 4)
+        XCTAssertEqual(lines.map(\.repeats), [1, 0, 0, 1])
+        XCTAssertEqual(lines[0].start, 0)
+        XCTAssertEqual(lines[0].end, 2.4, accuracy: 1e-9)
+        XCTAssertEqual(lines[0].breaks.count, 1, "its comma")
+        XCTAssertEqual(lines[0].breaks[0], 2.0, accuracy: 1e-9)
+        XCTAssertEqual(lines[2].end, 12.4, accuracy: 1e-9, "a pause ends a line too")
+    }
+
+    /// The words move the edges of a song's parts: no edge where a line is
+    /// sung through the bar, one where the voice starts after bars of
+    /// silence.
+    func testWordsMoveTheEdgesOfParts() {
+        var s = popSong()
+        let grid = BeatGrid(bpm: 120, firstDownbeat: 0)
+        let boundary = s.boundaryStrength()
+        let plain = AutoPlacement.phrases(s, boundary: boundary)
+        XCTAssertTrue(plain.starts[16] && plain.starts[40])
+        s.setLines([VocalLine(start: 29, end: 35, words: 8, repeats: 0),
+                    VocalLine(start: 80, end: 83, words: 6, repeats: 0)], tried: "test", grid: grid)
+        let heard = AutoPlacement.phrases(s, boundary: boundary)
+        XCTAssertLessThanOrEqual(heard.edge[16], 0.1, "a line sung through the one of bar 16")
+        XCTAssertGreaterThanOrEqual(heard.edge[40], 0.9, "the voice comes in on bar 40 after bars of silence")
+        XCTAssertEqual(heard.starts, plain.starts)
+        XCTAssertTrue(s.lineTurns(at: 16 * 40))
+        XCTAssertEqual(s.midLine(at: 16 * 16), true)
+        XCTAssertEqual(s.midLine(at: 16 * 20), false)
+        XCTAssertNil(popSong().midLine(at: 0), "no words heard: nothing to say")
+    }
+
+    /// A voice that never falls silent is still cut between two lines of
+    /// its words.
+    func testAVoiceIsCutBetweenLines() {
+        func level(_ k: Int) -> Float { -20 }
+        XCTAssertNil(VocalPhrasing.cut(opening: false, from: -8, through: 8, reference: -20, level: level))
+        let cut = VocalPhrasing.cut(opening: false, from: -8, through: 8, reference: -20, turns: { $0 == 3 }, level: level)
+        XCTAssertEqual(cut?.slot, 3)
+        XCTAssertEqual(cut?.kind, .line)
+        // A breath as near is still the cleaner cut.
+        let breath = VocalPhrasing.cut(opening: false, from: -8, through: 8, reference: -20, turns: { $0 == 3 }) {
+            $0 == -3 || $0 == -2 ? -60 : -20
+        }
+        XCTAssertEqual(breath?.slot, -2)
+    }
+
+    /// Notes a semitone apart grate, whatever the scale; the same chord,
+    /// or one a fifth away, doesn't.
+    func testRoughnessHearsSemitones() {
+        func chord(_ root: Int) -> [Float] { (0..<12).map { [0, 4, 7].contains(($0 - root + 12) % 12) ? 1 : 0 } }
+        XCTAssertEqual(Harmony.roughness(chord(0), chord(0)), 0)
+        XCTAssertGreaterThan(Harmony.roughness(chord(0), chord(1)), Harmony.roughTolerance)
+        XCTAssertGreaterThan(Harmony.roughness(chord(0), chord(6)), Harmony.roughTolerance)
+        XCTAssertLessThan(Harmony.roughness(chord(0), chord(7)), Harmony.roughTolerance)
+        XCTAssertLessThan(Harmony.roughness(chord(0), chord(5)), Harmony.roughTolerance, "nor one a fourth away")
     }
 }

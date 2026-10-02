@@ -12,6 +12,7 @@ final class MappedChannel: @unchecked Sendable {
     let count: Int
     private let mapping: UnsafeMutableRawPointer?
     private let byteCount: Int
+    private var owned: UnsafeMutablePointer<Float>? = nil
     private static let empty = UnsafeMutablePointer<Float>.allocate(capacity: 1)
 
     init(url: URL) throws {
@@ -34,8 +35,26 @@ final class MappedChannel: @unchecked Sendable {
         pointer = UnsafePointer(base.assumingMemoryBound(to: Float.self))
     }
 
+    /// Samples held in memory rather than in a file: a stretch of a stem
+    /// as it plays (looped, say), for whatever measures stems.
+    init(samples: [Float]) {
+        count = samples.count
+        byteCount = 0
+        mapping = nil
+        guard count > 0 else {
+            owned = nil
+            pointer = UnsafePointer(Self.empty)
+            return
+        }
+        let memory = UnsafeMutablePointer<Float>.allocate(capacity: count)
+        memory.initialize(from: samples, count: count)
+        owned = memory
+        pointer = UnsafePointer(memory)
+    }
+
     deinit {
         if let mapping { munmap(mapping, byteCount) }
+        owned?.deallocate()
     }
 
     static func write(_ samples: [Float], to url: URL) throws {

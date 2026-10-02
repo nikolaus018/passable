@@ -800,10 +800,21 @@ final class Session: ObservableObject {
         case .shiftBeats(let k): grid.firstDownbeat += Double(k) * grid.beatSeconds
         case .nudge(let ms): grid.firstDownbeat += ms / 1000
         }
+        // A song without a steady tempo keeps its bars one by one (see
+        // `BeatGrid.downbeats`): moved along with the grid, or given up
+        // where the tempo itself was said to be another.
+        switch edit {
+        case .halve, .double: grid.downbeats = nil
+        case .shiftBeats(let k): grid.downbeats = grid.downbeats.map { d in d.indices.map { grid.time(bars: Double($0) + Double(k) / 4) } }
+        case .nudge(let ms): grid.downbeats = grid.downbeats.map { $0.map { $0 + ms / 1000 } }
+        }
         while grid.firstDownbeat >= grid.barSeconds { grid.firstDownbeat -= grid.barSeconds }
         while grid.firstDownbeat < 0 { grid.firstDownbeat += grid.barSeconds }
+        if let first = grid.downbeats?.first { grid.firstDownbeat = first }
         loaded.analysis.grid = grid
+        let old = loaded.analysis.structure
         loaded.analysis.structure = TrackStructure.measure(stems: loaded.stems, grid: grid)
+        loaded.analysis.structure?.setLines(old?.vocalLines, tried: old?.lyricsTried, grid: grid)
         StemCache.saveAnalysis(loaded.analysis, to: loaded.directory)
         setDeck(side) { $0.loaded = loaded }
         if let host, let url = deck(side).url { return host.gridChanged(url, loaded) }
