@@ -126,3 +126,33 @@ final class FlamProbe: XCTestCase {
         }
     }
 }
+
+/// Not a unit test: for the songs listed in $PASSABLE_PARTS, where the
+/// vocal's parts end and begin (`AutoPlacement.vocalParts`), bar by bar on
+/// the song's four-bar phrases. Skipped unless the variable is set.
+final class PartsProbe: XCTestCase {
+    func testParts() throws {
+        guard let listFile = ProcessInfo.processInfo.environment["PASSABLE_PARTS"],
+              let list = try? String(contentsOfFile: listFile, encoding: .utf8) else { throw XCTSkip("set PASSABLE_PARTS") }
+        for path in list.split(separator: "\n").map(String.init) where !path.isEmpty {
+            let url = URL(fileURLWithPath: path)
+            guard let a = StemCache.loadAnalysis(from: try StemCache.directory(for: url)), let s = a.structure else { continue }
+            let boundary = s.boundaryStrength(), parts = AutoPlacement.phrases(s, boundary: boundary).edge, phase = s.phrasePhase()
+            let voice = s.stemLevel?[StemKind.vocals.rawValue] ?? [], ref = s.vocalReference ?? -30
+            print("PARTS \(SongTitle.of(url))  \(String(format: "%.0f", a.grid.bpm)) BPM, phrase phase \(phase), \(parts.count) bars")
+            var line = "PARTS   bar:edge(voice dB vs ref) on the phrase grid: "
+            for g in stride(from: phase, to: parts.count, by: 4) {
+                let v = g < voice.count ? voice[g] - ref : -99
+                line += String(format: "%d:%.1f(%+.0f) ", g, parts[g], v)
+            }
+            print(line)
+            let peaks = boundary.indices.filter { g in
+                boundary[g] >= 0.35 && (max(0, g - 2)...min(boundary.count - 1, g + 2)).allSatisfy { boundary[$0] <= boundary[g] }
+            }
+            print("PARTS   boundary peaks (bar:strength): " + peaks.map { String(format: "%d:%.2f", $0, boundary[$0]) }.joined(separator: " "))
+            print("PARTS   hooks: " + (0..<parts.count).filter { s.hook($0) >= 0.4 }.map(String.init).joined(separator: " "))
+            let strong = parts.indices.filter { parts[$0] >= 0.6 }
+            print("PARTS   parts end and begin at: " + strong.map { parts[$0] == 1 ? "[\($0)]" : "\($0)" }.joined(separator: " "))
+        }
+    }
+}

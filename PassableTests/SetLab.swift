@@ -177,6 +177,8 @@ final class SetLab: XCTestCase {
         var busyBars: [Int] = []
         var vocalCuts: [String: Int] = [:]
         var held: [Int] = [], alone: [Int] = []
+        var resumes: [Double] = [], silences: [Double] = []
+        var partEdges: [(Float, Float)] = []
         for t in mix.transitions {
             let bar = t.barSeconds
             // A Wash Out happens in the bars before B's downbeat.
@@ -313,7 +315,7 @@ final class SetLab: XCTestCase {
                 let out = t.vocalOut ?? min(vin, t.start + sw * t.barSeconds)
                 // A blended out or B blended in on purpose isn't a cut; B
                 // opening on a word's attack is sounding by design.
-                if !t.vocalOutBlend, sounding(t.from, at: out) { phrasing += " A-CUT" }
+                if t.vocalOutKind != "bar", sounding(t.from, at: out) { phrasing += " A-CUT" }
                 if t.vocalInKind == "grid", sounding(t.to, at: vin) { phrasing += " B-MIDLINE" }
             }
             // A Wash Out never layers two beats: its bridge is the blend.
@@ -333,6 +335,7 @@ final class SetLab: XCTestCase {
             print(String(format: "      busy %d bars  melodies together %d bars (clash %.2f)  A cut, nobody singing %d bars; B held back, nobody singing %d bars", busy, melx2,
                          keyClash, vocalGap, heldBack))
             let pp = t.plan.placement
+            print("      A leaves from its bar \(t.edit.entryBar) (free from \(t.entryRange.lowerBound), \(mix.tracks[t.from].loaded.analysis.grid.barCount(duration: mix.tracks[t.from].loaded.analysis.duration)) bars), B comes in on its bar \(t.edit.cueBar)")
             print("      placement expected together: \(pp.together.map(String.init) ?? "-"), handoff \(pp.vocalHandoff), B's vocal at "
                   + (pp.expectedVocalIn.map { String(format: "%.2f", $0) } ?? "-") + ", switch \(pp.lowSwap.map(String.init) ?? "-"), drop \(pp.dropMoment)")
             if t.edit.preset != .echoOut {
@@ -349,6 +352,58 @@ final class SetLab: XCTestCase {
                            t.vocalOut.map { String(format: "%.1f", ($0 - t.start) / t.barSeconds) } ?? "-",
                            t.vocalIn.map { String(format: "%.1f", ($0 - t.start) / t.barSeconds) } ?? "-",
                            t.plan.placement.lowSwap.map(String.init) ?? "-"))
+            // Where in its singing each voice is cut: how soon A's would
+            // have sung on after it's taken out (a breath in the middle of
+            // a verse, or the end of one), and how long B's had been
+            // silent before it's let in (the start of a part, or a line
+            // somewhere inside it). In beats.
+            if t.edit.preset != .echoOut, let fa = mix.tracks[t.from].loaded.analysis.structure,
+               let fb = mix.tracks[t.to].loaded.analysis.structure,
+               let la = fa.vocalSixteenthLevel, let lb = fb.vocalSixteenthLevel, let ra = fa.vocalReference, let rb = fb.vocalReference {
+                func slot(_ master: Double?, _ bar0: Int) -> Int? {
+                    master.map { 16 * bar0 + Int((($0 - t.start) / t.barSeconds * 16).rounded()) }
+                }
+                let pa = AutoPlacement.phrases(fa, boundary: fa.boundaryStrength()).edge
+                let pb = AutoPlacement.phrases(fb, boundary: fb.boundaryStrength()).edge
+                func edge(_ parts: [Float], _ bar0: Int, _ master: Double?, leaving: Bool) -> Float {
+                    guard let master else { return 1 }
+                    let bar = (master - t.start) / t.barSeconds
+                    let g = bar0 + (leaving ? AutoPlacement.partBar(leaving: bar) : Int(bar.rounded()))
+                    return g >= 0 && g < parts.count ? parts[g] : 1
+                }
+                let ea = edge(pa, t.edit.entryBar, t.vocalOut, leaving: true), eb = edge(pb, t.edit.cueBar, t.vocalIn, leaving: false)
+                partEdges.append((ea, eb))
+                var note = "      voices:"
+                note += String(format: " part edge A %.2f, B %.2f;", ea, eb)
+                // Where that is in each song, and the corners its phrases are counted from.
+                func corners(_ st: TrackStructure, near g: Int) -> String {
+                    let b = st.boundaryStrength()
+                    return b.indices.filter { k in
+                        abs(k - g) <= 20 && b[k] >= 0.35 && (max(0, k - 2)...min(b.count - 1, k + 2)).allSatisfy { b[$0] <= b[k] }
+                    }.map { String(format: "%d(%.2f)", $0, b[$0]) }.joined(separator: " ")
+                }
+                let ga = t.edit.entryBar + AutoPlacement.partBar(leaving: ((t.vocalOut ?? t.start) - t.start) / t.barSeconds)
+                let gb = t.edit.cueBar + Int((((t.vocalIn ?? t.start) - t.start) / t.barSeconds).rounded())
+                print("      A's voice leaves on its bar \(ga) (entry \(t.edit.entryBar)); corners near: \(corners(fa, near: ga)).  B's comes in on its bar \(gb) (cue \(t.edit.cueBar)); corners near: \(corners(fb, near: gb))")
+                if let k = slot(t.vocalOut, t.edit.entryBar) {
+                    var j = k
+                    while j < la.count, j < k + 16 * 16, VocalPhrasing.quiet(la[j], ra) { j += 1 }
+                    let rest = Double(j - k) / 4
+                    resumes.append(rest)
+                    note += String(format: " A out on %@, would sing on after %.1f beats;", t.vocalOutKind ?? "-", rest)
+                }
+                if let k = slot(t.vocalIn, t.edit.cueBar) {
+                    var j = k - 1
+                    while j >= 0, j > k - 16 * 16, VocalPhrasing.quiet(lb[j], rb) { j -= 1 }
+                    let silent = Double(k - 1 - j) / 4
+                    var first = k
+                    while first < lb.count, first < k + 16 * 16, VocalPhrasing.quiet(lb[first], rb) { first += 1 }
+                    silences.append(silent)
+                    note += String(format: " B in on %@, silent for %.1f beats before, sings %.1f beats after", t.vocalInKind ?? "-", silent,
+                                   Double(first - k) / 4)
+                }
+                print(note)
+            }
             vocalCuts["B in on \(t.vocalInKind ?? "-")", default: 0] += 1
             vocalCuts["A out on \(t.vocalOutKind ?? "-")", default: 0] += 1
             held.append(heldBack)
@@ -421,6 +476,12 @@ final class SetLab: XCTestCase {
         print(String(format: "Songs pitch-shifted: %d of %d;  stretch over 4%%: %d, largest %.1f%%", shifted,
                      mix.transitions.count, stretches.filter { $0 > 4 }.count, stretches.max() ?? 0))
         print("Vocals: " + vocalCuts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+        print("How much of a part's end A's voice leaves on, and of a part's start B's comes in on (0…1): "
+              + partEdges.map { String(format: "%.1f/%.1f", $0.0, $0.1) }.joined(separator: " ")
+              + String(format: "  mean %.2f/%.2f", partEdges.map(\.0).reduce(0, +) / Float(max(1, partEdges.count)),
+                       partEdges.map(\.1).reduce(0, +) / Float(max(1, partEdges.count))))
+        print("Beats until A's voice would have sung on after its cut: " + resumes.map { String(format: "%.1f", $0) }.joined(separator: " "))
+        print("Beats B's voice had been silent before it came in: " + silences.map { String(format: "%.1f", $0) }.joined(separator: " "))
         print("Bars nobody sings while B's voice is held back: " + held.map(String.init).joined(separator: " "))
         print("Seconds each song plays on its own before its way out: " + alone.map(String.init).joined(separator: " "))
         print("Payoffs over \(mix.transitions.count) transitions: "

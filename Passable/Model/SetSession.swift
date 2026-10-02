@@ -48,7 +48,8 @@ final class SetSession: ObservableObject {
     /// The transition editor, always showing one transition of this set.
     let editor = Session()
     let transport = Transport()
-    private let playback = PlaybackEngine()
+    /// (Internal so a harness can watch the audio thread keep time.)
+    let playback = PlaybackEngine()
     private let processor = TrackProcessor()
     /// Hand-shaped transitions, by pair of songs.
     private var edits: [PairKey: TransitionEdit] = [:] {
@@ -366,8 +367,6 @@ final class SetSession: ObservableObject {
         if t.plan.preset != .echoOut { parts.append(t.melodiesClash ? "melodies clash, swapped" : "melodies fit") }
         if t.skippedBars > 0 { parts.append("A skips \(t.skippedBars) bars of verse and breakdown") }
         parts += t.payoff
-        // Not a payoff, a compromise: said apart so it isn't counted as one.
-        if t.vocalOutBlend { parts.append("A's vocal blends out mid-line") }
         return parts.joined(separator: " · ")
     }
 

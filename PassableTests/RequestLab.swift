@@ -73,3 +73,78 @@ final class RequestLab: XCTestCase {
         }
     }
 }
+
+/// Not a unit test: plays a set built from all but the last song listed in
+/// $PASSABLE_REQUEST_LIVE (silently, through the real audio output) and
+/// requests the last one, which should be a file never separated before, so
+/// it's decoded, split into stems and analysed while the set plays. Says
+/// whether the music kept playing in real time all the way through.
+/// Skipped unless the variable is set.
+@MainActor
+final class RequestLiveLab: XCTestCase {
+    func testMusicPlaysOnThroughARequest() async throws {
+        guard let listFile = ProcessInfo.processInfo.environment["PASSABLE_REQUEST_LIVE"],
+              let list = try? String(contentsOfFile: listFile, encoding: .utf8) else {
+            throw XCTSkip("set PASSABLE_REQUEST_LIVE")
+        }
+        let urls = list.split(separator: "\n").map(String.init).filter { !$0.isEmpty }.map { URL(fileURLWithPath: $0) }
+        let wanted = try XCTUnwrap(urls.last)
+        let set = SetSession(persists: false)
+        set.masterVolume = 0
+        set.add(Array(urls.dropLast()))
+        while set.mix == nil || set.buildStatus != nil { try await Task.sleep(nanoseconds: 300_000_000) }
+        let mix = try XCTUnwrap(set.mix)
+        set.seek(to: mix.transitions[0].end + 5)
+        set.play()
+        XCTAssertTrue(set.transport.isPlaying)
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        let t0 = Date(), s0 = set.transport.seconds
+        // The audio thread itself, watched from outside the main thread:
+        // how far the frames it has rendered fall behind the clock, and
+        // the longest it went without rendering any.
+        final class Watch: @unchecked Sendable { var behind = 0.0, gap = 0.0, at = 0.0, done = false }
+        let watch = Watch()
+        let renderer = set.playback.renderer
+        let f0 = renderer.currentFrame
+        Thread.detachNewThread {
+            var lastFrame = f0, lastMoved = Date()
+            while !watch.done {
+                Thread.sleep(forTimeInterval: 0.002)
+                let now = Date(), frame = renderer.currentFrame
+                if frame != lastFrame {
+                    let gap = now.timeIntervalSince(lastMoved)
+                    if gap > watch.gap { watch.gap = gap; watch.at = now.timeIntervalSince(t0) }
+                    lastFrame = frame
+                    lastMoved = now
+                }
+                watch.behind = max(watch.behind, now.timeIntervalSince(t0) - Double(frame - f0) / AudioIO.sampleRate)
+            }
+        }
+        defer { watch.done = true }
+        XCTAssertTrue(set.request(wanted))
+        var worst = 0.0, stopped: Double?, placed: Double?, last = ""
+        while Date().timeIntervalSince(t0) < 180 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            let wall = Date().timeIntervalSince(t0), played = set.transport.seconds - s0
+            worst = max(worst, wall - played)
+            if !set.transport.isPlaying, stopped == nil { stopped = wall }
+            let state = set.requests.first.map { "\($0.status)" } ?? (set.buildStatus ?? "idle")
+            if state != last { print(String(format: "LIVE %6.1f s  played %6.1f s  playing %@  %@", wall, played, set.transport.isPlaying ? "yes" : "NO", state)); last = state }
+            if placed == nil, set.requests.isEmpty, set.items.contains(where: { $0.url == wanted }), set.buildStatus == nil,
+               set.mix?.tracks.count == set.items.count {
+                placed = wall
+            }
+            if let placed, wall > placed + 8 { break }
+        }
+        print(String(format: "LIVE request placed after %.1f s as song %d; music behind the clock by at most %.2f s; stopped: %@",
+                     placed ?? -1, (set.items.firstIndex { $0.url == wanted } ?? -1) + 1, worst,
+                     stopped.map { String(format: "after %.1f s", $0) } ?? "never"))
+        print(String(format: "LIVE audio thread: behind the clock by at most %.3f s; longest without rendering %.3f s (at %.1f s)",
+                     watch.behind, watch.gap, watch.at))
+        set.pause()
+        XCTAssertLessThan(watch.gap, 0.1, "the audio thread stalled")
+        XCTAssertNil(stopped, "the set stopped")
+        XCTAssertNotNil(placed, "the request never made it into the set")
+        XCTAssertLessThan(worst, 0.5, "the music fell behind")
+    }
+}

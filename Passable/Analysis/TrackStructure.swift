@@ -325,6 +325,12 @@ struct TrackStructure: Codable, Equatable {
         return best?.range
     }
 
+    /// 0…1: how strongly a hook starts on the phrase that starts on `bar`.
+    /// (`hookStart` is measured eight bars at a time and peaks a bar or
+    /// two into the hook as often as on its first; a hook that starts on
+    /// the phrase's downbeat was then missed from the phrase's start.)
+    func hook(from bar: Int) -> Float { (bar...(bar + 2)).map { hook($0) }.max() ?? 0 }
+
     /// 0…1: how strongly a hook starts on `bar`.
     func hook(_ bar: Int) -> Float {
         guard let h = hookStart, bar >= 0, bar < h.count else { return 0 }
@@ -618,11 +624,32 @@ enum AutoPlacement {
         return Double((0...12).first { r in pb >= within * (kept + cuttable * pow(10, -0.055 * Float(r))) } ?? 12)
     }
 
+    /// What a voice handed over on the edge of a part is worth to a spot
+    /// (each voice, for a certain edge): as much as a hook on the switch
+    /// and more.
+    static let partWeight: Float = 2.2
+
+    /// Where A's voice leaves, given where B's will really be singing (or
+    /// B takes over): at the end of the phrase A is in, if that's no more
+    /// than two bars before. A singer who starts the next phrase only to
+    /// be cut a bar and a half into it sounds cut off; two bars of the two
+    /// beats alone between one voice and the next sound like a handover.
+    /// (Bars from the transition's start, which is a phrase start of A's.)
+    static func phraseEnd(before target: Double) -> Double {
+        let end = (target / 4).rounded(.down) * 4
+        return end > 0 && target - end <= 2 ? end : target
+    }
+
+    /// The bar (from the transition's start) whose downbeat a voice leaving
+    /// at `bar` leaves on: the one it's in the last three beats before, or
+    /// just past.
+    static func partBar(leaving bar: Double) -> Int { Int((bar + 0.75).rounded(.down)) }
+
     /// What it costs a spot that a voice has to be let in (`in`) or taken
     /// out (`out`) there on something less than a breath between lines:
-    /// between two words a little, in the middle of one (no cut at all: it
-    /// is faded) more than nearly anything else can make up for. A DJ picks
-    /// the moment the singer isn't singing.
+    /// between two words a little, through a word (no cut to be found: it's
+    /// cut on the downbeat) more. A DJ picks the moment the singer isn't
+    /// singing.
     static func cutCost(in entry: VocalPhrasing.Cut?, out exit: VocalPhrasing.Cut?) -> Float {
         func cost(_ cut: VocalPhrasing.Cut?, word: Float, none: Float) -> Float {
             switch cut {
@@ -631,7 +658,57 @@ enum AutoPlacement {
             case nil: return none
             }
         }
-        return cost(entry, word: 0.3, none: 1.5) + cost(exit, word: 0.4, none: 2)
+        return cost(entry, word: 0.3, none: 1.0) + cost(exit, word: 0.4, none: 1.2)
+    }
+
+    /// A song's phrases, bar by bar: `edge` (0…1) is how much of a part of
+    /// the song ends and another begins on the bar's downbeat, which is
+    /// where a DJ hands a vocal over (the end of a chorus, the start of a
+    /// verse, not between two lines of one); `starts` is whether a
+    /// four-bar phrase starts there at all.
+    ///
+    /// Phrases are counted from where the song turns its corners (parts
+    /// come or go, the level jumps: the peaks of `boundary`), eight bars at
+    /// a time: the 32 beats a DJ counts. (Where the voice itself stops or
+    /// starts is a bar early or late as often as not: lines begin with a
+    /// pickup.) A clear corner on a phrase start is certainly a part's
+    /// edge, the eight-bar marks between them very likely, four bars off
+    /// those the middle of a phrase. Counted from the song's first bar instead, every phrase
+    /// after a two-bar intro or a four-bar tag is taken for one that
+    /// starts in the middle of a line. A vocal stem (doubles, ad-libs,
+    /// reverb) rarely falls silent between a verse and a chorus, and the
+    /// two share their notes, so neither silence nor melody finds these.
+    static func phrases(_ s: TrackStructure, boundary: [Float]) -> (edge: [Float], starts: [Bool]) {
+        let count = s.loudness.count
+        let corners = boundary.indices.filter { g in
+            g < count && boundary[g] >= 0.3
+                && (max(0, g - 2)...min(boundary.count - 1, g + 2)).allSatisfy { boundary[$0] <= boundary[g] }
+        }
+        guard !corners.isEmpty else {
+            // Nothing to count from: the phase most sections start on.
+            let phase = s.phrasePhase()
+            return ((0..<count).map { ($0 - phase) % 8 == 0 ? 0.7 : 0.2 }, (0..<count).map { (($0 - phase) % 4 + 4) % 4 == 0 })
+        }
+        var edge = [Float](repeating: 0, count: count), starts = [Bool](repeating: false, count: count)
+        for g in 0..<count {
+            // Which bars phrases start on around here: where the corners
+            // nearby fall, the strong and the near ones counting most. One
+            // corner found a bar off (they're peaks of a change measured
+            // over four bars either side) doesn't move the count; a real
+            // two-bar tag, with the corners after it, does.
+            var four = [Float](repeating: 0, count: 4), eight = [Float](repeating: 0, count: 8)
+            for c in corners {
+                let weight = boundary[c] * exp(-Float(abs(c - g)) / 24)
+                four[c % 4] += weight
+                eight[c % 8] += weight
+            }
+            let p4 = four.indices.max { four[$0] < four[$1] }!
+            let p8 = eight[p4] >= eight[p4 + 4] ? p4 : p4 + 4
+            starts[g] = g % 4 == p4
+            let turns = g < boundary.count && boundary[g] >= 0.5 && corners.contains(g)
+            edge[g] = g % 4 != p4 ? 0 : turns ? 1 : g % 8 == p8 ? 0.7 : 0.2
+        }
+        return (edge, starts)
     }
 
     /// The notes a song's voice sings over `bars`, per pitch class; nil if
@@ -726,6 +803,9 @@ enum AutoPlacement {
         /// The blend doesn't fit into what's left of A's music once A is
         /// back at its own tempo: it runs past the end of it.
         var overruns = false
+        /// The jump offered was kept as an option (false: it left A no
+        /// phrase to go out on, and A plays straight through).
+        var jumps = true
         /// A's melody makes way before B's comes in, so A's beat (and
         /// voice) carry B's parts: see `TransitionBuilder.carry`.
         var carry = false
@@ -835,7 +915,12 @@ enum AutoPlacement {
         let handoffs = (swap == vocalIn ? [vocalIn] : [vocalIn, swap]) + (mash.map { [$0] } ?? [])
         let span = echo ? 0 : n
         let boundA = sa.boundaryStrength(), boundB = sb.boundaryStrength()
-        let phaseA = sa.phrasePhase(), phaseB = sb.phrasePhase()
+        // Each song's phrases, counted from its own section changes: the
+        // transition starts on one of A's and B is cued on one of its own,
+        // and the voices hand over where parts end and begin.
+        let (partsA, startsA) = AutoPlacement.phrases(sa, boundary: boundA)
+        let (partsB, startsB) = AutoPlacement.phrases(sb, boundary: boundB)
+        func onPhrase(_ starts: [Bool], _ g: Int) -> Bool { g >= 0 && g < starts.count ? starts[g] : g % 4 == 0 }
         let refA = sa.referenceLoudness + trimA, refB = sb.referenceLoudness + trimB
         func bound(_ x: [Float], _ i: Int) -> Float { i >= 0 && i < x.count ? x[i] : 0 }
 
@@ -849,12 +934,15 @@ enum AutoPlacement {
         let bridge = echo ? min(n, 8) : 0
         // Past a jump, only once the eight bars before the transition (and
         // a Wash Out's own) are all played ones.
+        // The jump on offer, unless it turns out to leave A no phrase to go
+        // out on (see below).
+        var skip = skip
         func onGrid(_ from: Int, _ through: Int) -> [Int] {
             guard from <= through else { return [] }
             // (Nor do the bars a jump leaves out count as A's time on its
             // own: past it, A has still played what it's owed.)
             let owed = entryRange?.lowerBound ?? 0
-            return (from...through).filter { ((($0 - phaseA) % 4) + 4) % 4 == 0 }
+            return (from...through).filter { onPhrase(startsA, $0) }
                 .filter { e in
                     skip.map { e + span <= $0.lowerBound || (e - bridge - 8 >= $0.upperBound && e - $0.count >= owed) } ?? true
                 }
@@ -875,9 +963,18 @@ enum AutoPlacement {
             let wanted = entryRange.lowerBound + bridge
             let floor = min(wanted, (soloFrom ?? entryRange.lowerBound) + bridge + runUp)
             entries = onGrid(wanted, min(entryRange.upperBound, latest))
+            // A jump takes bars out of the song: where A can then neither
+            // leave before it nor play its time after it, there is no jump,
+            // and A leaves from wherever suits. (With the jump kept, the
+            // only phrase left was A's first free one: a song gone eight
+            // seconds after it had the floor.)
+            if entries.isEmpty, skip != nil {
+                skip = nil
+                entries = onGrid(wanted, min(entryRange.upperBound, latest))
+            }
             if entries.isEmpty { entries = onGrid(floor, min(entryRange.upperBound, latest)).suffix(1) }
             if entries.isEmpty {
-                let first = floor + (((phaseA - floor) % 4) + 4) % 4
+                let first = (floor..<(floor + 8)).first { onPhrase(startsA, $0) } ?? floor
                 overruns = first > latest
                 entries = [first]
             }
@@ -895,10 +992,10 @@ enum AutoPlacement {
         let room = barsB - n - 8
         let lastCue = max(0, min(Int(Double(barsB) * 0.45), room,
                                  min(barsB, musicEndB) - span - glide - SetBuilder.minimumSoloBars(b.grid) - 16))
-        var cues = (0...lastCue).filter { ((($0 - phaseB) % 4) + 4) % 4 == 0 }
+        var cues = (0...lastCue).filter { onPhrase(startsB, $0) }
         // Too short for a cue on its phrase grid within that: its first
         // phrase if the song has the bars for it, else its first bar.
-        if cues.isEmpty { cues = [phaseB <= max(0, room) ? phaseB : 0] }
+        if cues.isEmpty { cues = [(0...max(0, min(3, room))).first { onPhrase(startsB, $0) } ?? 0] }
         if let spot { cues = [spot.cue] }
 
         // Where the low end changes hands for an entry and a cue: the first
@@ -946,7 +1043,7 @@ enum AutoPlacement {
             else { return false }
             let rise = sb.meanLoudness(bars: (c + switchAt)..<(c + switchAt + 8))
                 - sb.meanLoudness(bars: (c + switchAt - 4)..<(c + switchAt))
-            return preset == .dropSwap || sb.hook(c + switchAt) >= 0.4
+            return preset == .dropSwap || sb.hook(from: c + switchAt) >= 0.4
                 || (bound(boundB, c + switchAt) >= 0.5 && rise >= 3)
         }
         let powerA = AutoPlacement.powers(sa, trim: trimA), powerB = AutoPlacement.powers(sb, trim: trimB)
@@ -1023,7 +1120,7 @@ enum AutoPlacement {
                 // Out drops straight into it), or B has a real drop there.
                 let switchAt = switchBar(sw)
                 let drop = dropMoment(e: e, c: c, switchAt: switchAt)
-                score += 1.2 * sb.hook(c + switchAt)
+                score += 1.2 * sb.hook(from: c + switchAt)
                 if preset == .stemSwap {
                     let rise = sb.meanLoudness(bars: (c + switchAt)..<(c + switchAt + 8))
                         - sb.meanLoudness(bars: (c + switchAt - 4)..<(c + switchAt))
@@ -1063,7 +1160,7 @@ enum AutoPlacement {
                         // B singing over A's beat is the moment, best with
                         // its hook.
                         s += 0.5 * min(1, sb.meanActivity(.vocals, bars: (c + handoff)..<(c + n / 2)))
-                        s += 0.8 * sb.hook(c + handoff)
+                        s += 0.8 * sb.hook(from: c + handoff)
                     }
                     s -= 1.5 * sb.meanActivity(.vocals, bars: c..<(c + handoff))
                     s += 0.6 * sb.meanActivity(.vocals, bars: (c + handoff)..<(c + handoff + 4))
@@ -1076,7 +1173,9 @@ enum AutoPlacement {
                     // both songs), and everything after it only takes
                     // away: a spot that can't beat the best even so isn't
                     // worth simulating.
-                    if s + 2 <= best.score { continue }
+                    // (Two more for the voices handing over on the edges of
+                    // two parts, which is only known once they're placed.)
+                    if s + 2 + 2 * AutoPlacement.partWeight <= best.score { continue }
                     if let powerA, let powerB {
                         // B's vocal where the builder will find its line.
                         // A mashup only happens if it works as it plays
@@ -1099,15 +1198,15 @@ enum AutoPlacement {
                         /// the low end, whichever is first, leaving on the
                         /// breath or the gap between words nearest to that
                         /// (as the set builder decides it on the audio): up
-                        /// to two bars before, or a little after while
-                        /// nobody else is singing yet.
+                        /// to a bar before, or a little after while nobody
+                        /// else is singing yet.
                         func exit(for vin: Double) -> (bar: Double, kind: VocalPhrasing.Cut?) {
                             let limit = Double(min(n, sw ?? n))
                             let untilB = AutoPlacement.vocalSounds(sb, cue: c, from: vin, limit: max(vin + 4, Double(n)))
-                            let target = min(untilB, limit)
+                            let target = AutoPlacement.phraseEnd(before: min(untilB, limit))
                             let after = clashHere ? 0 : target >= limit ? 0.5 : 2
                             return AutoPlacement.vocalCut(sa, at: e, opening: false, target: target,
-                                                          earliest: target - min(AutoPlacement.vocalWait, target),
+                                                          earliest: target - min(1, target),
                                                           latest: min(target + after, max(target, untilB), Double(n)))
                         }
                         var plans: [Plan] = []
@@ -1134,7 +1233,7 @@ enum AutoPlacement {
                             // (A Wash Out drops B's beat with its voice
                             // open, or on its next word.)
                             return AutoPlacement.vocalCut(sb, at: c, opening: true, target: echo ? 0 : Double(aim),
-                                                          earliest: echo ? 0 : Double(first),
+                                                          earliest: echo ? 0 : max(Double(first), Double(aim) - (clashHere ? 0 : 0.5)),
                                                           latest: (echo ? 0 : Double(aim)) + AutoPlacement.vocalWait)
                         }
                         /// Before the swap B's voice sings over A's melody
@@ -1240,6 +1339,7 @@ enum AutoPlacement {
                         // middle of a line. A's vocal should find a line end
                         // in the bridge's last bars.
                         s -= AutoPlacement.cutCost(in: heardIn, out: heardExit)
+                        s += AutoPlacement.partWeight * (bound(partsA, e) + bound(partsB, c + Int((heardVocal ?? 0).rounded())))
                         // (And B's voice shouldn't trail its beat by bars.)
                         s -= 0.3 * Float(heardVocal ?? 0)
                         if s > best.score { best = (e, c, handoff, sw, s); bestHeard = heard; bestVocal = heardVocal; bestCarry = heardCarry }
@@ -1255,6 +1355,12 @@ enum AutoPlacement {
                     // find no breath or gap between words to cut on, a
                     // voice is faded through the sentence it's singing.
                     s -= AutoPlacement.cutCost(in: heardIn, out: heardExit)
+                    // And where: a singer is taken out at the end of a part
+                    // and let in at the start of one, not between two lines
+                    // of a verse. That, more than a clean cut, is what makes
+                    // a handover sound meant.
+                    s += AutoPlacement.partWeight * (bound(partsA, e + AutoPlacement.partBar(leaving: heardOut ?? Double(out)))
+                                + bound(partsB, c + Int((heardVocal ?? Double(handoff)).rounded())))
                     // And nobody singing where a song has words: A's voice
                     // gone before B's has come (or B's held back where A
                     // has nothing to sing) is a hole in the blend's middle.
@@ -1289,7 +1395,7 @@ enum AutoPlacement {
 
         var payoff: [String] = []
         let switchAt = switchBar(best.lowSwap)
-        if sb.hook(best.cue + switchAt) >= 0.4 { payoff.append(echo ? "drops into B's hook" : "B's hook on the switch") }
+        if sb.hook(from: best.cue + switchAt) >= 0.4 { payoff.append(echo ? "drops into B's hook" : "B's hook on the switch") }
         let isMashup = handoff == mash
         if isMashup { payoff.append("mashup: B sings over A's beat") }
         let drops = dropMoment(e: best.entry, c: best.cue, switchAt: switchAt)
@@ -1299,6 +1405,7 @@ enum AutoPlacement {
                       reason: notes.joined(separator: " · "), score: best.score, mashup: isMashup,
                       dropMoment: drops, payoff: payoff, together: bestHeard, expectedVocalIn: bestVocal,
                       notesClash: notesClash(e: best.entry, c: best.cue, sw: best.lowSwap), overruns: overruns,
+                      jumps: skip != nil,
                       carry: bestCarry)
     }
 }

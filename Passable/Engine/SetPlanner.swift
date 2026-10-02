@@ -656,14 +656,13 @@ struct SetMix: @unchecked Sendable {
         /// silence just before (nil: no drop moment).
         var dropAt: Double?
         /// How B's vocal came in: "breath" (before a line), "word" (in the
-        /// gap before a word), "blend" (mid-word, faded in), "grid" (on the
-        /// bar, nothing sounding); nil if automatic phrasing wasn't used.
+        /// gap before a word), "bar" (opened on the downbeat, singing),
+        /// "grid" (on the bar, nothing sounding); nil if automatic phrasing
+        /// wasn't used.
         var vocalInKind: String?
-        /// A's vocal was still singing where it left, so it blended out.
-        var vocalOutBlend = false
         /// What A's vocal left on: "line" (a breath between lines), "word"
-        /// (a gap between words), "blend" (mid-word, faded); nil if
-        /// automatic phrasing wasn't used.
+        /// (a gap between words), "bar" (cut on the downbeat, singing); nil
+        /// if automatic phrasing wasn't used.
         var vocalOutKind: String?
         /// Bars of A a club edit left out before this transition.
         var skippedBars = 0
@@ -1177,9 +1176,12 @@ enum VocalPhrasing {
     /// starts there). A voice that never falls silent (long notes, a
     /// reverb that fills the gaps) still has words: where a sixteenth is
     /// 10 dB under the one before, a word has died away, and where it is
-    /// 10 dB over it, one starts. A breath is worth going a bar further for
-    /// than a gap between words, and on a tie the voice stays (or waits)
-    /// rather than overlap the other one. nil: it sings straight through
+    /// 10 dB over it, one starts. The target is where the voice's part ends
+    /// or begins (a phrase boundary of its song, as placement chose it), so
+    /// the cut stays with it: a gap between words right there beats a
+    /// breath a beat away, which is a line into the next part, or one short
+    /// of this one's end. Dense vocals (backing voices, a long reverb)
+    /// leave few real breaths anyway. nil: it sings straight through
     /// `from...through`.
     /// - Parameter level: the voice's level (dB) over sixteenth k.
     /// - Parameter reference: the level it sings at.
@@ -1200,7 +1202,7 @@ enum VocalPhrasing {
             // Taken out late, it sings over the song that has taken over;
             // let in early, over the one that hasn't left.
             let wrongSide = opening ? k < 0 : k > 0
-            let cost = Double(abs(k)) / Double(slots) + (kind == .word ? 1 : 0) + extra + (wrongSide ? 0.25 : 0)
+            let cost = 2 * Double(abs(k)) / Double(slots) + (kind == .word ? 0.25 : 0) + extra / 2 + (wrongSide ? 0.1 : 0)
             if cost < best?.cost ?? .infinity { best = (k, kind, cost) }
         }
         return best.map { ($0.slot, $0.kind) }
@@ -1425,7 +1427,7 @@ enum SetBuilder {
             let draft = drafts[k - 1]
             let isEdited = draft.isEdited, byHand = draft.byHand, plan = draft.plan, entryRange = draft.entryRange
             var skippedBars = 0
-            if let skip = draft.skip, plan.placement.entryBar >= skip.upperBound {
+            if let skip = draft.skip, plan.placement.jumps, plan.placement.entryBar >= skip.upperBound {
                 planned[k - 1].skip = (ga.downbeat(skip.lowerBound), ga.downbeat(skip.upperBound))
                 a = planned[k - 1]
                 skippedBars = skip.count
@@ -1608,8 +1610,12 @@ enum SetBuilder {
                         // start, with A's gone, left bars on end with
                         // nobody singing. Singing straight through, it
                         // comes in on the bar (eased in below).
+                        // (From half a bar before it's due where that's
+                        // allowed: a line often starts with a pickup
+                        // ahead of its bar.)
                         if let cut = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: ref, opening: true,
-                                                       target: start + aim * bar, earliest: start + first * bar,
+                                                       target: start + aim * bar,
+                                                       earliest: start + max(first, aim - (keysClash ? 0 : 0.5)) * bar,
                                                        latest: start + (aim + AutoPlacement.vocalWait) * bar, bar: bar) {
                             vocalIn = (cut.time - start) / bar
                             vocalInKind = cut.kind == .line ? "breath" : "word"
@@ -1642,17 +1648,20 @@ enum SetBuilder {
                     // go unsung with nobody singing instead, so it sings
                     // up to there and blends out (decided below).
                     // On the breath or the gap between words nearest to that:
-                    // up to a couple of bars before, or a little after
+                    // up to a bar before, or a little after
                     // (to the end of a word that runs over the bar line)
                     // while B's isn't singing yet.
-                    let target = acappella ? untilB : min(untilB, sw)
+                    // (At the end of the phrase it's in rather than a bar or two
+                    // into the next: see `AutoPlacement.phraseEnd`.)
+                    let target = acappella ? untilB : AutoPlacement.phraseEnd(before: min(untilB, sw))
                     if let refA {
                         let after = acappella || keysClash ? 0 : target >= sw ? 0.5 : 2
                         let cut = VocalPhrasing.cut(vocalsA, offset: aOffset, reference: refA, opening: false,
                                                     target: start + target * bar,
-                                                    earliest: start + (target - min(AutoPlacement.vocalWait, target)) * bar,
+                                                    earliest: start + (target - min(1, target)) * bar,
                                                     latest: start + min(target + after, max(target, untilB), n) * bar, bar: bar)
-                        vocalOut = cut.map { ($0.time - start) / bar } ?? min(target, n)
+                        // (No cut to be found: on the nearest downbeat.)
+                        vocalOut = cut.map { ($0.time - start) / bar } ?? min(max(target.rounded(), 0), max(target, untilB), n)
                         vocalOutKind = cut?.kind.rawValue
                     }
                 }
@@ -1660,7 +1669,6 @@ enum SetBuilder {
             var payoff: [String] = []
             var room = 0.0
             var dropAt: Double?
-            var vocalOutBlend = false
             if !byHand {
                 // Grooves that won't lock (a swung beat against a straight
                 // one) aren't layered: A's beat plays on and B's drums come
@@ -1702,45 +1710,36 @@ enum SetBuilder {
                     room = AutoPlacement.room(plain, a: pa, e: edit.entryBar, b: pb, c: edit.cueBar, from: q,
                                               to: max(q + 1, Int(switchBar)))
                 }
-                var made = make(outFade: 0, inFade: 0, room: room)
-                // Cut or blend, from what each vocal is doing right there. A
-                // cut is clean on a breath or between two words, and that
-                // is where the voices were put above wherever they have
-                // one. Only a voice that sings straight through where it
-                // has to go is blended out under its echo over the bar
-                // before (a cut would chop the word), and one that comes in
-                // mid-word blended in over half a bar.
+                // Both voices are cut, never faded: on a breath or between
+                // two words wherever they have one near (found above), and
+                // otherwise on the downbeat itself, the way a DJ takes a
+                // voice out on the one with its last words thrown into the
+                // echo, and opens the next on the one of its phrase. A voice
+                // faded down through a sentence is a crossfade; a cut on the
+                // beat is a decision.
                 let bar = blendBar, beat = bar / 4
-                var outFade = 0.0, inFade = 0.0
-                // Right at the cut, on both sides: a word that runs a few
-                // hundred ms past the downbeat is cut in two, even if the
-                // beat after it is mostly quiet.
+                let made = make(outFade: 0, inFade: 0, room: room)
                 // (The builder may have moved the exit off the cut found: then
                 // it's judged where it ended up.)
                 let onCut = vocalOutKind != nil && made.vocalExit.map { abs($0 - (vocalOut ?? .infinity)) < 1e-6 } ?? false
-                if !onCut, let exit = made.vocalExit, let vocalsA = a.stems[.vocals],
-                   let ref = VocalPhrasing.reference(a.loaded.analysis.structure),
-                   VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: ref, at: start + exit * bar, beat: beat)
-                    || (VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: ref, at: start + exit * bar - beat / 2,
-                                               beat: beat / 2)
-                        && VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: ref, at: start + exit * bar,
-                                                  beat: beat / 2)) {
-                    outFade = 1
+                if let exit = made.vocalExit {
+                    let singing = a.stems[.vocals].flatMap { vocalsA in
+                        VocalPhrasing.reference(a.loaded.analysis.structure).map { ref in
+                            VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: ref, at: start + exit * bar, beat: beat / 2)
+                        }
+                    } ?? false
+                    vocalOutKind = onCut ? vocalOutKind : singing ? "bar" : "line"
+                } else {
+                    vocalOutKind = nil
                 }
-                if vocalInKind == nil, let entry = made.vocalEntry, let vocalsB = matched.stems[.vocals],
-                   let ref = VocalPhrasing.reference(b.analysis.structure),
-                   VocalPhrasing.sounding(vocalsB, offset: offset + nudge, reference: ref, at: start + entry * bar - beat,
-                                          beat: beat) {
-                    inFade = 0.5
-                }
-                if outFade > 0 || inFade > 0 { made = make(outFade: outFade, inFade: inFade, room: room) }
-                if made.vocalEntry != nil, VocalPhrasing.reference(b.analysis.structure) != nil {
-                    vocalInKind = inFade > 0 ? "blend" : vocalInKind ?? "grid"
+                if let entry = made.vocalEntry, let vocalsB = matched.stems[.vocals],
+                   let ref = VocalPhrasing.reference(b.analysis.structure) {
+                    let singing = VocalPhrasing.sounding(vocalsB, offset: offset + nudge, reference: ref,
+                                                         at: start + entry * bar - beat / 2, beat: beat / 2)
+                    vocalInKind = vocalInKind ?? (singing ? "bar" : "grid")
                 } else {
                     vocalInKind = nil
                 }
-                vocalOutBlend = outFade > 0
-                vocalOutKind = outFade > 0 ? "blend" : onCut ? vocalOutKind : made.vocalExit == nil ? nil : "line"
                 edit.lanes = made.lanes
                 edit.rolls = made.rolls
                 payoff = plan.placement.payoff.filter { !$0.hasPrefix("mashup") && $0 != "roll into the drop" }
@@ -1782,7 +1781,7 @@ enum SetBuilder {
                                      drumsLayered: align.grooves, drumsLinger: align.groovesAfter,
                                      vocalOut: vocalOut.map { start + $0 * blendBar },
                                      vocalIn: vocalIn.map { start + $0 * blendBar }, payoff: payoff, dropAt: dropAt,
-                                     vocalInKind: vocalInKind, vocalOutBlend: vocalOutBlend, vocalOutKind: vocalOutKind,
+                                     vocalInKind: vocalInKind, vocalOutKind: vocalOutKind,
                                      skippedBars: skippedBars,
                                      melodiesClash: keysClash, room: room))
             shifts.append(edit.semitones)
