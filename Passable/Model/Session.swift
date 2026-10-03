@@ -613,7 +613,13 @@ final class Session: ObservableObject {
     /// Re-pick the entry and cue bars for the current preset and length,
     /// then write the preset there.
     func autoArrange() {
-        if let host { return host.revertToAuto() }
+        // In a set, the box ticks at once: the set rebuilds the automatic
+        // transition behind it (a long set used to take long enough that
+        // ticking it looked like it did nothing).
+        if let host {
+            (isEdited, byHand) = (false, false)
+            return host.revertToAuto()
+        }
         guard let a = deckA.analysis, let b = deckB.analysis else { return }
         checkpoint()
         resetAutomation()
@@ -882,14 +888,11 @@ final class Session: ObservableObject {
     func snap(_ seconds: Double, division: Double) -> Double {
         let sr = AudioIO.sampleRate
         if let b = gridB, seconds >= b.from {
-            let step = b.grid.beatSeconds / division
             let x = b.map.source((seconds - b.offset) * sr) / sr
-            let snapped = b.grid.firstDownbeat + ((x - b.grid.firstDownbeat) / step).rounded() * step
-            return b.offset + b.map.output(snapped * sr) / sr
+            return b.offset + b.map.output(b.grid.snapped(x, division: division) * sr) / sr
         }
         guard let g = masterGrid else { return seconds }
-        let step = g.beatSeconds / division
-        return timeA(g.firstDownbeat + ((nativeA(seconds) - g.firstDownbeat) / step).rounded() * step)
+        return timeA(g.snapped(nativeA(seconds), division: division))
     }
 
     // MARK: - Rendering

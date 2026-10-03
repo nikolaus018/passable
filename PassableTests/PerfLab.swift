@@ -36,6 +36,13 @@ final class PerfLab: XCTestCase {
         t = clock()
         let costs = SetOrdering.costMatrix(analyses, drums: hits)
         print(String(format: "PERF cost matrix %dx%d: %.2f s", costs.count, costs.count, clock() - t))
+        _ = SetOrdering.costMatrix(analyses, drums: hits, remembered: true)
+        t = clock()
+        let again = SetOrdering.costMatrix(analyses, drums: hits, remembered: true)
+        let fresh = SetOrdering.costMatrix(analyses, drums: hits)
+        let worst = zip(again.joined(), costs.joined()).map { abs($0 - $1) }.max() ?? 0
+        let noise = zip(fresh.joined(), costs.joined()).map { abs($0 - $1) }.max() ?? 0
+        print(String(format: "PERF cost matrix remembered: %.2f s, differs by %.6f (fresh twice: %.6f)", clock() - t, worst, noise))
         t = clock()
         _ = SetOrdering.order(costs, washOuts: SetOrdering.washOuts(analyses), energies: analyses.map(SetOrdering.energy))
         print(String(format: "PERF order: %.2f s", clock() - t))

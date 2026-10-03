@@ -1,4 +1,5 @@
 import Accelerate
+import CryptoKit
 import Foundation
 
 /// The mixing rules shared by the two-deck editor and the set builder.
@@ -334,6 +335,39 @@ struct PairPlan: Equatable {
     }
 }
 
+/// Pair prices for ordering, kept between launches: a pair is planned in
+/// full to be priced (tens of milliseconds), and a set of 58 songs has
+/// 3,306 of them. Keyed by each song's analysis, so a song analysed again
+/// (or a planner that prices differently: `version`) is priced again.
+enum PairCosts {
+    /// Bumped whenever planning or pricing changes.
+    static let version = "1"
+
+    private static var url: URL {
+        StemCache.root.deletingLastPathComponent().appendingPathComponent("pair-costs.json")
+    }
+    private static let lock = NSLock()
+
+    static func fingerprint(_ analysis: TrackAnalysis) -> String {
+        let data = (try? JSONEncoder().encode(analysis)) ?? Data()
+        return SHA256.hash(data: data + Data(version.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func load() -> [String: Double] {
+        lock.lock(); defer { lock.unlock() }
+        guard let data = try? Data(contentsOf: url) else { return [:] }
+        return (try? JSONDecoder().decode([String: Double].self, from: data)) ?? [:]
+    }
+
+    static func save(_ costs: [String: Double]) {
+        lock.lock(); defer { lock.unlock() }
+        // (No more than a few sets' worth: oldest entries aren't tracked, so
+        // past that it starts over.)
+        let kept = costs.count > 200_000 ? [:] : costs
+        if let data = try? JSONEncoder().encode(kept) { try? data.write(to: url, options: .atomic) }
+    }
+}
+
 enum SetOrdering {
     /// 0…1: how hard a track drives — tempo, and how much of it has a full
     /// beat and bass line going.
@@ -350,8 +384,13 @@ enum SetOrdering {
     /// Every ordered pair's transition cost.
     /// - Parameter drums: each song's drum hits (`BeatAlign.attacks(of:)`),
     ///   so pairs whose grooves lock are priced as the blends they'll be.
-    static func costMatrix(_ analyses: [TrackAnalysis], drums: [[Float]?]? = nil) -> [[Double]] {
+    /// - Parameter remembered: keep each pair's price on disk (see
+    ///   `PairCosts`): ordering the same songs again, or a set sharing
+    ///   songs with one ordered before, only prices the pairs it hasn't.
+    static func costMatrix(_ analyses: [TrackAnalysis], drums: [[Float]?]? = nil, remembered: Bool = false) -> [[Double]] {
         let n = analyses.count
+        let prints = remembered ? analyses.map(PairCosts.fingerprint) : []
+        let known = remembered ? PairCosts.load() : [:]
         // Every pair is independent: all cores at once.
         var flat = [Double](repeating: 0, count: n * n)
         flat.withUnsafeMutableBufferPointer { out in
@@ -359,6 +398,7 @@ enum SetOrdering {
             DispatchQueue.concurrentPerform(iterations: n * n) { k in
                 let i = k / n, j = k % n
                 guard i != j else { return }
+                if remembered, let cost = known[prints[i] + prints[j]] { out[k] = cost; return }
                 // As the set will play it: A has the floor from about a
                 // quarter in (after its own transition in), and leaves
                 // paced for a crowd, not wherever suits this pair best.
@@ -370,6 +410,11 @@ enum SetOrdering {
                 out[k] = PairPlan.make(a: a, b: analyses[j], entryRange: (soloFrom + SetBuilder.minimumSoloBars(a.grid))...Int.max,
                                        soloFrom: soloFrom, drums: hits, loops: false).cost(a: a, b: analyses[j])
             }
+        }
+        if remembered {
+            var all = known
+            for i in 0..<n { for j in 0..<n where i != j { all[prints[i] + prints[j]] = flat[i * n + j] } }
+            PairCosts.save(all)
         }
         return (0..<n).map { Array(flat[($0 * n)..<($0 * n + n)]) }
     }

@@ -65,6 +65,18 @@ struct BeatGrid: Codable, Equatable {
         return Double(k) + (seconds - d[k]) / (d[k + 1] - d[k])
     }
 
+    /// `seconds` moved onto the nearest `1 / division` of a beat: the
+    /// grid's own beats, or, for a song with its bars one by one, quarters
+    /// of each of those bars.
+    func snapped(_ seconds: Double, division: Double) -> Double {
+        guard !isSteady else {
+            let step = beatSeconds / division
+            return firstDownbeat + ((seconds - firstDownbeat) / step).rounded() * step
+        }
+        let parts = 4 * division
+        return time(bars: (bars(at: seconds) * parts).rounded() / parts)
+    }
+
     /// Whole bars that start inside a file of this length.
     func barCount(duration: Double) -> Int {
         max(1, Int(bars(at: duration).rounded(.down)))

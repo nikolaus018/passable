@@ -408,6 +408,14 @@ struct LaneCanvas: View {
         if let peaks = session.peaks(for: lane) {
             drawWaveform(context, size, peaks: peaks, offset: session.laneOffset(lane), color: color)
         }
+        // A loop, marked where it starts.
+        for r in session.rolls where r.side == lane.side && r.stem == lane.stem && r.seamless == true {
+            let x = viewport.x(r.start)
+            context.stroke(Path { $0.move(to: CGPoint(x: x, y: 0)); $0.addLine(to: CGPoint(x: x, y: size.height)) },
+                           with: .color(color.opacity(0.7)), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+            context.draw(Text("LOOP").font(.system(size: 9, weight: .bold)).foregroundColor(color),
+                         at: CGPoint(x: x + 4, y: 8), anchor: .leading)
+        }
         drawAutomation(context, size, color: color)
     }
 
@@ -421,9 +429,16 @@ struct LaneCanvas: View {
         guard width > 0, !peaks.isEmpty else { return }
         var raw = [CGFloat](repeating: -1, count: width + 1)
         var faded = raw
+        // Where this lane loops (see `Roll.seamless`), what's drawn is
+        // what plays: the looped bars, over and over.
+        let loops = session.rolls.filter { $0.side == lane.side && $0.stem == lane.stem && $0.seamless == true }
+        func heard(_ t: Double) -> Double {
+            guard let r = loops.first(where: { t >= $0.start && t < $0.end }), r.length > 0 else { return t }
+            return r.anchor + (t - r.start).truncatingRemainder(dividingBy: r.length)
+        }
         for px in 0...width {
-            let t0 = viewport.seconds(CGFloat(px)) - offset
-            let t1 = viewport.seconds(CGFloat(px + 1)) - offset
+            let t0 = heard(viewport.seconds(CGFloat(px))) - offset
+            let t1 = t0 + (viewport.seconds(CGFloat(px + 1)) - viewport.seconds(CGFloat(px)))
             var i0 = Int(t0 / hop), i1 = max(i0 + 1, Int(t1 / hop))
             guard i1 > 0, i0 < peaks.count else { continue }
             i0 = max(0, i0); i1 = min(peaks.count, i1)
@@ -433,7 +448,7 @@ struct LaneCanvas: View {
             // ones readable.
             let a = CGFloat(pow(min(1, peak * 1.2), 0.7))
             raw[px] = a
-            let gain = lane.isMuted ? 0 : Double(LaneParameter.gain(lane.value(.volume, at: t0 + offset)))
+            let gain = lane.isMuted ? 0 : Double(LaneParameter.gain(lane.value(.volume, at: viewport.seconds(CGFloat(px)))))
             faded[px] = a * CGFloat(gain)
         }
         func shape(_ amps: [CGFloat]) -> Path {
