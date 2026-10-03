@@ -147,7 +147,8 @@ struct PairPlan: Equatable {
     ///   (see `TransitionEdit.byHand`): only what happens inside is planned.
     static func make(a: TrackAnalysis, b: TrackAnalysis, entryRange: ClosedRange<Int>? = nil, aShift: Int = 0,
                      soloFrom: Int? = nil, skip: Range<Int>? = nil, drums: (a: [Float], b: [Float])? = nil,
-                     fixed: TransitionEdit? = nil, clashing: Bool = false) -> PairPlan {
+                     fixed: TransitionEdit? = nil, clashing: Bool = false, locking: Bool = false,
+                     loops: Bool = true) -> PairPlan {
         let rate = MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)
         // (A song without a steady tempo is bridged whatever was chosen
         // for it: there is no beat to lay another on.)
@@ -223,8 +224,10 @@ struct PairPlan: Equatable {
             options.append((.dropSwap, 8, length(8) - 0.2, 0))
             // And each Stem Swap over A's beat looped (see
             // `TransitionBuilder.loop`): four bars, the phrase a DJ loops.
-            options.append((.stemSwap, 16, length(16), MixMath.loopBars))
-            options.append((.stemSwap, 8, length(8), MixMath.loopBars))
+            if loops {
+                options.append((.stemSwap, 16, length(16), MixMath.loopBars))
+                options.append((.stemSwap, 8, length(8), MixMath.loopBars))
+            }
         }
         options = options.filter { $0.preset == .echoOut || Double($0.bars) * barSeconds <= MixMath.maxBlendSeconds
             || $0.bars <= 8 }
@@ -267,7 +270,9 @@ struct PairPlan: Equatable {
         // pair is placed again for what will really play, and that spot
         // kept if they lock there too.
         var best = search(drumsLock: false), drumsLock = false
-        let found = locks(best)
+        // (Heard to lock on the audio where the worst case was planned:
+        // see `SetBuilder.build(locked:)`.)
+        let found = locking ? (before: true, after: locks(best).after) : locks(best)
         if found.before {
             // A's drums linger past the swap only where they sit there too:
             // placed for what was found, and once more without them if at
@@ -278,7 +283,7 @@ struct PairPlan: Equatable {
                 layered = search(drumsLock: true, drumsLinger: false)
                 there = locks(layered)
             }
-            if there.before { (best, drumsLock) = (layered, true) }
+            if there.before || locking { (best, drumsLock) = (layered, true) }
         }
         // Whether the melodies swap is what placement heard at the spot it
         // chose (the keys only for songs analysed without notes to go by):
@@ -312,8 +317,10 @@ struct PairPlan: Equatable {
         // Nor can a blend where placement already knows the two are hardly
         // heard together (a short one, B's intro too thin under A): as much
         // two songs in a row as a clash, so priced like one.
+        // (0.4 a bar short: at 0.2 a 58-song set ordered itself into 14
+        // such pairs where a set ordered by hand had 10.)
         if preset != .echoOut, let together = placement.together {
-            cost += 0.2 * Double(max(0, min(6, bars / 2 + 2) - together))
+            cost += 0.4 * Double(max(0, min(6, bars / 2 + 2) - together))
         }
         // A song a semitone off its own key, for all of its time in the
         // set: only worth it where nothing else sits.
@@ -357,8 +364,11 @@ enum SetOrdering {
                 // paced for a crowd, not wherever suits this pair best.
                 let a = analyses[i], soloFrom = a.grid.barCount(duration: a.duration) / 4
                 let hits = drums.flatMap { d in d[i].flatMap { x in d[j].map { (a: x, b: $0) } } }
+                // (Priced without a loop, which only ever makes a pair
+                // better, and is decided when the set is built: twice as
+                // quick, for a long set half a minute less of ordering.)
                 out[k] = PairPlan.make(a: a, b: analyses[j], entryRange: (soloFrom + SetBuilder.minimumSoloBars(a.grid))...Int.max,
-                                       soloFrom: soloFrom, drums: hits).cost(a: a, b: analyses[j])
+                                       soloFrom: soloFrom, drums: hits, loops: false).cost(a: a, b: analyses[j])
             }
         }
         return (0..<n).map { Array(flat[($0 * n)..<($0 * n + n)]) }
@@ -1084,10 +1094,12 @@ enum BeatAlign {
         // before the swap, 0 after) a flam throughout. Before the swap is
         // where both kits play for bars, so it decides; A's drums linger
         // after it only if they sit at the same nudge there.
-        // With no more than a single clear window in all, that one is
-        // what there is to go by: B's hits land on A's where it says.
+        // A single window is too little to move B by: the two grids, each
+        // fitted to its song's hits over the whole song, are better
+        // evidence than two bars (one window's 31 ms put Safari 39 ms off
+        // Good Feeling, whose grids met within 8).
         let all = first + second
-        let nudge = consensus(first) ?? consensus(second) ?? (all.count == 1 ? all[0].lag : 0)
+        let nudge = consensus(first) ?? consensus(second) ?? 0
         // Before the swap it's A's kit under B's tops, after it the other
         // way round: each half can groove or not on its own.
         func lock(_ windows: [Window]) -> Double {
@@ -1206,6 +1218,14 @@ enum BeatAlign {
     /// patterns simply differ and meet anywhere.
     static func flam(_ lags: [Double]) -> Double {
         lags.isEmpty ? 0 : lags.map(abs).sorted()[lags.count / 2]
+    }
+
+    /// Whether two kits heard together flam: typically more than 10 ms
+    /// apart, or clearly apart (20 ms) for two bars anywhere. (Two bars of
+    /// a 28 ms flam between two that sit are still heard: the median
+    /// called that pair locked.)
+    static func flams(_ lags: [Double]) -> Bool {
+        !lags.isEmpty && (flam(lags) > 0.010 || lags.contains { abs($0) > 0.020 })
     }
 
     /// `onsets` of mono audio, frame 0 at its first sample.
@@ -1600,6 +1620,7 @@ enum SetBuilder {
     static func build(_ tracks: [(url: URL, loaded: TrackProcessor.Loaded)], edits: [PairKey: TransitionEdit] = [:],
                       reuse: [URL: TrackProcessor.Matched] = [:], previous: SetMix? = nil,
                       exits: [PairKey: Exit] = [:], unlocked: Set<PairKey> = [], clashed: Set<PairKey> = [],
+                      locked: Set<PairKey> = [],
                       processor: TrackProcessor,
                       progress: @escaping @Sendable (String) -> Void) async throws -> SetMix {
         precondition(!tracks.isEmpty)
@@ -1675,7 +1696,8 @@ enum SetBuilder {
                                          aShift: shifts[k - 1], soloFrom: settledBar, skip: skip,
                                          drums: unlocked.contains(key) ? nil
                                              : hits[k - 1].flatMap { x in hits[k].map { (a: x, b: $0) } },
-                                         fixed: chosen, clashing: clashed.contains(key))
+                                         fixed: chosen, clashing: clashed.contains(key),
+                                         locking: locked.contains(key) && !unlocked.contains(key))
                 let edit = inRange(byHand ? edits[key]! : TransitionEdit(
                     entryBar: plan.placement.entryBar, cueBar: plan.placement.cueBar, preset: plan.preset,
                     bars: plan.bars, semitones: plan.semitones, lanes: [], byHand: false))
@@ -1757,7 +1779,7 @@ enum SetBuilder {
         var sinceDrop = 3
         // Pairs planned for grooves that lock which turned out not to, and
         // for melodies that layer which turned out to clash.
-        var broken: Set<PairKey> = [], clashing: Set<PairKey> = []
+        var broken: Set<PairKey> = [], clashing: Set<PairKey> = [], locking: Set<PairKey> = []
 
         for k in 1..<tracks.count {
             if Task.isCancelled { throw CancellationError() }
@@ -1947,11 +1969,11 @@ enum SetBuilder {
                     // One stretch of the two hitting clearly apart is
                     // heard (there are only two or four to a blend).
                     let before = BeatAlign.heardLags(a: Array(da[0..<swap]), b: Array(db[0..<swap]), window: 2 * blendBar)
-                    if !before.isEmpty, BeatAlign.flam(before) > 0.010 { align.topsSplit = true }
+                    if BeatAlign.flams(before) { align.topsSplit = true }
                     // The same for A's drums playing on under B's after the
                     // swap: where they flam there, they stop on it.
                     let after = BeatAlign.heardLags(a: Array(da[swap...]), b: Array(db[swap...]), window: 2 * blendBar)
-                    if !after.isEmpty, BeatAlign.flam(after) > 0.010 { align.lingerSplit = true }
+                    if BeatAlign.flams(after) { align.lingerSplit = true }
                 }
             }
             /// The sixteenth of each song that plays at master `t`, with
@@ -1970,6 +1992,13 @@ enum SetBuilder {
             }
             if !byHand, span > 0, plan.drumsLock, !align.grooves {
                 broken.insert(PairKey(from: a.url, to: tracks[k].url))
+            }
+            // The other way round: placed for B's drums not building in,
+            // and they sit with A's clearly on the audio. A blend placed
+            // for that worst case may not be the best one there is.
+            if !byHand, span > 0, edit.preset != .echoOut, !plan.drumsLock, align.grooves, align.votesBefore >= 2,
+               align.lockBefore > 0.8 {
+                locking.insert(PairKey(from: a.url, to: tracks[k].url))
             }
             var vocalIn: Double?, vocalOut: Double?
             var mashup = false
@@ -2299,11 +2328,11 @@ enum SetBuilder {
         // are, and the rest of the set is taken over as built.
         // So is one placed for two melodies layering that the audio says
         // clash (how much notes grate reads a little differently there).
-        if !broken.isSubset(of: unlocked) || !clashing.isSubset(of: clashed) {
+        if !broken.isSubset(of: unlocked) || !clashing.isSubset(of: clashed) || !locking.isSubset(of: locked) {
             return try await build(tracks, edits: edits, reuse: renditions,
                                    previous: SetMix(tracks: planned, transitions: transitions, length: 0), exits: exits,
                                    unlocked: unlocked.union(broken), clashed: clashed.union(clashing),
-                                   processor: processor, progress: progress)
+                                   locked: locked.union(locking), processor: processor, progress: progress)
         }
 
         // The last record plays out to the end of its music, fading over the

@@ -975,4 +975,21 @@ final class PayoffTests: XCTestCase {
         XCTAssertLessThan(Harmony.roughness(chord(0), chord(7)), Harmony.roughTolerance)
         XCTAssertLessThan(Harmony.roughness(chord(0), chord(5)), Harmony.roughTolerance, "nor one a fourth away")
     }
+
+    /// A line the recogniser ran through a pause is two lines where the
+    /// voice really stops for three sixteenths or more; a line past the
+    /// song's bars is no trouble.
+    func testLinesFollowTheVoice() {
+        var s = popSong()
+        s.stemLevel = ["vocals": [Float](repeating: -20, count: 64)]
+        // Silent from 32.5 to 33.5 s (sixteenths 260 to 267 at 120 BPM).
+        s.vocalSixteenthLevel = (0..<1024).map { (260..<268).contains($0) ? -80 : -20 }
+        s.setLines([VocalLine(start: 30, end: 36, words: 10, repeats: 0),
+                    VocalLine(start: 200, end: 210, words: 6, repeats: 0)], tried: "test", grid: BeatGrid(bpm: 120, firstDownbeat: 0))
+        XCTAssertEqual(s.midLine(at: 250), true)
+        XCTAssertEqual(s.midLine(at: 264), false, "the pause")
+        XCTAssertTrue(s.lineTurns(at: 268), "the second half starts after it")
+        XCTAssertEqual(s.midLine(at: 280), true)
+        XCTAssertFalse(s.lineTurns(at: 5000))
+    }
 }

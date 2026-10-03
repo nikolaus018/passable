@@ -66,7 +66,7 @@ enum Lyrics {
     }
 
     /// Bumped when lines are made differently, so songs are heard again.
-    private static let version = 11
+    private static let version = 13
 
     /// The song's lines; nil if no installed language hears words in it
     /// (an instrumental, a language without its model) or there's no

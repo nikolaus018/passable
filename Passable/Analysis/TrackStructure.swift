@@ -56,6 +56,10 @@ struct TrackStructure: Codable, Equatable {
     /// elsewhere in the song (0…1: a chorus; -1: nothing sung).
     var lineStarts: [Int]?, lineEnds: [Int]?
     var lyricRepeat: [Float]?
+    /// The same per sixteenth, for looking up quickly: 1 where one line
+    /// ends and the next starts (`lineTurns`), 2 where one is being sung
+    /// through (`midLine`).
+    var lineMarks: [UInt8]?
 
     /// How loud the track is when it's going: the level of its loud bars
     /// (80th percentile), which is what a DJ matches with the trim knob.
@@ -395,21 +399,61 @@ extension TrackStructure {
         // hooks into worse handovers.)
         if let chroma = barChroma { hookStart = Self.hookStarts(chroma: chroma, structure: self) }
         guard let lines, !lines.isEmpty else {
-            (lineStarts, lineEnds, lyricRepeat) = (lines == nil ? nil : [], lines == nil ? nil : [], nil)
+            (lineStarts, lineEnds, lyricRepeat, lineMarks) = (lines == nil ? nil : [], lines == nil ? nil : [], nil, nil)
             return
         }
         // (Each stretch between two pauses of a line counts as one: see
         // `VocalLine.breaks`.)
         func slot(_ t: Double) -> Int { Int((grid.bars(at: t) * Double(VocalPhrasing.slots)).rounded()) }
+        // The recogniser stretches a line's first word back over the
+        // silence before it (and its last over the one after), and runs a
+        // line on through a pause it hears as no full stop. The voice's
+        // own level says where it really sounds: each stretch is trimmed
+        // to that, and split where it falls silent for three sixteenths
+        // or more.
+        let level = vocalSixteenthLevel ?? [], reference = vocalReference
+        func sounds(_ k: Int) -> Bool {
+            guard let reference, k >= 0, k < level.count else { return true }
+            return !VocalPhrasing.quiet(level[k], reference)
+        }
         var starts: [Int] = [], ends: [Int] = []
         for line in lines {
             let marks = [line.start] + line.breaks.filter { $0 > line.start && $0 < line.end } + [line.end]
             for (from, to) in zip(marks, marks.dropFirst()) where slot(to) > slot(from) {
-                starts.append(slot(from))
-                ends.append(slot(to))
+                var k = slot(from), run: Int?
+                let end = slot(to)
+                var silent = 0
+                while k < end {
+                    if sounds(k) {
+                        if run == nil { run = k }
+                        silent = 0
+                    } else if let r = run {
+                        silent += 1
+                        if silent == 3 {
+                            starts.append(r)
+                            ends.append(k - 2)
+                            run = nil
+                        }
+                    }
+                    k += 1
+                }
+                if let r = run {
+                    // (To where it last sounded: a trailing silence isn't sung.)
+                    var e = end
+                    while e > r + 1, !sounds(e - 1) { e -= 1 }
+                    starts.append(r)
+                    ends.append(e)
+                }
             }
         }
         (lineStarts, lineEnds) = (starts, ends)
+        var marks = [UInt8](repeating: 0, count: VocalPhrasing.slots * (loudness.count + 1) + 2)
+        for (a, b) in zip(starts, ends) {
+            for k in [a, b] where k >= 0 && k < marks.count { marks[k] |= 1 }
+            let from = max(0, a + 2), to = min(marks.count, b - 1)
+            if from < to { for k in from..<to { marks[k] |= 2 } }
+        }
+        lineMarks = marks
         lyricRepeat = (0..<loudness.count).map { g in
             let from = grid.downbeat(g), to = grid.downbeat(g + 1), bar = to - from
             var sung = 0.0, back = 0.0
@@ -428,6 +472,7 @@ extension TrackStructure {
     /// voice can be cut whether or not it falls silent. False for a song
     /// whose words weren't heard.
     func lineTurns(at slot: Int) -> Bool {
+        if let marks = lineMarks { return slot >= 0 && slot < marks.count && marks[slot] & 1 != 0 }
         guard let starts = lineStarts, let ends = lineEnds else { return false }
         return starts.contains(slot) || ends.contains(slot)
     }
@@ -436,6 +481,7 @@ extension TrackStructure {
     /// before it and goes on after (nil: the song's words weren't heard).
     func midLine(at slot: Int) -> Bool? {
         guard let starts = lineStarts, let ends = lineEnds, !starts.isEmpty else { return nil }
+        if let marks = lineMarks { return slot >= 0 && slot < marks.count && marks[slot] & 2 != 0 }
         return starts.indices.contains { starts[$0] < slot - 1 && ends[$0] > slot + 1 }
     }
 
@@ -665,6 +711,22 @@ struct TransitionShape {
 }
 
 extension TransitionShape {
+    /// Whether three or more of the four tonal parts (each song's melody
+    /// and voice) are clearly heard in bar `k`, each within 10 dB of all
+    /// that plays above 150 Hz: too much at once (as SetLab measures it).
+    func busy(_ k: Int, a: [StemKind: [Gains]], e: Int, b: [StemKind: [Gains]], c: Int) -> Bool {
+        guard k >= first, k < last else { return false }
+        var total: Float = 0, parts: [Float] = []
+        for (s, p, bar) in [(DeckSide.a, a, e + k), (.b, b, c + k)] {
+            for (stem, levels) in p where bar >= 0 && bar < levels.count {
+                let heard = (gains[s]?[stem]?[k - first].high ?? 1) * levels[bar].high
+                total += heard
+                if stem == .other || stem == .vocals { parts.append(heard) }
+            }
+        }
+        return parts.filter { $0 > 0.1 * total }.count >= 3
+    }
+
     /// Whether both songs are clearly heard in bar `k`: drums, melody and
     /// voice (above 150 Hz; the low end has one owner by design), each
     /// within 8 dB of the two together.
@@ -1583,6 +1645,12 @@ enum AutoPlacement {
                                     let hole = max(0, floor - level)
                                     penalty += 0.1 * hole + 0.02 * hole * hole + 0.04 * max(0, level - ceiling)
                                 }
+                                // Three or four melodies and voices at once,
+                                // for more than a bar or two: clutter.
+                                let busy = (shape.first..<shape.last).filter {
+                                    shape.busy($0, a: powerA, e: e, b: powerB, c: c)
+                                }.count
+                                penalty += 0.4 * Float(max(0, busy - 2))
                                 worstPenalty = max(worstPenalty, penalty * 24 / Float(bars.count))
                                 // A transition, not two songs in a row: both
                                 // clearly heard for a while.
