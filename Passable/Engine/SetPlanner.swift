@@ -2217,8 +2217,21 @@ enum SetBuilder {
                         // voice may come in on its own beat.
                         // (Over A's beat looped, with A's voice gone, as
                         // early as its melody: a quarter in.)
-                        let first = sw < n / 2 ? sw : loop > 0 && n >= 16 && overA(from: n / 4) ? n / 4 : overA(from: n / 2) ? n / 2
-                            : max(n / 2, sw)
+                        // (Or where A's part ends a quarter in and B's begins
+                        // there, as placement planned it.)
+                        let q = Int(n) / 4
+                        func edge(_ st: TrackStructure?, _ g: Int) -> Float {
+                            guard let st else { return 0 }
+                            let e = AutoPlacement.phrases(st, boundary: st.boundaryStrength()).edge
+                            return g >= 0 && g < e.count ? e[g] : 0
+                        }
+                        let partsMeet = n >= 16 && edge(a.loaded.analysis.structure, edit.entryBar + q) >= 0.7
+                            && edge(b.analysis.structure, edit.cueBar + q) >= 0.7
+                        let partStarts = loop > 0 && edge(b.analysis.structure, edit.cueBar) >= 0.9
+                            && (b.analysis.structure?.meanActivity(.vocals, bars: edit.cueBar..<(edit.cueBar + q)) ?? 0) > 0.3
+                        let first = sw < n / 2 ? sw : partStarts && overA(from: 0) ? 0
+                            : (loop > 0 || partsMeet) && n >= 16 && overA(from: n / 4) ? n / 4
+                            : overA(from: n / 2) ? n / 2 : max(n / 2, sw)
                         vocalFloor = first
                         // Aim for the planned handoff while A still sings
                         // there, but never past the swap: A's voice leaves

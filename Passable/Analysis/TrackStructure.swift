@@ -1586,9 +1586,23 @@ enum AutoPlacement {
                         // From the first bar was tried: it left fewer bars
                         // with nobody singing, and thinner blends with
                         // more voices let in mid-line.)
+                        // A quarter in, too, where A's part ends there and
+                        // B's begins: one singer hands over to the next on
+                        // the edge of both parts, over A's beat.
+                        let q = n / 4
+                        // (Both only where the grooves are known to lock: the
+                        // builder lets a voice over the other song's beat
+                        // only then, and a spot chosen for the handover
+                        // would play as something else.)
+                        let partsMeet = drumsLock && n >= 16 && bound(partsA, e + q) >= 0.7 && bound(partsB, c + q) >= 0.7
+                        // From the first bar where A's voice is gone already
+                        // (a loop) and B's part starts with the blend: held
+                        // back, it would come in in the middle of that part.
+                        let partStarts = drumsLock && loop > 0 && bound(partsB, c) >= 0.9 && sb.meanActivity(.vocals, bars: c..<(c + q)) > 0.3
                         let floor = clashHere ? swap
                             : early ?? (echo ? n / 2
-                                        : loop > 0 && n >= 16 && sitsOnA(from: n / 4, until: swap) ? n / 4
+                                        : partStarts && sitsOnA(from: 0, until: swap) ? 0
+                                        : n >= 16 && (loop > 0 || partsMeet) && sitsOnA(from: n / 4, until: swap) ? n / 4
                                         : sitsOnA(from: n / 2, until: swap) ? n / 2 : swap)
                         func plan(from first: Int, drumsLayer: Bool) -> Plan {
                             let vin = entry(from: first)
