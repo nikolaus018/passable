@@ -307,7 +307,7 @@ final class SetLab: XCTestCase {
                   + (pp.expectedVocalIn.map { String(format: "%.2f", $0) } ?? "-") + ", switch \(pp.lowSwap.map(String.init) ?? "-"), drop \(pp.dropMoment)")
             if t.edit.preset != .echoOut {
                 print(String(format: "      room %.0f dB  planned for lock %@  layered %@  lags ", t.room, t.plan.drumsLock ? "yes" : "no",
-                             t.drumsLayered ? (t.drumsLinger ? "yes" : "before the swap") : "no")
+                             t.drumsLayered ? (t.drumsLinger ? "yes" : "before the swap") : t.hatsLayered ? "hats only" : "no")
                       + t.grooveLags.map { String(format: "%.0f", $0 * 1000) }.joined(separator: " "))
             }
             let shift = (t.edit.semitones != 0 ? String(format: "  B %+d st", t.edit.semitones) : "")
@@ -463,6 +463,7 @@ final class SetLab: XCTestCase {
         print("Bars nobody sings while B's voice is held back: " + held.map(String.init).joined(separator: " "))
         print("Seconds each song plays on its own before its way out: " + alone.map(String.init).joined(separator: " "))
         print("Voices by the words (both sides): " + lyricCuts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+        print("Hats only layered: \(mix.transitions.filter { $0.hatsLayered }.count) of \(mix.transitions.count)")
         print("Looped: \(mix.transitions.filter { $0.loopBars > 0 }.count) of \(mix.transitions.count)")
         print("Payoffs over \(mix.transitions.count) transitions: "
               + payoffCounts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))

@@ -771,6 +771,8 @@ struct SetMix: @unchecked Sendable {
         /// B's drums built in under A's; A's played on under B's after the
         /// swap.
         var drumsLayered = true, drumsLinger = true
+        /// B's hats alone layered under A's beat (see `TransitionBuilder.hats`).
+        var hatsLayered = false
         /// Master seconds at which A's vocal is taken out and B's let in
         /// (nil: not automatic, or no vocal to hand over).
         var vocalOut: Double?
@@ -1990,6 +1992,48 @@ enum SetBuilder {
                     ($0, VocalPhrasing.slots * edit.cueBar + Int(((t - start) / bar * Double(VocalPhrasing.slots)).rounded()))
                 }
             }
+            // Where the two whole kits don't sit (or weren't known to), B's
+            // hats alone may: rendered as they'd play against A's, both
+            // above 6 kHz, two clear windows that don't flam.
+            var hats = false
+            if !byHand, span > 0, edit.preset == .stemSwap, !align.grooves {
+                let sw = TransitionBuilder.switchBar(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
+                let trial = TransitionBuilder.make(edit.preset, lanes: Lane.allLanes(), start: native, barSeconds: blendBar,
+                                                   bars: edit.bars, vocalBar: max(edit.bars / 2, plan.placement.vocalHandoff),
+                                                   keysClash: keysClash, lowSwap: plan.placement.lowSwap, drumsLayer: false,
+                                                   drumsLinger: false, dropMoment: plan.placement.dropMoment, loop: loop,
+                                                   loopBack: loopBack, hats: true)
+                var outgoing = a
+                var incoming = SetMix.Track(url: tracks[k].url, loaded: b, map: map, matched: matched, offset: offset + nudge,
+                                            envelopes: [:])
+                for lane in trial.lanes where lane.stem == .drums {
+                    let shifted = lane.envelopes.map { shift($0, by: delta) }
+                    if lane.side == .a { outgoing.envelopes[.drums] = merge(outgoing.envelopes[.drums], shifted) }
+                    else { incoming.envelopes[.drums] = shifted }
+                }
+                for roll in trial.rolls where roll.side == .a && roll.seamless == true {
+                    outgoing.rolls.append(placed(roll, by: delta, on: a))
+                }
+                let pair = SetMix(tracks: [outgoing, incoming], transitions: [], length: end + 1)
+                let frames = Int(min(sw, Double(edit.bars)) * blendBar * sr)
+                func hiss(_ track: Int) -> [Float] {
+                    let renderer = MixRenderer(snapshot: pair.snapshot(masterGain: 1) { i, stem in i == track && stem == .drums })
+                    renderer.setPositionImmediately(Int(start * sr))
+                    var l = [Float](repeating: 0, count: frames), r = l
+                    renderer.render(left: &l, right: &r, count: frames)
+                    var hp1 = Biquad(), hp2 = Biquad()
+                    hp1.set(.highPass(frequency: 6000, q: 0.707), sampleRate: sr)
+                    hp2.set(.highPass(frequency: 6000, q: 0.707), sampleRate: sr)
+                    hp1.process(&l, &r, count: frames)
+                    hp2.process(&l, &r, count: frames)
+                    vDSP_vadd(l, 1, r, 1, &l, 1, vDSP_Length(frames))
+                    return l
+                }
+                if frames > Int(4 * blendBar * sr) {
+                    let lags = BeatAlign.heardLags(a: hiss(0), b: hiss(1), window: 2 * blendBar)
+                    hats = lags.count >= 2 && !BeatAlign.flams(lags)
+                }
+            }
             if !byHand, span > 0, plan.drumsLock, !align.grooves {
                 broken.insert(PairKey(from: a.url, to: tracks[k].url))
             }
@@ -2215,7 +2259,7 @@ enum SetBuilder {
                                            mashup: mashup, dropMoment: dropMoment, rollBeat: rollBeat,
                                            vocalOutFade: outFade, vocalInFade: inFade, room: room,
                                            carry: (plan.placement.carry || loop > 0) && !keysClash && !mashup, under: under,
-                                           loop: loop, loopBack: loopBack)
+                                           loop: loop, loopBack: loopBack, hats: hats)
                 }
                 // B's melody plays under A's voice for as long as A sings,
                 // from the two songs' levels there, and steps up as the
@@ -2311,7 +2355,7 @@ enum SetBuilder {
             transitions.append(.init(from: k - 1, to: k, plan: plan, edit: edit, isEdited: isEdited, start: start,
                                      end: end, settled: settled, barSeconds: blendBar, delta: delta,
                                      entryRange: entryRange, nudge: nudge, grooveLock: align.lock, grooveLags: align.lags,
-                                     drumsLayered: align.grooves, drumsLinger: align.groovesAfter,
+                                     drumsLayered: align.grooves, drumsLinger: align.groovesAfter, hatsLayered: hats,
                                      vocalOut: vocalOut.map { start + $0 * blendBar },
                                      vocalIn: vocalIn.map { start + $0 * blendBar }, payoff: payoff, dropAt: dropAt,
                                      vocalInKind: vocalInKind, vocalOutKind: vocalOutKind,

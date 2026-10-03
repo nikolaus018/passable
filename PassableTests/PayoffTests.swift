@@ -992,4 +992,19 @@ final class PayoffTests: XCTestCase {
         XCTAssertEqual(s.midLine(at: 280), true)
         XCTAssertFalse(s.lineTurns(at: 5000))
     }
+
+    /// Two kits that flam can still share hats: B's alone come in through
+    /// a high-pass from the first downbeat, its whole kit on the swap.
+    func testHatsComeInAlone() {
+        let made = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16, lowSwap: 8,
+                                          drumsLayer: false, hats: true).lanes
+        let drums = made.first { $0.side == .b && $0.stem == .drums }!
+        XCTAssertEqual(drums.value(.volume, at: 1), 1, accuracy: 0.01, "in from the first bar")
+        XCTAssertEqual(drums.value(.filter, at: 10), TransitionBuilder.hatsFilter, accuracy: 0.001, "hats only")
+        XCTAssertEqual(drums.value(.filter, at: 16.5), 0.5, accuracy: 0.001, "whole on the swap")
+        // Layered whole, the hats switch does nothing; not layered at all, B's drums wait.
+        let plain = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16, lowSwap: 8,
+                                           drumsLayer: false).lanes.first { $0.side == .b && $0.stem == .drums }!
+        XCTAssertEqual(plain.value(.volume, at: 10), 0, accuracy: 0.01)
+    }
 }

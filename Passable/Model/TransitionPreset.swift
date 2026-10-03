@@ -97,6 +97,15 @@ struct TransitionBuilder {
     /// verse, a breakdown, its ending). What a DJ sets a loop on the last
     /// bars of a chorus for. 0: A plays on.
     let loop: Int, loopBack: Int
+    /// B's drums don't layer under A's whole (the two kits flam), but
+    /// their hats sit with A's: B's hats alone come in from the first
+    /// downbeat (a high-pass at `hatsFilter`), the rest of its kit on the
+    /// swap. What a DJ does with the filter when two kicks and snares
+    /// won't sit.
+    let hats: Bool
+    /// The DJ filter that leaves a kit's hats and cymbals: a high-pass
+    /// around 6 kHz.
+    static let hatsFilter = 0.96
     /// Where A's vocal ended up leaving and B's coming in (bars from B's
     /// entry), for the caller to check against the audio.
     private(set) var vocalExit: Double?, vocalEntry: Double?
@@ -110,7 +119,8 @@ struct TransitionBuilder {
          lowSwap: Int? = nil, drumsLayer: Bool = true, drumsLinger: Bool = true, vocalIn: Double? = nil,
          vocalOut: Double? = nil, mashup: Bool = false, dropMoment: Bool = false, rollBeat: Int? = nil,
          vocalOutFade: Double = 0, vocalInFade: Double = 0, room: Double = 0, carry: Bool = false, under: Double = 0,
-         loop: Int = 0, loopBack: Int = 0) {
+         loop: Int = 0, loopBack: Int = 0, hats: Bool = false) {
+        self.hats = hats
         self.loop = loop
         self.loopBack = max(loop, loopBack)
         self.room = room
@@ -138,12 +148,12 @@ struct TransitionBuilder {
                       vocalBar: Int? = nil, keysClash: Bool = false, lowSwap: Int? = nil,
                       drumsLayer: Bool = true, drumsLinger: Bool = true, vocalIn: Double? = nil, vocalOut: Double? = nil,
                       mashup: Bool = false, dropMoment: Bool = false, room: Double = 0, carry: Bool = false,
-                      under: Double = 0, loop: Int = 0, loopBack: Int = 0) -> [Lane] {
+                      under: Double = 0, loop: Int = 0, loopBack: Int = 0, hats: Bool = false) -> [Lane] {
         make(preset, lanes: lanes, start: start, barSeconds: barSeconds, bars: bars, vocalBar: vocalBar,
              keysClash: keysClash, lowSwap: lowSwap, drumsLayer: drumsLayer, drumsLinger: drumsLinger,
              vocalIn: vocalIn, vocalOut: vocalOut,
              mashup: mashup, dropMoment: dropMoment, room: room, carry: carry, under: under,
-             loop: loop, loopBack: loopBack).lanes
+             loop: loop, loopBack: loopBack, hats: hats).lanes
     }
 
     /// The automation and the beat rolls of a preset.
@@ -152,14 +162,15 @@ struct TransitionBuilder {
                      drumsLayer: Bool = true, drumsLinger: Bool = true, vocalIn: Double? = nil,
                      vocalOut: Double? = nil, mashup: Bool = false, dropMoment: Bool = false, rollBeat: Int? = nil,
                      vocalOutFade: Double = 0, vocalInFade: Double = 0, room: Double = 0, carry: Bool = false,
-                     under: Double = 0, loop: Int = 0, loopBack: Int = 0) -> Made {
+                     under: Double = 0, loop: Int = 0, loopBack: Int = 0, hats: Bool = false) -> Made {
         var builder = TransitionBuilder(lanes: lanes, start: start, barSeconds: barSeconds, bars: bars,
                                         vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap,
                                         drumsLayer: drumsLayer, drumsLinger: drumsLinger,
                                         vocalIn: vocalIn, vocalOut: vocalOut,
                                         mashup: mashup, dropMoment: dropMoment, rollBeat: rollBeat,
                                         vocalOutFade: vocalOutFade, vocalInFade: vocalInFade, room: room, carry: carry,
-                                        under: under, loop: preset == .stemSwap ? loop : 0, loopBack: loopBack)
+                                        under: under, loop: preset == .stemSwap ? loop : 0, loopBack: loopBack,
+                                        hats: hats && !drumsLayer)
         builder.clearAll()
         builder.write(preset)
         builder.writeLoop()
@@ -396,6 +407,9 @@ struct TransitionBuilder {
                 // (the low kill keeps its kick out), a light high-pass
                 // opening up as the switch nears.
                 bringIn(.drums, at: 0, filter: 0.64, open: min(2 * q, sw))
+            } else if hats {
+                automate(.b, .drums, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
+                automate(.b, .drums, .filter, [(0, Self.hatsFilter, .hold), (sw - 0.001, Self.hatsFilter, .hold), (sw, 0.5, .linear)])
             } else {
                 automate(.b, .drums, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
             }
