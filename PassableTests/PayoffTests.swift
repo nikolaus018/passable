@@ -238,7 +238,9 @@ final class PayoffTests: XCTestCase {
         // stay), about 0.55 dB per dB of EQ.
         XCTAssertEqual(room(-11), 0, "two parts of B are already within reach")
         XCTAssertEqual(room(-13), 5)
-        XCTAssertEqual(room(-20), 12, "at most 12 dB of EQ")
+        XCTAssertGreaterThan(room(-13), room(-12), "a quieter B needs more")
+        XCTAssertLessThanOrEqual(room(-13), 8, "at most 8 dB of EQ")
+        XCTAssertEqual(room(-20), 0, "out of reach: A isn't thinned for nothing")
         XCTAssertEqual(room(-100), 0, "nothing to make room for")
     }
 

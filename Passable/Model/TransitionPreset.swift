@@ -573,10 +573,14 @@ struct TransitionBuilder {
             // its melody and vocal float on beatless (no tempo to clash
             // with), B's intro rises under them opening like a riser, and
             // B's beat drops on its downbeat as A washes into reverb.
-            let e = max(1, min(n, 8)), half = e / 2
+            // (A's beat stays until two bars before the drop: leaving
+            // half-way through an eight-bar bridge, it left four bars
+            // 7 dB under the set's level. Two beatless bars are a breath;
+            // four are a hole.)
+            let e = max(1, min(n, 8)), half = min(2, e / 2)
             for stem in [StemKind.drums, .bass] {
-                automate(.a, stem, .filter, [(-e, 0.5, .sCurve), (-half, 0.2, .linear)])
-                automate(.a, stem, .volume, [(-e, 1, .logarithmic), (-half, 0, .linear)])
+                automate(.a, stem, .filter, [(-max(e / 2, 2 * half), 0.5, .sCurve), (-half, 0.2, .linear)])
+                automate(.a, stem, .volume, [(-max(e / 2, 2 * half), 1, .logarithmic), (-half, 0, .linear)])
             }
             automate(.a, .drums, .delay, [(-half - 1, 0, .exponential), (-half - 0.25, 0.6, .hold), (-half + 0.5, 0, .linear)])
             // A's melody floats on into a reverb wash, whole, until the

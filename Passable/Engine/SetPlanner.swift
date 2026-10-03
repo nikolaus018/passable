@@ -1555,7 +1555,9 @@ enum VocalPhrasing {
                 (kind, extra) = (.line, 0.2)
             }
             guard let kind else { continue }
-            if !turn, inside?(k) == true { extra += 1.2 }
+            // (By more than a bar's distance: a line that ends anywhere in
+            // the window beats a cut through a sentence right on target.)
+            if !turn, inside?(k) == true { extra += 4.4 }
             // Taken out late, it sings over the song that has taken over;
             // let in early, over the one that hasn't left.
             let wrongSide = opening ? k < 0 : k > 0
@@ -1980,6 +1982,9 @@ enum SetBuilder {
             // drums layered under A's are rendered as the blend would
             // play them up to the swap, and if they flam there, they
             // aren't layered. B's beat then comes in whole on the switch.
+            // Windows in which the two kits, rendered as they'd play before
+            // the swap, were heard to hit together.
+            var heardTogether = 0
             if !byHand, span > 0, align.grooves {
                 let sw = TransitionBuilder.switchBar(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
                 func written(room: Double, start: Double, bar: Double) -> TransitionBuilder.Made {
@@ -2029,6 +2034,7 @@ enum SetBuilder {
                     // heard (there are only two or four to a blend).
                     let before = BeatAlign.heardLags(a: Array(da[0..<swap]), b: Array(db[0..<swap]), window: 2 * blendBar)
                     if BeatAlign.flams(before) { align.topsSplit = true }
+                    heardTogether = before.count
                     // The same for A's drums playing on under B's after the
                     // swap: where they flam there, they stop on it.
                     let after = BeatAlign.heardLags(a: Array(da[swap...]), b: Array(db[swap...]), window: 2 * blendBar)
@@ -2054,6 +2060,7 @@ enum SetBuilder {
             // above 6 kHz, two clear windows that don't flam.
             var hats = false
             if !byHand, span > 0, edit.preset == .stemSwap, !align.grooves {
+                heardTogether = 0
                 let sw = TransitionBuilder.switchBar(edit.preset, bars: edit.bars, lowSwap: plan.placement.lowSwap)
                 let trial = TransitionBuilder.make(edit.preset, lanes: Lane.allLanes(), start: native, barSeconds: blendBar,
                                                    bars: edit.bars, vocalBar: max(edit.bars / 2, plan.placement.vocalHandoff),
@@ -2073,11 +2080,16 @@ enum SetBuilder {
                 }
                 let pair = SetMix(tracks: [outgoing, incoming], transitions: [], length: end + 1)
                 let frames = Int(min(sw, Double(edit.bars)) * blendBar * sr)
-                func hiss(_ track: Int) -> [Float] {
+                /// A track's drums as they'd play, whole or above 6 kHz.
+                func hiss(_ track: Int, whole: Bool = false) -> [Float] {
                     let renderer = MixRenderer(snapshot: pair.snapshot(masterGain: 1) { i, stem in i == track && stem == .drums })
                     renderer.setPositionImmediately(Int(start * sr))
                     var l = [Float](repeating: 0, count: frames), r = l
                     renderer.render(left: &l, right: &r, count: frames)
+                    if whole {
+                        vDSP_vadd(l, 1, r, 1, &l, 1, vDSP_Length(frames))
+                        return l
+                    }
                     var hp1 = Biquad(), hp2 = Biquad()
                     hp1.set(.highPass(frequency: 6000, q: 0.707), sampleRate: sr)
                     hp2.set(.highPass(frequency: 6000, q: 0.707), sampleRate: sr)
@@ -2089,6 +2101,16 @@ enum SetBuilder {
                 if frames > Int(4 * blendBar * sr) {
                     let lags = BeatAlign.heardLags(a: hiss(0), b: hiss(1), window: 2 * blendBar)
                     hats = lags.count >= 2 && !BeatAlign.flams(lags)
+                    // And B's hats against all of A's kit, as it's heard:
+                    // hats that sit with A's hats can still land off its
+                    // snare where A's own hats do (34 ms, on two songs
+                    // never seen before).
+                    // (No window past 10 ms: hats are where a flam is
+                    // heard first.)
+                    if hats, BeatAlign.heardLags(a: hiss(0, whole: true), b: hiss(1, whole: true), window: 2 * blendBar)
+                        .contains(where: { abs($0) > 0.010 }) {
+                        hats = false
+                    }
                 }
             }
             if !byHand, span > 0, plan.drumsLock, !align.grooves {
@@ -2097,8 +2119,10 @@ enum SetBuilder {
             // The other way round: placed for B's drums not building in,
             // and they sit with A's clearly on the audio. A blend placed
             // for that worst case may not be the best one there is.
-            if !byHand, span > 0, edit.preset != .echoOut, !plan.drumsLock, align.grooves, align.votesBefore >= 2,
-               align.lockBefore > 0.8 {
+            // (Shown by two windows of the kits' hits that agree, or heard:
+            // the two rendered as they'd play, hitting together.)
+            if !byHand, span > 0, edit.preset != .echoOut, !plan.drumsLock, align.grooves,
+               (align.votesBefore >= 2 && align.lockBefore > 0.8) || heardTogether >= 1 {
                 locking.insert(PairKey(from: a.url, to: tracks[k].url))
             }
             var vocalIn: Double?, vocalOut: Double?
@@ -2206,8 +2230,10 @@ enum SetBuilder {
                         // bass line: only where the grooves lock and it sits
                         // on A's chords (as a mashup must). Otherwise, and
                         // on clashing keys, it waits for the swap.
+                        // (Over a beat it grooves with: the two kits lock, or
+                        // B's hats were heard to sit with A's kit.)
                         func overA(from first: Double) -> Bool {
-                            !keysClash && align.grooves && sw > first
+                            !keysClash && (align.grooves || hats) && sw > first
                                 && Harmony.fits([aStems[.other], aStems[.bass]].compactMap { $0 }, aOffset: aPlays,
                                                 [vocalsB], bOffset: offset + nudge,
                                                 from: start + first * bar, to: start + sw * bar)
@@ -2227,7 +2253,7 @@ enum SetBuilder {
                         }
                         let partsMeet = n >= 16 && edge(a.loaded.analysis.structure, edit.entryBar + q) >= 0.7
                             && edge(b.analysis.structure, edit.cueBar + q) >= 0.7
-                        let partStarts = loop > 0 && edge(b.analysis.structure, edit.cueBar) >= 0.9
+                        let partStarts = loop > 0 && edge(b.analysis.structure, edit.cueBar) >= 0.7
                             && (b.analysis.structure?.meanActivity(.vocals, bars: edit.cueBar..<(edit.cueBar + q)) ?? 0) > 0.3
                         let first = sw < n / 2 ? sw : partStarts && overA(from: 0) ? 0
                             : (loop > 0 || partsMeet) && n >= 16 && overA(from: n / 4) ? n / 4
@@ -2252,7 +2278,7 @@ enum SetBuilder {
                         // ahead of its bar.)
                         if let cut = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: ref, opening: true,
                                                        target: start + aim * bar,
-                                                       earliest: start + max(first, aim - (keysClash ? 0 : 0.5)) * bar,
+                                                       earliest: start + max(0, aim - (keysClash ? 0 : 0.5)) * bar,
                                                        latest: start + (aim + AutoPlacement.vocalWait) * bar, bar: bar, lines: linesB(start + aim * bar)) {
                             vocalIn = (cut.time - start) / bar
                             vocalInKind = cut.kind == .line ? "breath" : "word"
