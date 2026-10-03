@@ -180,13 +180,15 @@ final class BeatLamp: @unchecked Sendable {
 
     // MARK: Switching
 
-    private func send(_ on: Bool) {
+    private func send(_ on: Bool, pulse: Double? = nil) {
         let (host, kind) = lock.withLock { (self.host, self.kind) }
         guard let host, let kind else { return }
         let path: String
         switch kind {
         case .shellyGen1: path = "/relay/0?turn=\(on ? "on" : "off")"
-        case .shellyRPC: path = "/rpc/Switch.Set?id=0&on=\(on)"
+        case .shellyRPC:
+            // The plug switches itself off again: a short flash that Wi-Fi can't stretch.
+            path = "/rpc/Switch.Set?id=0&on=\(on)" + (on ? pulse.map { "&toggle_after=\($0)" } ?? "" : "")
         case .tasmota: path = "/cm?cmnd=Power%20\(on ? "On" : "Off")"
         }
         guard let url = URL(string: "http://\(host)\(path)") else { return }
@@ -261,6 +263,7 @@ final class BeatLamp: @unchecked Sendable {
         let lead = self.lead
         var fire = false
         var turnOff = false
+        var flash = 0.06
         lock.withLock {
             let target = now + lead
             // A seek (or a rebuild) moved the clock: find the beat again.
@@ -279,14 +282,15 @@ final class BeatLamp: @unchecked Sendable {
                 guard wanted else { continue }
                 fire = true
                 let gap = next < beats.count ? beats[next].time - b.time : 0.5
-                // On for the first part of the beat, dark for the rest: a
-                // slice of the gap between flashes, so it reads as a pulse.
-                let span = every.step == 1 ? gap : every.step == 2 ? gap * 2 : gap * 4
-                offAt = b.time + min(0.25, max(0.06, span * 0.35))
+                // Dark most of the time, a sharp flash on the beat: a short,
+                // fixed slice (a relay can't do much shorter than ~40 ms).
+                flash = min(0.07, max(0.04, gap * 0.15))
+                offAt = b.time + flash
             }
             if let o = offAt, target >= o, !fire { turnOff = true; offAt = nil }
         }
-        if fire { send(true) } else if turnOff { send(false) }
+        let selfOff = self.lock.withLock { kind == .shellyRPC }
+        if fire { send(true, pulse: flash) } else if turnOff && !selfOff { send(false) }
     }
 
     /// Every second beat of a bar: the 1 and the 3 (counted from the

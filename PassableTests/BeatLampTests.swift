@@ -21,6 +21,11 @@ private final class FakeShelly: @unchecked Sendable {
                 var body = "{}"
                 if line.contains("/rpc/Switch.Set") {
                     lock.withLock { events.append((Date().timeIntervalSince(origin), line.contains("on=true"))) }
+                    if line.contains("toggle_after") {
+                        // A pulse: the plug switches itself off again.
+                        let at = Date().timeIntervalSince(origin) + 0.05
+                        lock.withLock { events.append((at, false)) }
+                    }
                     body = "{\"was_on\":false}"
                 } else if line.contains("/shelly") {
                     body = "{\"id\":\"shellyplus1-aa\",\"gen\":2}"
