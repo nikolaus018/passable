@@ -834,6 +834,14 @@ struct SetMix: @unchecked Sendable {
     var tracks: [Track]
     var transitions: [Transition]
     var length: Double
+    /// What building it learnt from the audio about pairs whose plan it
+    /// didn't bear out (see `SetBuilder.build`): carried into the next
+    /// build, which then plans them right first time.
+    var learned = Learned()
+
+    struct Learned {
+        var unlocked: Set<PairKey> = [], clashed: Set<PairKey> = [], locked: Set<PairKey> = []
+    }
 
     func snapshot(masterGain: Float, including: (Int, StemKind) -> Bool = { _, _ in true }) -> MixSnapshot {
         let sr = AudioIO.sampleRate
@@ -1626,6 +1634,10 @@ enum SetBuilder {
                       processor: TrackProcessor,
                       progress: @escaping @Sendable (String) -> Void) async throws -> SetMix {
         precondition(!tracks.isEmpty)
+        // (What the last build learnt still holds for the same pairs.)
+        let unlocked = unlocked.union(previous?.learned.unlocked ?? [])
+        let clashed = clashed.union(previous?.learned.clashed ?? [])
+        let locked = locked.union(previous?.learned.locked ?? [])
         let sr = AudioIO.sampleRate
         let first = tracks[0].loaded
         let s0 = first.analysis.structure
@@ -2374,7 +2386,9 @@ enum SetBuilder {
         // clash (how much notes grate reads a little differently there).
         if !broken.isSubset(of: unlocked) || !clashing.isSubset(of: clashed) || !locking.isSubset(of: locked) {
             return try await build(tracks, edits: edits, reuse: renditions,
-                                   previous: SetMix(tracks: planned, transitions: transitions, length: 0), exits: exits,
+                                   previous: SetMix(tracks: planned, transitions: transitions, length: 0,
+                                                    learned: .init(unlocked: unlocked, clashed: clashed, locked: locked)),
+                                   exits: exits,
                                    unlocked: unlocked.union(broken), clashed: clashed.union(clashing),
                                    locked: locked.union(locking), processor: processor, progress: progress)
         }
@@ -2394,7 +2408,8 @@ enum SetBuilder {
             fadeOut(&env[LaneParameter.volume.rawValue], from: fadeStart, to: end)
             planned[planned.count - 1].envelopes[stem] = env
         }
-        return SetMix(tracks: planned, transitions: transitions, length: end + 1)
+        return SetMix(tracks: planned, transitions: transitions, length: end + 1,
+                      learned: .init(unlocked: unlocked, clashed: clashed, locked: locked))
     }
 
     /// Fades a stem's volume to nothing by `end`, from `start` or from

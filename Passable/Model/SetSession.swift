@@ -188,16 +188,23 @@ final class SetSession: ObservableObject {
     private var lastBuilt: SetMix?
     /// What came of the last such change, in words.
     @Published private(set) var liveNote: String?
-    /// Seconds a change needs before the transition it moves: the set is
-    /// planned and the next song rendered at the blend's tempo meanwhile.
-    private static let liveLead = 16.0
+    /// Seconds a change needs before the transition it moves: twice what
+    /// the last live change took to plan and render (about a second: the
+    /// set is built from the last one, only the transition that changes
+    /// is new), and never under three. What the player then has to be
+    /// sure of is only the second and a half after the playhead (see
+    /// `continues`).
+    private var liveLead: Double { max(3, 2 * liveBuild) }
+    /// Seconds the last live change took to build.
+    private var liveBuild = 1.5
+    private var liveStarted: Date?
 
     /// The way out of the song that's playing, while it can still be
     /// changed: an automatic one that hasn't begun.
     private var upcoming: (transition: SetMix.Transition, key: PairKey)? {
         guard let mix, isReady, adjusting == nil, placing == nil, let i = currentIndex,
               let t = mix.transitions.first(where: { $0.from == i }), !(t.isEdited && t.edit.byHand),
-              transport.seconds < t.begins - Self.liveLead else { return nil }
+              transport.seconds < t.begins - 2 * t.barSeconds - liveLead - Self.liveAhead else { return nil }
         return (t, PairKey(from: mix.tracks[t.from].url, to: mix.tracks[t.to].url))
     }
 
@@ -228,12 +235,13 @@ final class SetSession: ObservableObject {
         let skipped = skippedBars(track), now = transport.seconds
         guard let bar = starts.indices.first(where: { g in
             starts[g] && g < t.edit.entryBar && !(skipped?.contains(g) ?? false)
-                && track.master(grid.downbeat(g)) >= now + Self.liveLead
+                && track.master(grid.downbeat(g)) - 2 * grid.barSeconds >= now + liveLead + Self.liveAhead
         }) else {
             say("“\(SongTitle.of(key.to))” is about to come in as it is")
             return
         }
         adjusting = (key, exits[key], tries, true)
+        liveStarted = Date()
         exits[key] = .init(range: bar...bar, skip: skipped)
         say("Bringing in “\(SongTitle.of(key.to))”…", lasting: false)
         rebuild()
@@ -252,6 +260,7 @@ final class SetSession: ObservableObject {
             return
         }
         adjusting = (key, exits[key], 0, false)
+        liveStarted = Date()
         exits[key] = .init(range: later...Int.max, skip: skippedBars(track))
         say("Holding “\(SongTitle.of(key.from))”…", lasting: false)
         rebuild()
@@ -268,7 +277,8 @@ final class SetSession: ObservableObject {
         let was = old.transitions.first { old.tracks[$0.from].url == change.key.from && old.tracks[$0.to].url == change.key.to }
         let now = new.transitions.first { new.tracks[$0.from].url == change.key.from && new.tracks[$0.to].url == change.key.to }
         let moved = was.flatMap { w in now.map { change.now ? $0.start < w.start - 1 : $0.start > w.start + 1 } } ?? false
-        if moved, continues(old, into: new) {
+        if let started = liveStarted { liveBuild = Date().timeIntervalSince(started) }
+        if moved, continues(old, into: new, ahead: Self.liveAhead) {
             say(change.now ? "“\(SongTitle.of(change.key.to))” comes in at \(Theme.time(now?.begins ?? 0))"
                 : "“\(SongTitle.of(change.key.from))” plays until \(Theme.time(now?.begins ?? 0))")
             return true
@@ -341,8 +351,13 @@ final class SetSession: ObservableObject {
     /// seconds: the same songs at the same places, and no transition
     /// begun that the old mix didn't have. Then the player can change
     /// over to it mid-song and nobody hears it.
-    private func continues(_ old: SetMix, into new: SetMix) -> Bool {
-        let now = transport.seconds, ahead = now + 5
+    /// Seconds after the playhead a rebuilt set has to play exactly as the
+    /// old one: a request's (its song is loaded meanwhile, on its own
+    /// time), and a live change's, which takes over at once.
+    private static let requestAhead = 5.0, liveAhead = 1.5
+
+    private func continues(_ old: SetMix, into new: SetMix, ahead seconds: Double = SetSession.requestAhead) -> Bool {
+        let now = transport.seconds, ahead = now + seconds
         // (A transition touches nothing before the two bars ahead of where
         // it begins: the outgoing voice's echo opens there at the earliest.)
         for (k, t) in new.transitions.enumerated() where t.begins - 2 * t.barSeconds <= ahead {

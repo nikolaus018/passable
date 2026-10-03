@@ -118,7 +118,7 @@ final class LiveLab: XCTestCase {
                 XCTAssertGreaterThanOrEqual(now.edit.entryBar, out.edit.entryBar + 16, "held, it leaves no later")
             } else {
                 XCTAssertLessThan(now.start, out.start - 1, "brought in now, the next song comes no sooner")
-                XCTAssertGreaterThan(now.begins, at + 5, "and not before it can be got ready")
+                XCTAssertGreaterThan(now.begins, at + 3, "and not before it can be got ready")
             }
             XCTAssertEqual(new.transitions[0].start, old.transitions[0].start, accuracy: 1e-6, "\(name): what has played changed")
             XCTAssertEqual(set.transport.seconds, at, accuracy: 1e-6, "\(name): the playhead moved")
