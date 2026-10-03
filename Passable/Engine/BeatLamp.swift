@@ -106,30 +106,56 @@ final class BeatLamp: @unchecked Sendable {
         }
         guard moments else { return out.sorted { $0.time < $1.time } }
 
-        var quiet: [Range<Double>] = []
-        var accents: [Double] = []
-        // Stutters: the repeats are the rhythm there, so they're what flashes.
-        // (A seamless loop is a bed, not something to strobe.)
-        for track in mix.tracks {
-            for r in track.rolls where r.seamless != true && r.length > 0.02 && r.end > r.start {
-                let step = r.length * max(1, (fastest / r.length).rounded(.up))
-                quiet.append(r.start - 0.02..<r.end)
-                var t = r.start
-                while t < r.end { accents.append(t); t += step }
-            }
+        let stutters = mix.tracks.flatMap { track in
+            track.rolls.filter { $0.seamless != true }.map { (start: $0.start, end: $0.end, length: $0.length) }
         }
-        for t in mix.transitions {
-            guard let drop = t.dropAt else { continue }
-            let beat = t.barSeconds / 4
-            quiet.append(drop - beat..<drop + t.barSeconds)
-            // Eight flashes through the bar (a pair per beat), never faster than the relay.
-            let step = max(fastest, t.barSeconds / 8)
-            var at = drop
-            while at < drop + t.barSeconds - 0.01 { accents.append(at); at += step }
-        }
+        let drops = mix.transitions.compactMap { t in t.dropAt.map { (at: $0, bar: t.barSeconds) } }
+        let (quiet, accents) = strobes(stutters: stutters, drops: drops)
         out.removeAll { b in quiet.contains { $0.contains(b.time) } }
         out += accents.map(Beat.accent)
         return out.sorted { $0.time < $1.time }
+    }
+
+    /// Where the lamp strobes: the stretches the ordinary beats leave dark
+    /// for it, and the strobe flashes themselves (master seconds).
+    /// - stutters: rolls repeating `length` seconds from `start` to `end`.
+    /// - drops: the moment a drop lands, and the bar length around it.
+    static func strobes(stutters: [(start: Double, end: Double, length: Double)],
+                        drops: [(at: Double, bar: Double)]) -> (quiet: [Range<Double>], accents: [Double]) {
+        var quiet: [Range<Double>] = []
+        var accents: [Double] = []
+        // Stutters: the repeats are the rhythm there, so they're what flashes.
+        for r in stutters where r.length > 0.02 && r.end > r.start {
+            let step = r.length * max(1, (fastest / r.length).rounded(.up))
+            quiet.append(r.start - 0.02..<r.end)
+            var t = r.start
+            while t < r.end { accents.append(t); t += step }
+        }
+        for d in drops {
+            let beat = d.bar / 4
+            // The beat before the drop is dark, and the bar after is the strobe's.
+            quiet.append(d.at - beat..<d.at + d.bar)
+            // The build: the two bars before that dark beat speed up from a
+            // flash a beat to the fastest the relay manages, so the lamp
+            // climbs into the silence.
+            let buildStart = d.at - beat - 2 * d.bar, buildEnd = d.at - beat
+            quiet.append(buildStart..<buildEnd)
+            var at = buildStart
+            while at < buildEnd - 0.01 {
+                accents.append(at)
+                let progress = (at - buildStart) / (buildEnd - buildStart)
+                at += beat + (fastest - beat) * progress
+            }
+            // Eight flashes through the bar after (never faster than the relay).
+            let step = max(fastest, d.bar / 8)
+            var hit = d.at
+            while hit < d.at + d.bar - 0.01 { accents.append(hit); hit += step }
+        }
+        // Strobes that overlap (a roll inside a build) must still never come
+        // faster than the relay can follow: thin them out.
+        var thinned: [Double] = []
+        for a in accents.sorted() where thinned.last.map({ a - $0 >= fastest * 0.95 }) ?? true { thinned.append(a) }
+        return (quiet, thinned)
     }
 
     func setBeats(_ list: [Beat]) {

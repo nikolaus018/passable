@@ -105,6 +105,33 @@ final class BeatLampTests: XCTestCase {
         XCTAssertEqual(server.log.filter(\.on).count, 4)
     }
 
+    /// A drop at 20 s, 128 BPM: the build speeds up into a dark beat, then eight flashes.
+    func testBuildAndDropStrobes() {
+        let bar = 60.0 / 128 * 4
+        let (quiet, accents) = BeatLamp.strobes(stutters: [], drops: [(at: 20, bar: bar)])
+        let a = accents.sorted()
+        let gaps = zip(a, a.dropFirst()).map { $1 - $0 }
+        XCTAssertGreaterThanOrEqual(gaps.min() ?? 0, BeatLamp.fastest * 0.95 - 1e-9, "never faster than the relay")
+        let beat = bar / 4
+        let build = a.filter { $0 < 20 - beat }
+        XCTAssertGreaterThan(build.count, 8, "builds up over two bars")
+        // Speeding up: each gap in the build no longer than the one before.
+        let buildGaps = zip(build, build.dropFirst()).map { $1 - $0 }
+        for (x, y) in zip(buildGaps, buildGaps.dropFirst()) { XCTAssertLessThanOrEqual(y, x + 1e-9) }
+        XCTAssertTrue(a.allSatisfy { !($0 > 20 - beat + 1e-6 && $0 < 20 - 1e-6) }, "dark beat before the drop")
+        XCTAssertEqual(a.filter { $0 >= 20 - 1e-6 }.count, 8)
+        XCTAssertTrue(quiet.contains { $0.contains(20 - beat / 2) })
+    }
+
+    /// A roll in the middle of a build can't push flashes past the relay's pace.
+    func testOverlappingStrobesStayAtTheRelayPace() {
+        let bar = 60.0 / 128 * 4
+        let s = BeatLamp.strobes(stutters: [(start: 20 - 2 * bar, end: 20 - bar / 4, length: 0.06)], drops: [(at: 20, bar: bar)])
+        let a = s.accents
+        XCTAssertGreaterThan(a.count, 10)
+        XCTAssertGreaterThanOrEqual(zip(a, a.dropFirst()).map { $1 - $0 }.min() ?? 1, BeatLamp.fastest * 0.95 - 1e-9)
+    }
+
     /// Strobe accents fire whatever the flash setting, and are cut short.
     func testAccentsAlwaysFlash() async throws {
         let server = FakeShelly()
