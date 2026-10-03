@@ -19,11 +19,23 @@ final class BeatLamp: @unchecked Sendable {
 
     enum Kind { case shellyGen1, shellyRPC, tasmota }
 
-    struct Beat { let time: Double; let isDownbeat: Bool }
+    /// One flash. An ordinary beat sits `inBar` (0…3) beats into its bar;
+    /// an accent (a strobe in a roll or on a drop) has no place in the bar,
+    /// always fires, and is cut short.
+    struct Beat {
+        let time: Double
+        let inBar: Int
+        var isAccent: Bool { inBar < 0 }
+        var isDownbeat: Bool { inBar == 0 }
+        static func accent(_ time: Double) -> Beat { Beat(time: time, inBar: -1) }
+    }
+
+    /// Fastest the lamp is switched: about what a relay and the network keep up with.
+    static let fastest = 0.15
 
     // MARK: Settings (UserDefaults)
 
-    static let hostKey = "lampHost", everyKey = "lampEvery", enabledKey = "lampOn"
+    static let hostKey = "lampHost", everyKey = "lampEvery", enabledKey = "lampOn", momentsKey = "lampMoments"
     /// Seconds a relay takes to switch after it has the command.
     private static let relayDelay = 0.015
 
@@ -71,9 +83,12 @@ final class BeatLamp: @unchecked Sendable {
 
     // MARK: Beats
 
-    /// The beats of the whole set in master seconds: each song's own grid
-    /// while it's the one playing, handing over midway through a blend.
-    static func beats(of mix: SetMix) -> [Beat] {
+    /// The flashes of the whole set in master seconds: each song's own beats
+    /// while it's the one playing (handing over midway through a blend). With
+    /// `moments`, the big moments are strobed instead: every repeat of a
+    /// stutter roll, and the first bar after a drop (the beat before it is
+    /// left dark, for the tension).
+    static func beats(of mix: SetMix, moments: Bool = true) -> [Beat] {
         var out: [Beat] = []
         for (i, track) in mix.tracks.enumerated() {
             let from = i > 0 && mix.transitions.indices.contains(i - 1)
@@ -86,9 +101,34 @@ final class BeatLamp: @unchecked Sendable {
                 if let s = track.skip, own >= s.from, own < s.to { continue }
                 let t = track.master(own)
                 if t >= to || t > mix.length + 1 { break }
-                if t >= from { out.append(Beat(time: t, isDownbeat: k % 4 == 0)) }
+                if t >= from { out.append(Beat(time: t, inBar: ((k % 4) + 4) % 4)) }
             }
         }
+        guard moments else { return out.sorted { $0.time < $1.time } }
+
+        var quiet: [Range<Double>] = []
+        var accents: [Double] = []
+        // Stutters: the repeats are the rhythm there, so they're what flashes.
+        // (A seamless loop is a bed, not something to strobe.)
+        for track in mix.tracks {
+            for r in track.rolls where r.seamless != true && r.length > 0.02 && r.end > r.start {
+                let step = r.length * max(1, (fastest / r.length).rounded(.up))
+                quiet.append(r.start - 0.02..<r.end)
+                var t = r.start
+                while t < r.end { accents.append(t); t += step }
+            }
+        }
+        for t in mix.transitions {
+            guard let drop = t.dropAt else { continue }
+            let beat = t.barSeconds / 4
+            quiet.append(drop - beat..<drop + t.barSeconds)
+            // Eight flashes through the bar (a pair per beat), never faster than the relay.
+            let step = max(fastest, t.barSeconds / 8)
+            var at = drop
+            while at < drop + t.barSeconds - 0.01 { accents.append(at); at += step }
+        }
+        out.removeAll { b in quiet.contains { $0.contains(b.time) } }
+        out += accents.map(Beat.accent)
         return out.sorted { $0.time < $1.time }
     }
 
@@ -274,31 +314,22 @@ final class BeatLamp: @unchecked Sendable {
             lastSeconds = now
             while next < beats.count, beats[next].time <= target {
                 let b = beats[next]
-                let index = next
                 next += 1
                 // Late for it (a stall): leave it.
                 guard b.time > target - 0.15 else { continue }
-                let wanted = every.step == 1 || (every.step == 4 ? b.isDownbeat : Self.isEven(index, beats))
+                let wanted = b.isAccent || b.inBar % every.step == 0
                 guard wanted else { continue }
                 fire = true
                 let gap = next < beats.count ? beats[next].time - b.time : 0.5
                 // Dark most of the time, a sharp flash on the beat: a short,
                 // fixed slice (a relay can't do much shorter than ~40 ms).
-                flash = min(0.07, max(0.04, gap * 0.15))
+                flash = b.isAccent ? 0.04 : min(0.07, max(0.04, gap * 0.15))
                 offAt = b.time + flash
             }
             if let o = offAt, target >= o, !fire { turnOff = true; offAt = nil }
         }
         let selfOff = self.lock.withLock { kind == .shellyRPC }
         if fire { send(true, pulse: flash) } else if turnOff && !selfOff { send(false) }
-    }
-
-    /// Every second beat of a bar: the 1 and the 3 (counted from the
-    /// downbeat before it, so it stays on the groove across bars).
-    private static func isEven(_ index: Int, _ beats: [Beat]) -> Bool {
-        var n = 0, i = index
-        while i > 0, !beats[i].isDownbeat, n < 4 { i -= 1; n += 1 }
-        return beats[i].isDownbeat ? n % 2 == 0 : true
     }
 
     private static func firstIndex(_ beats: [Beat], after t: Double) -> Int {

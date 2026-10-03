@@ -7,6 +7,9 @@ final class LampModel: ObservableObject {
     @Published var host: String
     @Published var every: BeatLamp.Every { didSet { apply(connect: false) } }
     @Published var enabled: Bool { didSet { apply(connect: true) } }
+    /// Strobe on rolls and drops (see `BeatLamp.beats`).
+    @Published var moments: Bool { didSet { apply(connect: false); setBeats(from: mix) } }
+    private var mix: SetMix?
     @Published private(set) var status = "Off"
 
     let lamp: BeatLamp
@@ -18,6 +21,7 @@ final class LampModel: ObservableObject {
         host = persists ? d.string(forKey: BeatLamp.hostKey) ?? "" : ""
         every = persists ? d.string(forKey: BeatLamp.everyKey).flatMap(BeatLamp.Every.init) ?? .beat : .beat
         enabled = persists && d.bool(forKey: BeatLamp.enabledKey)
+        moments = !persists || d.object(forKey: BeatLamp.momentsKey) == nil || d.bool(forKey: BeatLamp.momentsKey)
         let renderer = playback.renderer
         lamp = BeatLamp(position: { Double(renderer.currentFrame) / AudioIO.sampleRate },
                         isPlaying: { [unowned playback] in playback.isRunning },
@@ -36,6 +40,7 @@ final class LampModel: ObservableObject {
             d.set(host, forKey: BeatLamp.hostKey)
             d.set(every.rawValue, forKey: BeatLamp.everyKey)
             d.set(enabled, forKey: BeatLamp.enabledKey)
+            d.set(moments, forKey: BeatLamp.momentsKey)
         }
         let target = enabled && !host.trimmingCharacters(in: .whitespaces).isEmpty ? host : nil
         if target != nil && connect { status = "Connecting…" }
@@ -45,7 +50,8 @@ final class LampModel: ObservableObject {
     }
 
     func setBeats(from mix: SetMix?) {
-        lamp.setBeats(mix.map(BeatLamp.beats(of:)) ?? [])
+        self.mix = mix
+        lamp.setBeats(mix.map { BeatLamp.beats(of: $0, moments: moments) } ?? [])
     }
 
     /// One flash, to point the lamp out or check the connection.
@@ -87,6 +93,8 @@ private struct LampPanel: View {
             Picker("Flash", selection: $lamp.every) {
                 ForEach(BeatLamp.Every.allCases) { Text($0.rawValue).tag($0) }
             }
+            Toggle("Strobe on rolls and drops", isOn: $lamp.moments)
+                .help("Flashes with every stutter of a roll, goes dark before a drop and strobes through its first bar. Fast flashing can bother people prone to photosensitive seizures: switch it off if that's you or anyone in the room.")
             HStack {
                 Text(lamp.status).font(.caption).foregroundStyle(.secondary)
                 Spacer()
