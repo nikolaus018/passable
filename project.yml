@@ -26,6 +26,9 @@ targets:
     info:
       path: Passable/App/Info.plist
       properties:
+        NSLocalNetworkUsageDescription: Passable flashes your smart plug or lamp on the beat.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         CFBundleDocumentTypes:
           - CFBundleTypeName: Passable Set
             CFBundleTypeRole: Editor

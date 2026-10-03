@@ -29,7 +29,9 @@ final class SetSession: ObservableObject {
     private let persists: Bool
     private static let storageKey = "setTracks"
     private static let editsKey = "setEdits"
-    @Published private(set) var mix: SetMix?
+    @Published private(set) var mix: SetMix? {
+        didSet { lamp.setBeats(from: mix) }
+    }
     @Published private(set) var buildStatus: String?
     @Published private(set) var exportProgress: Double?
     /// What the export or open in progress is doing, for its progress bar.
@@ -50,6 +52,8 @@ final class SetSession: ObservableObject {
     let transport = Transport()
     /// (Internal so a harness can watch the audio thread keep time.)
     let playback = PlaybackEngine()
+    /// A lamp or plug that flashes on the beat.
+    private(set) lazy var lamp = LampModel(playback: playback, persists: persists)
     private let processor = TrackProcessor()
     /// Hand-shaped transitions, by pair of songs.
     private var edits: [PairKey: TransitionEdit] = [:] {

@@ -319,6 +319,8 @@ struct SetTransportBar: View {
                     .frame(maxWidth: 220, alignment: .leading)
             }
 
+            LampButton()
+
             Image(systemName: "speaker.wave.2").foregroundStyle(.secondary)
             Slider(value: $set.masterVolume, in: 0...1).frame(width: 90)
 
