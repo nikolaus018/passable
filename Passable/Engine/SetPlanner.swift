@@ -147,7 +147,7 @@ struct PairPlan: Equatable {
     ///   (see `TransitionEdit.byHand`): only what happens inside is planned.
     static func make(a: TrackAnalysis, b: TrackAnalysis, entryRange: ClosedRange<Int>? = nil, aShift: Int = 0,
                      soloFrom: Int? = nil, skip: Range<Int>? = nil, drums: (a: [Float], b: [Float])? = nil,
-                     fixed: TransitionEdit? = nil) -> PairPlan {
+                     fixed: TransitionEdit? = nil, clashing: Bool = false) -> PairPlan {
         let rate = MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)
         // (A song without a steady tempo is bridged whatever was chosen
         // for it: there is no beat to lay another on.)
@@ -171,7 +171,9 @@ struct PairPlan: Equatable {
             AutoPlacement.place(a: a, b: b, bars: bars, preset: preset,
                                 trimA: Float(MixMath.trimDB(a)), trimB: Float(MixMath.trimDB(b)),
                                 entryRange: entryRange, keysClash: clash(shift),
-                                clashAbove: Harmony.tolerance(aKey, b.key.transposed(by: shift)),
+                                // (Heard to clash on the audio, wherever placed: see
+                                // `SetBuilder.build(clashed:)`.)
+                                clashAbove: clashing ? -.infinity : Harmony.tolerance(aKey, b.key.transposed(by: shift)),
                                 mashup: !clash(shift) && abs(rate - 1) < MixMath.mashupStretch, soloFrom: soloFrom,
                                 skip: skip, aShift: aShift, bShift: shift, drumsLock: drumsLock, drumsLinger: drumsLinger,
                                 at: fixed.map { ($0.entryBar, $0.cueBar) },
@@ -1455,8 +1457,12 @@ enum VocalPhrasing {
     ///   two sentences is a line's end whether or not the voice breathes
     ///   there, which a rapper, or a chorus over its own backing voices,
     ///   doesn't.
+    /// - Parameter inside: whether a line of the lyrics is being sung
+    ///   through sixteenth k (see `TrackStructure.midLine`): a breath there
+    ///   is a pause in the middle of a sentence, cut only where nothing
+    ///   better is near.
     static func cut(opening: Bool, from: Int, through: Int, reference: Float, turns: ((Int) -> Bool)? = nil,
-                    level: (Int) -> Float) -> (slot: Int, kind: Cut)? {
+                    inside: ((Int) -> Bool)? = nil, level: (Int) -> Float) -> (slot: Int, kind: Cut)? {
         guard from <= through else { return nil }
         func silent(_ k: Int) -> Bool { quiet(level(k), reference) }
         var best: (slot: Int, kind: Cut, cost: Double)?
@@ -1474,6 +1480,7 @@ enum VocalPhrasing {
                 (kind, extra) = (.line, 0.2)
             }
             guard let kind else { continue }
+            if !turn, inside?(k) == true { extra += 1.2 }
             // Taken out late, it sings over the song that has taken over;
             // let in early, over the one that hasn't left.
             let wrongSide = opening ? k < 0 : k > 0
@@ -1514,8 +1521,10 @@ enum VocalPhrasing {
                     lines: (song: TrackStructure, slot: Int)? = nil) -> (time: Double, kind: Cut)? {
         let slot = bar / Double(slots)
         let turns: ((Int) -> Bool)? = lines.map { lines in { lines.song.lineTurns(at: lines.slot + $0) } }
+        let inside: ((Int) -> Bool)? = lines.map { lines in { lines.song.midLine(at: lines.slot + $0) ?? false } }
         let found = cut(opening: opening, from: Int(((earliest - target) / slot).rounded(.up)),
-                        through: Int(((latest - target) / slot).rounded(.down)), reference: reference, turns: turns) { k in
+                        through: Int(((latest - target) / slot).rounded(.down)), reference: reference, turns: turns,
+                        inside: inside) { k in
             level(stem, at: target + Double(k) * slot - offset, length: slot)
         }
         return found.map { (target + Double($0.slot) * slot, $0.kind) }
@@ -1590,7 +1599,8 @@ enum SetBuilder {
     ///     counting on B's drums building in under A's (see the end).
     static func build(_ tracks: [(url: URL, loaded: TrackProcessor.Loaded)], edits: [PairKey: TransitionEdit] = [:],
                       reuse: [URL: TrackProcessor.Matched] = [:], previous: SetMix? = nil,
-                      exits: [PairKey: Exit] = [:], unlocked: Set<PairKey> = [], processor: TrackProcessor,
+                      exits: [PairKey: Exit] = [:], unlocked: Set<PairKey> = [], clashed: Set<PairKey> = [],
+                      processor: TrackProcessor,
                       progress: @escaping @Sendable (String) -> Void) async throws -> SetMix {
         precondition(!tracks.isEmpty)
         let sr = AudioIO.sampleRate
@@ -1665,7 +1675,7 @@ enum SetBuilder {
                                          aShift: shifts[k - 1], soloFrom: settledBar, skip: skip,
                                          drums: unlocked.contains(key) ? nil
                                              : hits[k - 1].flatMap { x in hits[k].map { (a: x, b: $0) } },
-                                         fixed: chosen)
+                                         fixed: chosen, clashing: clashed.contains(key))
                 let edit = inRange(byHand ? edits[key]! : TransitionEdit(
                     entryBar: plan.placement.entryBar, cueBar: plan.placement.cueBar, preset: plan.preset,
                     bars: plan.bars, semitones: plan.semitones, lanes: [], byHand: false))
@@ -1745,8 +1755,9 @@ enum SetBuilder {
                                     offset: -first.analysis.grid.downbeat(startBar), envelopes: [:])]
         var shifts = [0]
         var sinceDrop = 3
-        // Pairs planned for grooves that lock which turned out not to.
-        var broken: Set<PairKey> = []
+        // Pairs planned for grooves that lock which turned out not to, and
+        // for melodies that layer which turned out to clash.
+        var broken: Set<PairKey> = [], clashing: Set<PairKey> = []
 
         for k in 1..<tracks.count {
             if Task.isCancelled { throw CancellationError() }
@@ -1877,6 +1888,9 @@ enum SetBuilder {
             } else if span == 0 {
                 // A Wash Out never plays the two songs' notes together.
                 keysClash = false
+            }
+            if !byHand, span > 0, keysClash, plan.placement.notesClash != true {
+                clashing.insert(PairKey(from: a.url, to: tracks[k].url))
             }
             // The beats can sit at one lag and still not sit: one kit's hats
             // ahead of its clap, the other's on it, and no nudge closes
@@ -2283,10 +2297,13 @@ enum SetBuilder {
         // blend placed for something else: both songs were to be heard
         // where now one is. Those pairs are planned again as what they
         // are, and the rest of the set is taken over as built.
-        if !broken.isSubset(of: unlocked) {
+        // So is one placed for two melodies layering that the audio says
+        // clash (how much notes grate reads a little differently there).
+        if !broken.isSubset(of: unlocked) || !clashing.isSubset(of: clashed) {
             return try await build(tracks, edits: edits, reuse: renditions,
                                    previous: SetMix(tracks: planned, transitions: transitions, length: 0), exits: exits,
-                                   unlocked: unlocked.union(broken), processor: processor, progress: progress)
+                                   unlocked: unlocked.union(broken), clashed: clashed.union(clashing),
+                                   processor: processor, progress: progress)
         }
 
         // The last record plays out to the end of its music, fading over the

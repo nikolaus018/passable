@@ -22,6 +22,11 @@ struct BeatGrid: Codable, Equatable {
     /// in it: from there on its ones fall where a constant grid has its
     /// threes; see `Steadiness.oddBars`). Its beats are still the grid's.
     var wanders: Bool? = nil
+    /// Stretches (seconds) where the beat tracker counts the bars from
+    /// another beat than the grid does and the harmony doesn't settle
+    /// which is right (see `Steadiness.oddBars`): no blend is lined up
+    /// there, its phrases could be half a bar out.
+    var doubtful: [ClosedRange<Double>]? = nil
 
     var beatSeconds: Double { 60 / bpm }
     var barSeconds: Double { 4 * beatSeconds }
@@ -34,6 +39,10 @@ struct BeatGrid: Codable, Equatable {
     /// Whether `bars` are all ordinary ones: four beats long, give or
     /// take what a drummer does.
     func isRegular(_ bars: Range<Int>) -> Bool {
+        if let doubtful, !bars.isEmpty {
+            let from = time(bars: Double(bars.lowerBound)), to = time(bars: Double(bars.upperBound))
+            if doubtful.contains(where: { $0.lowerBound < to && $0.upperBound > from }) { return false }
+        }
         guard let d = downbeats, d.count >= 2 else { return true }
         return bars.clamped(to: 0..<(d.count - 1)).allSatisfy { abs(d[$0 + 1] - d[$0] - barSeconds) < 0.2 * barSeconds }
     }
@@ -85,13 +94,21 @@ enum Steadiness {
     /// - Parameter turns: how much the harmony changes on beat `i` of the
     ///   grid (from the beat before; nil where there are no notes).
     static func oddBars(grid: BeatGrid, heard: BeatTracker.Beats, duration: Double, turns: (Int) -> Float?) -> [Double]? {
+        bars(grid: grid, heard: heard, duration: duration, turns: turns).downbeats
+    }
+
+    /// `oddBars`, and the stretches (seconds) the tracker counted from
+    /// another beat for eight bars or more without the harmony bearing it
+    /// out: no odd bar to go by, but no count to trust either.
+    static func bars(grid: BeatGrid, heard: BeatTracker.Beats, duration: Double,
+                     turns: (Int) -> Float?) -> (downbeats: [Double]?, doubtful: [ClosedRange<Double>]) {
         let beat = grid.beatSeconds
         // Each tracked downbeat as a beat of the grid (those on one).
         let ones = heard.downbeats.compactMap { t -> Int? in
             let i = ((t - grid.firstDownbeat) / beat).rounded()
             return abs(t - (grid.firstDownbeat + i * beat)) < 0.25 * beat ? Int(i) : nil
         }
-        guard ones.count >= 16 else { return nil }
+        guard ones.count >= 16 else { return (nil, []) }
         func phase(_ i: Int) -> Int { ((i % 4) + 4) % 4 }
         // Runs of downbeats on the same beat of the bar; shorter than
         // eight bars is the tracker's slip, not the song's.
@@ -100,7 +117,7 @@ enum Steadiness {
             if let last = runs.last, last.phase == phase(i) { runs[runs.count - 1].count += 1 } else { runs.append((i, phase(i), 1)) }
         }
         runs = runs.filter { $0.count >= 8 }
-        guard runs.contains(where: { $0.phase != 0 }) else { return nil }
+        guard runs.contains(where: { $0.phase != 0 }) else { return (nil, []) }
         /// How much more the harmony turns on the run's ones than half a
         /// bar (or whatever the difference is) away, over its first 32 bars.
         func borneOut(_ run: (first: Int, phase: Int, count: Int), against other: Int) -> Bool {
@@ -117,14 +134,17 @@ enum Steadiness {
         // The grid's own count holds until a run on another beat is borne
         // out; from there that run's, until the next that is.
         var changes: [(from: Int, phase: Int)] = []
+        var doubtful: [ClosedRange<Double>] = []
         var current = 0
         for run in runs where run.phase != current {
             if borneOut(run, against: current) {
                 changes.append((run.first, run.phase))
                 current = run.phase
+            } else {
+                doubtful.append(grid.beat(run.first)...grid.beat(run.first + 4 * run.count))
             }
         }
-        guard !changes.isEmpty else { return nil }
+        guard !changes.isEmpty else { return (nil, doubtful) }
         var bars: [Double] = []
         var i = 0, next = 0
         let last = Int((duration - grid.firstDownbeat) / beat) + 4
@@ -139,7 +159,7 @@ enum Steadiness {
                 i += 4
             }
         }
-        return bars
+        return (bars, doubtful)
     }
 
     /// The downbeat of every bar of a song whose beats, as a trained

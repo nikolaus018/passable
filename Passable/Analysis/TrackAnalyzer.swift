@@ -13,7 +13,7 @@ struct TrackAnalysis: Codable, Equatable {
     /// `Steadiness`); analyses checked another way, or not at all, are
     /// checked on load.
     var tempoCheck: Int?
-    static let tempoCheck = 4
+    static let tempoCheck = 5
 
     static let currentVersion = 6
 }
@@ -51,7 +51,7 @@ enum TrackAnalyzer {
         var checked = analysis
         checked.tempoCheck = TrackAnalysis.tempoCheck
         var grid = analysis.grid
-        (grid.downbeats, grid.wanders) = (nil, nil)
+        (grid.downbeats, grid.wanders, grid.doubtful) = (nil, nil, nil)
         checked.grid = bars(of: grid, heard: heard, duration: analysis.duration, stems: stems)
         // (Its bars have changed: its own now, or the grid's again.)
         if checked.grid.downbeats != analysis.grid.downbeats {
@@ -99,12 +99,12 @@ enum TrackAnalyzer {
             known[i] = .some(found)
             return found
         }
-        if let odd = Steadiness.oddBars(grid: grid, heard: heard, duration: duration, turns: { i in
+        let counted = Steadiness.bars(grid: grid, heard: heard, duration: duration, turns: { i in
             guard let a = notes(i - 2), let b = notes(i) else { return nil }
             return 1 - zip(a, b).reduce(0) { $0 + $1.0 * $1.1 }
-        }) {
-            (grid.downbeats, grid.wanders) = (odd, false)
-        }
+        })
+        if let odd = counted.downbeats { (grid.downbeats, grid.wanders) = (odd, false) }
+        grid.doubtful = counted.doubtful.isEmpty ? nil : counted.doubtful
         return grid
     }
 

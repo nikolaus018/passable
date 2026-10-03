@@ -956,7 +956,8 @@ enum AutoPlacement {
         }
         let found = VocalPhrasing.cut(opening: opening, from: Int((earliest * slots).rounded(.up)) - t,
                                       through: Int((latest * slots).rounded(.down)) - t, reference: reference,
-                                      turns: { s.lineTurns(at: base + t + $0) }) {
+                                      turns: { s.lineTurns(at: base + t + $0) },
+                                      inside: { s.midLine(at: base + t + $0) ?? false }) {
             level(base + t + $0)
         }
         return found.map { (Double(t + $0.slot) / slots, $0.kind) } ?? (target, nil)

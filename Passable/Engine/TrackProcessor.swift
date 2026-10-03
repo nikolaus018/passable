@@ -92,8 +92,16 @@ final class TrackProcessor: @unchecked Sendable {
                 if !languages.isEmpty, let vocals = stems[.vocals], let structure = analysis.structure,
                    structure.vocalLines == nil || structure.lyricsTried != languages {
                     progress(.analyzing)
-                    analysis.structure?.setLines(Lyrics.lines(vocals: vocals)?.lines ?? [], tried: languages, grid: analysis.grid)
-                    StemCache.saveAnalysis(analysis, to: directory)
+                    switch Lyrics.listen(vocals: vocals) {
+                    case .heard(let heard):
+                        analysis.structure?.setLines(heard.lines, tried: languages, grid: analysis.grid)
+                        StemCache.saveAnalysis(analysis, to: directory)
+                    case .none:
+                        analysis.structure?.setLines([], tried: languages, grid: analysis.grid)
+                        StemCache.saveAnalysis(analysis, to: directory)
+                    case .failed:
+                        break
+                    }
                 }
                 return Loaded(directory: directory, stems: stems, analysis: analysis,
                               peaks: StemCache.peaks(stems, in: directory, hop: Self.peakHop))

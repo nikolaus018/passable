@@ -33,6 +33,9 @@ final class LyricsProbe: XCTestCase {
                              Date().timeIntervalSince(t0), SongTitle.of(URL(fileURLWithPath: path)),
                              loaded.analysis.grid.isSteady ? "" : "  [no steady tempo: its own bars]"))
                 let grid = loaded.analysis.grid
+                if let doubtful = grid.doubtful {
+                    print("   bars in doubt: " + doubtful.map { "\(Theme.time($0.lowerBound))–\(Theme.time($0.upperBound))" }.joined(separator: ", "))
+                }
                 if grid.isSteady, let d = grid.downbeats {
                     let odd = (0..<(d.count - 1)).filter { !grid.isRegular($0..<($0 + 1)) }
                     print("   odd bars: " + odd.map { String(format: "bar %d at %@ (%.0f beats)", $0, Theme.time(d[$0]), (d[$0 + 1] - d[$0]) / grid.beatSeconds) }.joined(separator: ", "))
