@@ -45,6 +45,12 @@ final class PlaybackEngine {
         if wasRunning { try? play() }
     }
 
+    /// Seconds from a rendered sample to the speakers (the device's buffer
+    /// and the output's own delay: large over Bluetooth).
+    var outputLatency: Double {
+        engine.outputNode.presentationLatency
+    }
+
     func play() throws {
         // Our flag and the engine can disagree after an output change.
         guard !(isRunning && engine.isRunning) else { return }

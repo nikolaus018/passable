@@ -51,7 +51,7 @@ final class BeatLampTests: XCTestCase {
         // 120 BPM from 1 s: beats every 0.5 s, a downbeat every fourth.
         lamp.setBeats((0..<16).map { .init(time: 1 + 0.5 * Double($0), isDownbeat: $0 % 4 == 0) })
         let connected = expectation(description: "connected")
-        lamp.configure(host: "127.0.0.1:\(server.port)", every: .beat, leadMs: 100) { text in
+        lamp.configure(host: "127.0.0.1:\(server.port)", every: .beat) { text in
             if text.hasPrefix("Connected") { connected.fulfill() }
         }
         await fulfillment(of: [connected], timeout: 5)
@@ -59,12 +59,14 @@ final class BeatLampTests: XCTestCase {
         lamp.off()
         let ons = server.log.filter(\.on)
         XCTAssertGreaterThanOrEqual(ons.count, 6)
+        // A local device answers in a millisecond or two: the lead is the relay's.
+        XCTAssertEqual(lamp.lead, 0.015, accuracy: 0.015)
         // Compare against the beat the flash belongs to, on the clock the lamp read.
         let t0 = start.timeIntervalSince(server.origin)
         for (i, e) in ons.prefix(6).enumerated() {
             let beat = 1 + 0.5 * Double(i)
             let early = beat - (e.time - t0)
-            XCTAssertEqual(early, 0.1, accuracy: 0.03, "flash \(i)")
+            XCTAssertEqual(early, lamp.lead, accuracy: 0.03, "flash \(i)")
         }
         // Strictly alternating on/off.
         let all = server.log
@@ -78,7 +80,7 @@ final class BeatLampTests: XCTestCase {
         let lamp = BeatLamp(position: { Date().timeIntervalSince(start) }, isPlaying: { true })
         lamp.setBeats((0..<16).map { .init(time: 0.5 + 0.25 * Double($0), isDownbeat: $0 % 4 == 0) })
         let connected = expectation(description: "connected")
-        lamp.configure(host: "127.0.0.1:\(server.port)", every: .bar, leadMs: 0) { if $0.hasPrefix("Connected") { connected.fulfill() } }
+        lamp.configure(host: "127.0.0.1:\(server.port)", every: .bar) { if $0.hasPrefix("Connected") { connected.fulfill() } }
         await fulfillment(of: [connected], timeout: 5)
         try await Task.sleep(nanoseconds: 4_500_000_000)
         lamp.off()

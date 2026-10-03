@@ -7,8 +7,9 @@ import Foundation
 /// The beats come from the set's own grids, mapped onto the master clock, so
 /// the lamp follows tempo glides and transitions exactly as the music does.
 /// A timing thread reads the renderer's position and sends each command a
-/// little ahead of its beat (`lead`), to make up for the network, the relay
-/// and the audio output.
+/// little ahead of its beat (`lead`). The lead is measured, not set: it's
+/// the network round trip to the device (re-measured on every command) plus
+/// its relay, less the time the audio takes to come out of the speakers.
 final class BeatLamp: @unchecked Sendable {
     enum Every: String, CaseIterable, Identifiable {
         case beat = "Every beat", other = "Every 2nd beat", bar = "Every bar"
@@ -22,7 +23,9 @@ final class BeatLamp: @unchecked Sendable {
 
     // MARK: Settings (UserDefaults)
 
-    static let hostKey = "lampHost", everyKey = "lampEvery", leadKey = "lampLeadMs", enabledKey = "lampOn"
+    static let hostKey = "lampHost", everyKey = "lampEvery", enabledKey = "lampOn"
+    /// Seconds a relay takes to switch after it has the command.
+    private static let relayDelay = 0.015
 
     // MARK: State (guarded by `lock`)
 
@@ -31,7 +34,10 @@ final class BeatLamp: @unchecked Sendable {
     private var host: String?
     private var kind: Kind?
     private var every = Every.beat
-    private var lead = 0.08
+    /// Smoothed round trip to the device, seconds.
+    private var roundTrip = 0.03
+    private var outputLatency = 0.0
+    private var latencyChecked = -1.0
     private var timer: DispatchSourceTimer?
     private var next = 0
     private var lastSeconds = -1.0
@@ -40,6 +46,7 @@ final class BeatLamp: @unchecked Sendable {
 
     private let position: @Sendable () -> Double
     private let isPlaying: @Sendable () -> Bool
+    private let audioLatency: @Sendable () -> Double
     private let session: URLSession
     private let queue = DispatchQueue(label: "passable.lamp", qos: .userInteractive)
     private let net = DispatchQueue(label: "passable.lamp.net")
@@ -47,9 +54,12 @@ final class BeatLamp: @unchecked Sendable {
     /// - Parameters:
     ///   - position: the master clock, seconds, as the renderer has it.
     ///   - isPlaying: whether the music is running.
-    init(position: @escaping @Sendable () -> Double, isPlaying: @escaping @Sendable () -> Bool) {
+    ///   - audioLatency: seconds between rendering a sample and hearing it.
+    init(position: @escaping @Sendable () -> Double, isPlaying: @escaping @Sendable () -> Bool,
+         audioLatency: @escaping @Sendable () -> Double = { 0 }) {
         self.position = position
         self.isPlaying = isPlaying
+        self.audioLatency = audioLatency
         let c = URLSessionConfiguration.ephemeral
         c.timeoutIntervalForRequest = 1.5
         c.httpMaximumConnectionsPerHost = 1
@@ -90,11 +100,8 @@ final class BeatLamp: @unchecked Sendable {
 
     /// Points the lamp at a device (an IP address, host name or full URL;
     /// nil turns it off), finding out what kind of switch it is.
-    func configure(host raw: String?, every: Every, leadMs: Double, completion: (@Sendable (String) -> Void)? = nil) {
-        lock.withLock {
-            self.every = every
-            self.lead = max(0, leadMs) / 1000
-        }
+    func configure(host raw: String?, every: Every, completion: (@Sendable (String) -> Void)? = nil) {
+        lock.withLock { self.every = every }
         let cleaned = raw.map(Self.clean) ?? ""
         guard !cleaned.isEmpty else {
             off()
@@ -112,6 +119,7 @@ final class BeatLamp: @unchecked Sendable {
         lock.withLock { host = nil; kind = nil }
         Task {
             let found = await self.detect(cleaned)
+            if found != nil { await self.measure(cleaned) }
             self.lock.withLock { self.host = found == nil ? nil : cleaned; self.kind = found }
             if found != nil { self.startTimer() } else { self.stopTimer() }
             completion?(found.map(Self.describe) ?? "No Shelly or Tasmota switch answered at \(cleaned)")
@@ -142,6 +150,24 @@ final class BeatLamp: @unchecked Sendable {
         return data
     }
 
+    /// How long the device takes to answer, from a few quick requests.
+    private func measure(_ host: String) async {
+        var times: [Double] = []
+        for _ in 0..<5 {
+            let t = Date()
+            if await get(host, "/shelly") != nil { times.append(Date().timeIntervalSince(t)) }
+        }
+        // (The first pays for the connection: leave it out.)
+        let rest = times.dropFirst().sorted()
+        if !rest.isEmpty { lock.withLock { roundTrip = rest[rest.count / 2] } }
+    }
+
+    /// Seconds ahead of its beat a command is sent: out to the device and
+    /// switched, less what the sound itself takes to come out.
+    var lead: Double {
+        lock.withLock { max(0, roundTrip / 2 + Self.relayDelay - outputLatency) }
+    }
+
     private func detect(_ host: String) async -> Kind? {
         if let data = await get(host, "/shelly"),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -168,9 +194,18 @@ final class BeatLamp: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.timeoutInterval = 1
         // One at a time and in order: an "off" must never overtake its "on".
-        net.async { [session] in
+        net.async { [session, weak self] in
             let done = DispatchSemaphore(value: 0)
-            session.dataTask(with: request) { _, _, _ in done.signal() }.resume()
+            let began = Date()
+            session.dataTask(with: request) { _, response, _ in
+                if (response as? HTTPURLResponse)?.statusCode == 200 {
+                    self?.lock.withLock {
+                        let rtt = Date().timeIntervalSince(began)
+                        self?.roundTrip += 0.2 * (min(rtt, 0.5) - (self?.roundTrip ?? rtt))
+                    }
+                }
+                done.signal()
+            }.resume()
             _ = done.wait(timeout: .now() + 1.2)
         }
     }
@@ -218,6 +253,12 @@ final class BeatLamp: @unchecked Sendable {
             return
         }
         let now = position()
+        // The audio's own delay changes with the output (Bluetooth, cables).
+        if now - latencyChecked > 1 || now < latencyChecked {
+            let l = audioLatency()
+            lock.withLock { outputLatency = min(l, 0.5); latencyChecked = now }
+        }
+        let lead = self.lead
         var fire = false
         var turnOff = false
         lock.withLock {
