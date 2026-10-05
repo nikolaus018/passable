@@ -25,6 +25,14 @@ While the set plays, **Mix Now** (⌘↩) brings the next song in on the next ph
 
 One transport serves both tabs: **Space** plays or pauses, holding **M** mutes the playing song's vocal (let the crowd sing the chorus) and holding **S** leaves only that vocal, for as long as the key is down, **⌘→** (or the keyboard's ⏭ key) jumps to where the next transition begins, **⌘←** (⏮) goes back to the start of the current song's transition, and twice quickly to the one before. The ⏯ ⏮ ⏭ keys, headphone buttons and Control Center work while Passable is in the background. **Render** writes the whole set, or just this transition, as an AAC `.m4a` (256 kbps), which is plenty for songs from YouTube. Type a `.wav` name to get a 24-bit, 44.1 kHz WAV, lossless for your own files, or for other software. The set and your edits are remembered between launches.
 
+## On your iPhone
+
+**iPhone** in the transport bar sends the set to the Passable app on your phone (project `passableIos`): the set is
+rendered here, packed with a map of where each song sits, and sent over Wi-Fi once the phone says yes. On the phone you
+get the playing song, a track list, Next/Previous between songs, and lock-screen controls, instead of one long file.
+**Save as File…** in the same panel writes a `.passablemix` to AirDrop. The format is documented in
+`Passable/Model/PassableMix.swift` (shared with the phone app; keep the two copies identical).
+
 ## Set files (.passable)
 
 **Set File → Export Set…** (⇧⌘E) saves the set as one `.passable` file with every song inside it, so it opens on any Mac. **Open Set…** (⇧⌘O), dragging the file onto the set, or double-clicking it in Finder brings it back: songs unpack into `~/Music/Passable` (a copy that's already there is reused), in the saved order, with your hand-shaped transitions and each song's analysis, so beat grids are exactly as they were. Stems are separated again on a new Mac.

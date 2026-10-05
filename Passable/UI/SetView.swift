@@ -342,6 +342,7 @@ struct SetTransportBar: View {
                 .menuStyle(.borderedButton)
                 .fixedSize()
                 .disabled(set.mix == nil)
+                PhoneButton()
             }
         }
         .padding(.horizontal, 14)

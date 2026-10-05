@@ -38,10 +38,37 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_passablemix._tcp</string>
+		<string>_passablemix._udp</string>
+	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Passable flashes your smart plug or lamp on the beat.</string>
+	<string>Passable flashes your smart plug or lamp on the beat, and sends sets to Passable on your iPhone.</string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Passable Mix</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.nikolausmarek.passable.mix</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>passablemix</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/x-passablemix</string>
+				</array>
+			</dict>
+		</dict>
 		<dict>
 			<key>UTTypeConformsTo</key>
 			<array>

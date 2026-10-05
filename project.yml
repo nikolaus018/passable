@@ -26,7 +26,8 @@ targets:
     info:
       path: Passable/App/Info.plist
       properties:
-        NSLocalNetworkUsageDescription: Passable flashes your smart plug or lamp on the beat.
+        NSLocalNetworkUsageDescription: Passable flashes your smart plug or lamp on the beat, and sends sets to Passable on your iPhone.
+        NSBonjourServices: [_passablemix._tcp, _passablemix._udp]
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         CFBundleDocumentTypes:
@@ -35,6 +36,12 @@ targets:
             LSHandlerRank: Owner
             LSItemContentTypes: [com.nikolausmarek.passable.set]
         UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.nikolausmarek.passable.mix
+            UTTypeDescription: Passable Mix
+            UTTypeConformsTo: [public.data, public.content]
+            UTTypeTagSpecification:
+              public.filename-extension: [passablemix]
+              public.mime-type: [application/x-passablemix]
           - UTTypeIdentifier: com.nikolausmarek.passable.set
             UTTypeDescription: Passable Set
             UTTypeConformsTo: [public.data, public.content]

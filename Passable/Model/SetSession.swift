@@ -979,6 +979,84 @@ final class SetSession: ObservableObject {
         return "Passable Set \(date).passable"
     }
 
+    // MARK: - Phone mix
+
+    /// The iPhones on the same Wi-Fi that this set can be sent to.
+    let phoneLink = PhoneLink()
+
+    enum PhoneDestination { case file(URL), phone(PhoneLink.Phone) }
+    private enum PhoneOutcome { case saved(URL), sent(String) }
+
+    /// Renders the whole set and packs it, with the map of where each song
+    /// sits, into a `.passablemix` for the Passable app on the iPhone: saved
+    /// to a file, or sent straight to a phone nearby.
+    func exportPhoneMix(title: String, to destination: PhoneDestination) {
+        guard exportTask == nil, let mix, !items.isEmpty else { return }
+        let frames = 0..<Int(length * AudioIO.sampleRate)
+        let snapshot = makeSnapshot()
+        let manifest = PhoneMix.manifest(for: mix, titles: items.map(\.title), title: title)
+        let link = phoneLink
+        exportLabel = "Rendering…"
+        exportProgress = 0
+        exportTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let temp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("phonemix-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: temp) }
+            let outcome: Result<PhoneOutcome, Error>
+            do {
+                try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+                let audio = temp.appendingPathComponent("mix.m4a")
+                try Exporter.render(snapshot: snapshot, range: frames, tail: 3, to: audio) { p in
+                    Task { @MainActor in self?.exportProgress = p * 0.9 }
+                }
+                await self?.setPhoneStatus("Packing…", progress: 0.9)
+                switch destination {
+                case .file(let url):
+                    try PassableMix.write(manifest, audio: audio, to: url)
+                    outcome = .success(.saved(url))
+                case .phone(let phone):
+                    let package = temp.appendingPathComponent(PhoneMix.suggestedFileName(title))
+                    try PassableMix.write(manifest, audio: audio, to: package)
+                    let size = (try? FileManager.default.attributesOfItem(atPath: package.path)[.size] as? Int) ?? 0
+                    await self?.setPhoneStatus("Waiting for \(phone.name)…", progress: 0.92)
+                    let invitation = PassableMix.Invitation(title: title, songs: manifest.songs.count, bytes: size,
+                                                            minutes: Int((manifest.duration / 60).rounded()))
+                    try await link.send(package, to: phone, invitation: invitation) { p in
+                        self?.exportLabel = "Sending to \(phone.name)…"
+                        self?.exportProgress = 0.92 + p * 0.08
+                    }
+                    outcome = .success(.sent(phone.name))
+                }
+            } catch {
+                outcome = .failure(error)
+            }
+            await self?.finishPhoneExport(outcome)
+        }
+    }
+
+    private func setPhoneStatus(_ label: String, progress: Double) {
+        exportLabel = label
+        exportProgress = progress
+    }
+
+    private func finishPhoneExport(_ result: Result<PhoneOutcome, Error>) {
+        exportTask = nil
+        switch result {
+        case .success(.saved(let url)):
+            exportProgress = nil
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        case .success(.sent(let name)):
+            exportLabel = "Sent to \(name)"
+            exportProgress = 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                if self?.exportTask == nil { self?.exportProgress = nil }
+            }
+        case .failure(let error):
+            exportProgress = nil
+            if !(error is CancellationError) { alert = error.localizedDescription }
+        }
+    }
+
     /// Opens a `.passable` file in place of the current set, unpacking its
     /// songs into the library folder.
     func openSet(_ url: URL) {
