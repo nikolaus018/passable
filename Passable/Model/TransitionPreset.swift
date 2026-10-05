@@ -26,7 +26,7 @@ enum TransitionPreset: String, CaseIterable, Codable, Identifiable {
         case .longBlend:
             return "A slow EQ blend: B's drums and melody come up with their low end killed, the lows and bass lines trade places mid-way, A filters out."
         case .echoOut:
-            return "For tempos too far apart to beat-match: A's beat sinks away first, its melody and vocal float on beatless into a reverb wash, the music stops for half a beat, then B drops in whole on its downbeat. Two beats never play at once."
+            return "For a song with no steady beat to match (a live drummer): A's beat sinks away first, its melody and vocal float on beatless into a reverb wash, the music stops for half a beat, then B drops in whole on its downbeat. Two beats never play at once."
         }
     }
 

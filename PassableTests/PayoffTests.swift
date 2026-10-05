@@ -420,17 +420,55 @@ final class PayoffTests: XCTestCase {
                              structure: s, version: TrackAnalysis.currentVersion)
     }
 
-    /// Songs read at half and double time of each other don't share a bar
-    /// grid, so they play as a Wash Out, and are priced as one: not as the
-    /// perfect tempo match they are on paper.
-    func testHalfTimePairIsPricedAsTheWashOutItPlaysAs() {
+    /// Songs read at half and double time of each other share a beat: B
+    /// is counted in A's bars and blended, cued on a bar of its own.
+    func testHalfTimePairBlendsBarForBar() {
         let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
-        let a = song(scale: 0, key: c, bpm: 87), same = song(scale: 0, key: c, bpm: 87)
-        let double = song(scale: 0, key: c, bpm: 174)
-        let blend = PairPlan.make(a: a, b: same), wash = PairPlan.make(a: a, b: double)
-        XCTAssertEqual(wash.preset, .echoOut)
-        XCTAssertNotEqual(blend.preset, .echoOut)
-        XCTAssertGreaterThan(wash.cost(a: a, b: double), blend.cost(a: a, b: same) + 1)
+        let a = song(scale: 0, key: c, bpm: 87), double = song(scale: 0, key: c, bpm: 174, bars: 128)
+        let fast = PairPlan.make(a: a, b: double), slow = PairPlan.make(a: double, b: a)
+        XCTAssertNotEqual(fast.preset, .echoOut)
+        XCTAssertNotEqual(slow.preset, .echoOut)
+        XCTAssertEqual(fast.rate, 1)
+        XCTAssertEqual(MixMath.preset(a, double), .stemSwap)
+        // B's bars to one of the blend's, and back.
+        let two = Metre(a: a.grid, b: double.grid, cue: 5), halves = Metre(a: double.grid, b: a.grid)
+        XCTAssertEqual([two.bars, halves.bars], [2, 0.5])
+        XCTAssertEqual(two.own(two.counted(5)), 5)
+        XCTAssertEqual(two.counted(4), 1)
+        XCTAssertEqual(halves.own(halves.counted(7)), 7)
+        XCTAssertEqual(two.ownBars(8), 16)
+        XCTAssertEqual(halves.ownBars(7), 4)
+        XCTAssertTrue(Metre(a: a.grid, b: a.grid).isOwn)
+        // The same beats, counted the other way: every downbeat of the
+        // count is one of the song's own.
+        let counted = double.counted(two)
+        XCTAssertEqual(counted.grid.bpm, 87)
+        XCTAssertEqual(counted.grid.downbeat(3), double.grid.downbeat(7), accuracy: 1e-9)
+        XCTAssertEqual(counted.structure?.loudness.count, 63)
+        XCTAssertEqual(counted.structure?.loudness[10] ?? 0, -10, accuracy: 1e-3)
+        XCTAssertEqual(counted.structure?.harmonyChroma?[10][0] ?? 0, 80, accuracy: 1e-3)
+        let split = a.counted(halves)
+        XCTAssertEqual(split.grid.downbeat(6), a.grid.downbeat(3), accuracy: 1e-9)
+        XCTAssertEqual(split.structure?.loudness.count, 128)
+        XCTAssertEqual(split.structure?.harmonyChroma?[10][0] ?? 0, 20, accuracy: 1e-3)
+        // A cue chosen by hand stays where it was put.
+        let chosen = TransitionEdit(entryBar: 40, cueBar: 9, preset: .stemSwap, bars: 8, semitones: 0, lanes: [], byHand: false)
+        XCTAssertEqual(PairPlan.make(a: a, b: double, fixed: chosen).placement.cueBar, 9)
+        XCTAssertEqual(PairPlan.make(a: double, b: a, fixed: chosen).placement.cueBar, 9)
+    }
+
+    /// Tempos far apart are beat-matched all the same (the two meet
+    /// half-way), in a quick blend, and cost the order like the jump in
+    /// tempo they are.
+    func testFarTemposBlendQuickly() {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        let a = song(scale: 0, key: c, bpm: 100), near = song(scale: 0, key: c, bpm: 104), far = song(scale: 0, key: c, bpm: 125)
+        let plan = PairPlan.make(a: a, b: far)
+        XCTAssertNotEqual(plan.preset, .echoOut)
+        XCTAssertLessThanOrEqual(plan.bars, 8)
+        XCTAssertEqual(plan.rate, 0.8, accuracy: 1e-9)
+        XCTAssertEqual(plan.shared.a * plan.rate, plan.shared.b, accuracy: 1e-9)
+        XCTAssertGreaterThan(plan.cost(a: a, b: far), PairPlan.make(a: a, b: near).cost(a: a, b: near) + 1)
     }
 
     /// The set's last song fades out without undoing its way in: a part
@@ -671,7 +709,10 @@ final class PayoffTests: XCTestCase {
     /// swap melodies for, or to price.
     func testAWashOutHasNoNotesToClash() {
         let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
-        let a = song(scale: 0, key: c, bpm: 100), far = song(scale: 1, key: MusicalKey(tonicPitchClass: 1, isMajor: true), bpm: 125)
+        let a = song(scale: 0, key: c, bpm: 100)
+        var far = song(scale: 1, key: MusicalKey(tonicPitchClass: 1, isMajor: true), bpm: 125)
+        // (A drummer's song: no steady beat to match.)
+        (far.grid.downbeats, far.grid.wanders) = ((0..<64).map { far.grid.downbeat($0) }, true)
         let wash = PairPlan.make(a: a, b: far)
         XCTAssertEqual(wash.preset, .echoOut)
         XCTAssertFalse(wash.keysClash)
@@ -791,7 +832,9 @@ final class PayoffTests: XCTestCase {
     /// A Wash Out's bridge comes in two lengths, and the plan says which.
     func testAWashOutPicksItsBridge() {
         let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
-        let plan = PairPlan.make(a: song(scale: 0, key: c, bpm: 100), b: song(scale: 0, key: c, bpm: 125))
+        var drummer = song(scale: 0, key: c, bpm: 125)
+        (drummer.grid.downbeats, drummer.grid.wanders) = ((0..<64).map { drummer.grid.downbeat($0) }, true)
+        let plan = PairPlan.make(a: song(scale: 0, key: c, bpm: 100), b: drummer)
         XCTAssertEqual(plan.preset, .echoOut)
         XCTAssertTrue([4, 8].contains(plan.bars))
         let lanes = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 4).lanes

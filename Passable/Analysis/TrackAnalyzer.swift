@@ -16,6 +16,15 @@ struct TrackAnalysis: Codable, Equatable {
     static let tempoCheck = 5
 
     static let currentVersion = 6
+
+    /// The song with its bars counted another way (see `Metre`).
+    func counted(_ metre: Metre) -> TrackAnalysis {
+        guard !metre.isOwn else { return self }
+        var counted = self
+        counted.grid = grid.counted(metre)
+        counted.structure = structure?.counted(metre, grid: counted.grid)
+        return counted
+    }
 }
 
 enum TrackAnalyzer {

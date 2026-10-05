@@ -39,22 +39,27 @@ enum MixMath {
     static let shareAbove = 0.03
 
     /// Beyond this (B's rate to A), the two don't share a beat: Wash Out.
-    /// Up to it they meet half-way (see `shared`), each no more than 6 %
-    /// off its own tempo, well inside what a DJ's pitch fader does all
-    /// night. (At 8 %, as this was, 146 into 135 BPM was bridged though
-    /// the two blend well.)
-    static let maxStretch = 0.12
+    /// No two tempos are that far apart once folded by an octave (the
+    /// most is a factor of √2): any two songs with a steady beat are
+    /// beat-matched, meeting half-way (see `shared`). A bridge with no
+    /// beat in it empties a floor every time, and a tempo ridden to the
+    /// next record's is what a DJ does about it. (At 12 %, as this was,
+    /// 95 into 118 BPM was bridged; the two blend.)
+    static let maxStretch = 0.42
+
+    /// Up to this the stretch is a pitch fader's everyday work (each song
+    /// no more than 6 % off its own tempo). Past it the blend is a quick
+    /// one, and costs the set's order like the jump in tempo it is.
+    static let easyStretch = 0.12
 
     static func recommendedPreset(rate: Double) -> TransitionPreset {
         abs(rate - 1) > maxStretch ? .echoOut : .stemSwap
     }
 
-    /// As above, from the two tempos. Songs detected at half or double
-    /// time of each other have bars of different lengths on their grids
-    /// (one's bar is two of the other's, or half), so their downbeats and
-    /// phrases can't be lined up bar for bar: never a beat blend.
+    /// As above, from the two tempos. (Songs detected at half or double
+    /// time of each other share a beat too: see `Metre`.)
     static func recommendedPreset(a: Double, b: Double) -> TransitionPreset {
-        tempoMultiplier(a: a, b: b) != 1 ? .echoOut : recommendedPreset(rate: rate(a: a, b: b))
+        recommendedPreset(rate: rate(a: a, b: b))
     }
 
     /// The preset for two songs: as their tempos say, unless one of them
@@ -154,6 +159,33 @@ struct PairPlan: Equatable {
         // (A song without a steady tempo is bridged whatever was chosen
         // for it: there is no beat to lay another on.)
         let steady = a.grid.isSteady && b.grid.isSteady
+        // Songs read at half or double time of each other: B is planned
+        // as counted in A's bars (see `Metre`), and cued in its own. Two
+        // of its bars to one can be counted from either of them: both
+        // are tried, since a part of B may start on any bar of its own.
+        if steady, fixed?.preset != .echoOut, MixMath.tempoMultiplier(a: a.grid.bpm, b: b.grid.bpm) != 1 {
+            var counts = [Metre(a: a.grid, b: b.grid, cue: fixed?.cueBar ?? 0)]
+            if fixed == nil, counts[0].bars == 2 { counts.append(Metre(a: a.grid, b: b.grid, cue: 1)) }
+            return counts.map { metre -> PairPlan in
+                let counted = b.counted(metre)
+                func plan(_ fixed: TransitionEdit?) -> PairPlan {
+                    make(a: a, b: counted, entryRange: entryRange, aShift: aShift, soloFrom: soloFrom, skip: skip,
+                         drums: drums, fixed: fixed, clashing: clashing, locking: locking, loops: loops)
+                }
+                var chosen = fixed
+                chosen?.cueBar = metre.counted(fixed?.cueBar ?? 0)
+                var made = plan(chosen)
+                // (Each of B's bars counted as two: it is cued on the first
+                // half of one, where its downbeat is.)
+                if metre.bars == 0.5, fixed == nil, made.placement.cueBar % 2 != 0 {
+                    made = plan(TransitionEdit(entryBar: made.placement.entryBar, cueBar: made.placement.cueBar - 1,
+                                               preset: made.preset, bars: made.bars, semitones: made.semitones, lanes: [],
+                                               byHand: false))
+                }
+                made.placement.cueBar = metre.own(made.placement.cueBar)
+                return made
+            }.max { $0.placement.score < $1.placement.score }!
+        }
         let fixed = steady || fixed?.preset == .echoOut ? fixed : nil
         let preset = fixed?.preset ?? MixMath.preset(a, b)
         let aKey = a.key.transposed(by: aShift)
@@ -232,6 +264,9 @@ struct PairPlan: Equatable {
         }
         options = options.filter { $0.preset == .echoOut || Double($0.bars) * barSeconds <= MixMath.maxBlendSeconds
             || $0.bars <= 8 }
+        // Tempos far apart: a quick blend. Both songs are well off their
+        // own tempo through it, which is heard the longer it lasts.
+        if abs(rate - 1) > MixMath.easyStretch { options = options.filter { $0.preset == .echoOut || $0.bars <= 8 } }
         if let fixed {
             options = [(fixed.preset, fixed.bars, 0, 0)]
             if fixed.preset == .stemSwap { options.append((fixed.preset, fixed.bars, 0, MixMath.loopBars)) }
@@ -302,13 +337,13 @@ struct PairPlan: Equatable {
     func cost(a: TrackAnalysis, b: TrackAnalysis) -> Double {
         let stretch = abs(MixMath.rate(a: a.grid.bpm, b: b.grid.bpm) - 1) * 100
         var cost: Double
-        // A Wash Out is priced as one whatever the tempos say: songs read
-        // at half or double time of each other match on paper (no stretch)
-        // but never share a beat.
+        // A Wash Out is priced as one whatever the tempos say. A blend of
+        // tempos far apart costs as much: it's a jump in tempo either way,
+        // fine once, not all night.
         switch stretch {
         case _ where preset == .echoOut: cost = 1.5 + 0.05 * stretch // fine once, not all night
         case ..<3: cost = 0.05 * stretch
-        case ..<(100 * MixMath.maxStretch): cost = 0.15 + 0.14 * (stretch - 3)
+        case ..<(100 * MixMath.easyStretch): cost = 0.15 + 0.14 * (stretch - 3)
         default: cost = 1.5 + 0.05 * stretch
         }
         // Clashing songs can't blend, only swap: next to each other they
@@ -341,7 +376,7 @@ struct PairPlan: Equatable {
 /// (or a planner that prices differently: `version`) is priced again.
 enum PairCosts {
     /// Bumped whenever planning or pricing changes.
-    static let version = "1"
+    static let version = "2"
 
     private static var url: URL {
         StemCache.root.deletingLastPathComponent().appendingPathComponent("pair-costs.json")
@@ -1795,7 +1830,10 @@ enum SetBuilder {
                 drafts.append(Draft(isEdited: isEdited, byHand: byHand, skip: skip, plan: plan, entryRange: entryRange,
                                     edit: edit, rateA: share.a, rateB: share.b, barSeconds: bar))
                 shifts.append(edit.semitones)
-                settledBar = edit.cueBar + span + glideBars
+                // (In B's own bars: two to a bar of the blend, or half of
+                // one, where the songs are at half or double time.)
+                let metre = edit.preset == .echoOut ? Metre() : Metre(a: ga, b: gb, cue: edit.cueBar)
+                settledBar = edit.cueBar + metre.ownBars(span + glideBars)
                 soloBars = minimumSoloBars(gb)
             }
         }
@@ -1856,6 +1894,10 @@ enum SetBuilder {
                 skippedBars = skip.count
             }
             var edit = draft.edit
+            // B as counted in the blend's bars (see `Metre`): what it plays
+            // bar by bar through the blend is read off that.
+            let metre = edit.preset == .echoOut ? Metre() : Metre(a: ga, b: gb, cue: edit.cueBar)
+            let bCounted = b.analysis.counted(metre), cueCounted = metre.counted(edit.cueBar)
             // A bar of the blend: A's own, or shorter or longer where A has
             // come some of the way to B's tempo.
             let blendBar = draft.barSeconds
@@ -1995,12 +2037,12 @@ enum SetBuilder {
                 }
                 func lanes(room: Double, start: Double, bar: Double) -> [Lane] { written(room: room, start: start, bar: bar).lanes }
                 var room = 0.0
-                if edit.preset == .stemSwap, let sa = saPlays, let sb = b.analysis.structure,
+                if edit.preset == .stemSwap, let sa = saPlays, let sb = bCounted.structure,
                    let pa = AutoPlacement.powers(sa, trim: Float(MixMath.trimDB(a.loaded.analysis))),
                    let pb = AutoPlacement.powers(sb, trim: Float(MixMath.trimDB(b.analysis))) {
                     let q = max(1, edit.bars / 4)
                     room = AutoPlacement.room(TransitionShape(lanes: lanes(room: 0, start: 0, bar: 1), preset: edit.preset, bars: edit.bars),
-                                              a: pa, e: edit.entryBar, b: pb, c: edit.cueBar, from: q, to: max(q + 1, Int(sw)))
+                                              a: pa, e: edit.entryBar, b: pb, c: cueCounted, from: q, to: max(q + 1, Int(sw)))
                 }
                 var outgoing = a
                 var incoming = SetMix.Track(url: tracks[k].url, loaded: b, map: map, matched: matched, offset: offset + nudge,
@@ -2051,8 +2093,8 @@ enum SetBuilder {
             }
             func linesB(_ t: Double) -> (song: TrackStructure, slot: Int)? {
                 let bar = span > 0 ? blendBar : gb.barSeconds
-                return b.analysis.structure.map {
-                    ($0, VocalPhrasing.slots * edit.cueBar + Int(((t - start) / bar * Double(VocalPhrasing.slots)).rounded()))
+                return bCounted.structure.map {
+                    ($0, VocalPhrasing.slots * cueCounted + Int(((t - start) / bar * Double(VocalPhrasing.slots)).rounded()))
                 }
             }
             // Where the two whole kits don't sit (or weren't known to), B's
@@ -2143,7 +2185,7 @@ enum SetBuilder {
                     vocalOut = (cut.time - start) / blendBar
                     vocalOutKind = cut.kind.rawValue
                 }
-                if let vocalsB = matched.stems[.vocals], let ref = VocalPhrasing.reference(b.analysis.structure),
+                if let vocalsB = matched.stems[.vocals], let ref = VocalPhrasing.reference(bCounted.structure),
                    let cut = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: ref, opening: true, target: start,
                                                earliest: start, latest: start + AutoPlacement.vocalWait * blendBar,
                                                bar: blendBar, lines: linesB(start)) {
@@ -2174,7 +2216,7 @@ enum SetBuilder {
                 // finished a line by then.
                 // B's voice has to sit on A's chords, as they play there.
                 if plan.placement.mashup, edit.preset == .stemSwap, !keysClash, align.grooves,
-                   let refB = VocalPhrasing.reference(b.analysis.structure),
+                   let refB = VocalPhrasing.reference(bCounted.structure),
                    Harmony.fits([aStems[.other], aStems[.bass]].compactMap { $0 }, aOffset: aPlays,
                                 [vocalsB], bOffset: offset + nudge,
                                 from: start + n / 4 * bar, to: start + n / 2 * bar) {
@@ -2206,7 +2248,7 @@ enum SetBuilder {
                 /// at bar `opening` (which may be the pause before a line):
                 /// looked for to the end of the blend, or four bars on.
                 func sounds(from opening: Double) -> Double {
-                    guard let refB = VocalPhrasing.reference(b.analysis.structure) else { return opening }
+                    guard let refB = VocalPhrasing.reference(bCounted.structure) else { return opening }
                     var t = start + opening * bar
                     while t < start + max(opening + 4, n) * bar,
                           !VocalPhrasing.sounding(vocalsB, offset: offset + nudge, reference: refB, at: t, beat: beat) {
@@ -2225,7 +2267,7 @@ enum SetBuilder {
                                         bOffset: offset + nudge, from: start + sw * bar, to: start + min(until, n) * bar)
                 }
                 if !mashup {
-                    if let ref = VocalPhrasing.reference(b.analysis.structure) {
+                    if let ref = VocalPhrasing.reference(bCounted.structure) {
                         // Before the swap B's voice sings over A's beat and
                         // bass line: only where the grooves lock and it sits
                         // on A's chords (as a mashup must). Otherwise, and
@@ -2252,9 +2294,9 @@ enum SetBuilder {
                             return g >= 0 && g < e.count ? e[g] : 0
                         }
                         let partsMeet = n >= 16 && edge(a.loaded.analysis.structure, edit.entryBar + q) >= 0.7
-                            && edge(b.analysis.structure, edit.cueBar + q) >= 0.7
-                        let partStarts = loop > 0 && edge(b.analysis.structure, edit.cueBar) >= 0.7
-                            && (b.analysis.structure?.meanActivity(.vocals, bars: edit.cueBar..<(edit.cueBar + q)) ?? 0) > 0.3
+                            && edge(bCounted.structure, cueCounted + q) >= 0.7
+                        let partStarts = loop > 0 && edge(bCounted.structure, cueCounted) >= 0.7
+                            && (bCounted.structure?.meanActivity(.vocals, bars: cueCounted..<(cueCounted + q)) ?? 0) > 0.3
                         let first = sw < n / 2 ? sw : partStarts && overA(from: 0) ? 0
                             : (loop > 0 || partsMeet) && n >= 16 && overA(from: n / 4) ? n / 4
                             : overA(from: n / 2) ? n / 2 : max(n / 2, sw)
@@ -2362,22 +2404,22 @@ enum SetBuilder {
                 // voice leaves.
                 var under = 0.0
                 if edit.preset == .stemSwap, !keysClash, !mashup, let sa = saPlays,
-                   let sb = b.analysis.structure,
+                   let sb = bCounted.structure,
                    let pa = AutoPlacement.powers(sa, trim: Float(MixMath.trimDB(a.loaded.analysis))),
                    let pb = AutoPlacement.powers(sb, trim: Float(MixMath.trimDB(b.analysis))) {
-                    under = AutoPlacement.under(a: pa, e: edit.entryBar, b: pb, c: edit.cueBar, from: max(1, edit.bars / 4),
+                    under = AutoPlacement.under(a: pa, e: edit.entryBar, b: pb, c: cueCounted, from: max(1, edit.bars / 4),
                                                 to: Int((vocalOut ?? switchBar).rounded(.up)))
                 }
                 // Room for B: A's EQ gives way as much as B's parts need to
                 // be heard, judged on the blend as it will play (B through
                 // its entry filters, its drums in or not, A's voice on).
-                if edit.preset == .stemSwap, let sa = saPlays, let sb = b.analysis.structure,
+                if edit.preset == .stemSwap, let sa = saPlays, let sb = bCounted.structure,
                    let pa = AutoPlacement.powers(sa, trim: Float(MixMath.trimDB(a.loaded.analysis))),
                    let pb = AutoPlacement.powers(sb, trim: Float(MixMath.trimDB(b.analysis))) {
                     let q = max(1, edit.bars / 4)
                     let plain = TransitionShape(lanes: make(outFade: 0, inFade: 0, room: 0, start: 0, barSeconds: 1).lanes,
                                                 preset: edit.preset, bars: edit.bars)
-                    room = AutoPlacement.room(plain, a: pa, e: edit.entryBar, b: pb, c: edit.cueBar, from: q,
+                    room = AutoPlacement.room(plain, a: pa, e: edit.entryBar, b: pb, c: cueCounted, from: q,
                                               to: max(q + 1, Int(switchBar)))
                 }
                 // Both voices are cut, never faded: on a breath or between
@@ -2403,7 +2445,7 @@ enum SetBuilder {
                     vocalOutKind = nil
                 }
                 if let entry = made.vocalEntry, let vocalsB = matched.stems[.vocals],
-                   let ref = VocalPhrasing.reference(b.analysis.structure) {
+                   let ref = VocalPhrasing.reference(bCounted.structure) {
                     let singing = VocalPhrasing.sounding(vocalsB, offset: offset + nudge, reference: ref,
                                                          at: start + entry * bar - beat / 2, beat: beat / 2)
                     vocalInKind = vocalInKind ?? (singing ? "bar" : "grid")

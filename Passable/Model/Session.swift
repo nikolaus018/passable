@@ -442,7 +442,8 @@ final class Session: ObservableObject {
     }
 
     var recommendedPreset: TransitionPreset {
-        tempoMultiplier != 1 ? .echoOut : MixMath.recommendedPreset(rate: rate)
+        guard let a = deckA.analysis, let b = deckB.analysis else { return MixMath.recommendedPreset(rate: rate) }
+        return MixMath.preset(a, b)
     }
 
     func setSemitones(_ value: Int, auto: Bool = false) {
@@ -596,10 +597,14 @@ final class Session: ObservableObject {
     @Published private(set) var placementNote: String?
 
     private func place(a: TrackAnalysis, b: TrackAnalysis) {
-        let result = AutoPlacement.place(a: a, b: b, bars: transitionBars, preset: preset,
+        // (Songs at half or double time of each other: B is placed as
+        // counted in A's bars, and cued in its own. See `Metre`.)
+        let metre = preset == .echoOut ? Metre() : Metre(a: a.grid, b: b.grid)
+        var result = AutoPlacement.place(a: a, b: b.counted(metre), bars: transitionBars, preset: preset,
                                          trimA: Float(trimDB(.a)), trimB: Float(trimDB(.b)), keysClash: keysIncompatible,
                                          mashup: !keysIncompatible && abs(matchRate - 1) < MixMath.mashupStretch,
                                          bShift: semitones)
+        result.cueBar = metre.own(result.cueBar)
         placedFor = Placed(preset: preset, bars: transitionBars, entryBar: result.entryBar, cueBar: result.cueBar,
                            mashup: result.mashup, dropMoment: result.dropMoment, lowSwap: result.lowSwap,
                            vocalHandoff: result.vocalHandoff)

@@ -69,11 +69,11 @@ struct TransitionPanel: View {
                 Spacer()
             }
             .help(session.preset == .echoOut
-                  ? "Wash Out never layers the two beats, so B keeps its own tempo."
+                  ? "Wash Out never layers the two beats, so B keeps its own tempo. Only a song without a steady beat (a live drummer) is mixed this way automatically."
                   : (share.a != 1
                      ? "The two meet at a tempo between theirs, so neither is heard far off its own: A glides there over its last bars alone, B glides back to its own after the blend and plays untouched."
                      : "B matches A's tempo only while they overlap, then glides back to its own over \(session.glideBars) bars and plays untouched.")
-                    + (abs(percent) > 8 ? " That's a big stretch: Wash Out avoids it." : ""))
+                    + (abs(percent) > 100 * MixMath.easyStretch ? " That's a big stretch, so the blend is a quick one." : ""))
             HStack(spacing: 6) {
                 Image(systemName: "tuningfork").frame(width: 16)
                 if session.semitones == 0 {

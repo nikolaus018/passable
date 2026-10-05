@@ -531,6 +531,48 @@ extension TrackStructure {
         return s
     }
 
+    /// The song measured in another count of its bars (see `Metre`), on
+    /// `grid` (its own, counted the same way): what a blend with a song at
+    /// half or double its tempo is judged on, bar for bar.
+    func counted(_ metre: Metre, grid: BeatGrid) -> TrackStructure {
+        guard !metre.isOwn else { return self }
+        /// `x` with `per` values to the bar: two joined to one, or each
+        /// one as two.
+        func regroup<T>(_ x: [T], per: Int = 1, _ join: (T, T) -> T, _ half: (T) -> T) -> [T] {
+            guard metre.bars == 2 else { return x.flatMap { [half($0), half($0)] } }
+            return stride(from: min(x.count, metre.first * per), to: x.count - 1, by: 2).map { join(x[$0], x[$0 + 1]) }
+        }
+        func level(_ x: [Float], per: Int = 1) -> [Float] {
+            regroup(x, per: per, { 10 * log10(max((pow(10, $0 / 10) + pow(10, $1 / 10)) / 2, 1e-9)) }, { $0 })
+        }
+        // (Notes are summed over a bar as measured: twice the bar, twice
+        // the sum.)
+        func notes(_ x: [[Float]]) -> [[Float]] { regroup(x, { zip($0, $1).map(+) }, { $0.map { $0 / 2 } }) }
+        var s = self
+        s.activity = activity.mapValues { regroup($0, { (($0 * $0 + $1 * $1) / 2).squareRoot() }, { $0 }) }
+        s.loudness = level(loudness)
+        s.stemLevel = stemLevel.map { $0.mapValues { level($0) } }
+        s.stemLowLevel = stemLowLevel.map { $0.mapValues { level($0) } }
+        s.vocalBeatLevel = vocalBeatLevel.map { level($0, per: 4) }
+        s.vocalSixteenthLevel = vocalSixteenthLevel.map { level($0, per: VocalPhrasing.slots) }
+        s.vocalChroma = vocalChroma.map(notes)
+        s.harmonyChroma = harmonyChroma.map(notes)
+        s.melodyChroma = melodyChroma.map(notes)
+        // The hooks stay where the song has them (found in its own bars),
+        // and the lines are put on the new count.
+        let hooks = hookStart.map { regroup($0, { max($0, $1) }, { $0 }) }
+        s.barChroma = nil
+        s.setLines(vocalLines, tried: lyricsTried, grid: grid)
+        s.barChroma = barChroma.map {
+            notes($0).map { bar in
+                let top = bar.max() ?? 0
+                return top > 0 ? bar.map { $0 / top } : bar
+            }
+        }
+        s.hookStart = hooks
+        return s
+    }
+
     /// Whether the `bars` bars before bar `entry` make a bed to loop: the
     /// song at full power all through them, beat and bass line going.
     func loops(before entry: Int, bars: Int) -> Bool {

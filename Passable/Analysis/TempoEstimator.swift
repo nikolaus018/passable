@@ -86,6 +86,58 @@ struct BeatGrid: Codable, Equatable {
     func scaled(by rate: Double) -> BeatGrid {
         BeatGrid(bpm: bpm * rate, firstDownbeat: firstDownbeat / rate, downbeats: downbeats.map { $0.map { $0 / rate } })
     }
+
+    /// The same beats with the bars counted another way (see `Metre`):
+    /// two of its bars to one, or each bar as two.
+    func counted(_ metre: Metre) -> BeatGrid {
+        if metre.bars == 2 {
+            return BeatGrid(bpm: bpm / 2, firstDownbeat: downbeat(metre.first),
+                            downbeats: downbeats.map { d in stride(from: metre.first, to: d.count, by: 2).map { d[$0] } },
+                            wanders: wanders, doubtful: doubtful)
+        }
+        if metre.bars == 0.5 {
+            return BeatGrid(bpm: bpm * 2, firstDownbeat: firstDownbeat,
+                            downbeats: downbeats.map { d in
+                                d.indices.flatMap { k in k + 1 < d.count ? [d[k], (d[k] + d[k + 1]) / 2] : [d[k]] }
+                            },
+                            wanders: wanders, doubtful: doubtful)
+        }
+        return self
+    }
+}
+
+/// How the incoming song's bars are counted through a blend. Songs read
+/// at half or double time of each other share a beat (every beat of the
+/// slower one is every other beat of the faster: 85 BPM rap into 170),
+/// but a bar of one is two of the other's. The incoming song is then
+/// counted in the outgoing one's bars (two of its own to a bar, or each
+/// of its own as two), and the two line up bar for bar like any other
+/// pair: a DJ counts the faster record in half time and mixes it in.
+struct Metre: Equatable {
+    /// The song's own bars to a counted one: 2, 1 (as they are) or 0.5.
+    var bars = 1.0
+    /// Two to a bar: the own bar the count starts on, 0 or 1 (which of
+    /// its bars are the ones is the cue's say).
+    var first = 0
+
+    var isOwn: Bool { bars == 1 }
+
+    init() {}
+
+    /// B's count against A where B is cued on its own bar `cue`.
+    init(a: BeatGrid, b: BeatGrid, cue: Int = 0) {
+        guard a.isSteady, b.isSteady else { return }
+        let multiplier = MixMath.tempoMultiplier(a: a.bpm, b: b.bpm)
+        if multiplier < 1 { (bars, first) = (2, cue & 1) }
+        if multiplier > 1 { bars = 0.5 }
+    }
+
+    /// The counted bar that own bar `bar` falls in.
+    func counted(_ bar: Int) -> Int { bars == 2 ? (bar - first) >> 1 : bars == 0.5 ? 2 * bar : bar }
+    /// The own bar that counted bar `bar` starts in.
+    func own(_ bar: Int) -> Int { bars == 2 ? 2 * bar + first : bars == 0.5 ? bar >> 1 : bar }
+    /// Own bars that `count` counted ones take.
+    func ownBars(_ count: Int) -> Int { Int((Double(count) * bars).rounded(.up)) }
 }
 
 /// Whether a song keeps the tempo of its grid, and its bars one by one if
