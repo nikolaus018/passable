@@ -13,6 +13,16 @@
   <img src="https://img.shields.io/badge/Core%20ML-HTDemucs-purple" alt="Core ML, HTDemucs">
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/transition.png" alt="Transition editor with eight stem lanes and automation curves" width="900">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/set.png" alt="A set of six songs with planned transitions" width="900">
+</p>
+
+<p align="center"><sub>Demo set of Kevin MacLeod tracks (incompetech.com, CC BY 4.0). Top: the transition editor. Bottom: an ordered set with every transition planned.</sub></p>
+
 ## Highlights
 
 - **Stem separation** into vocals, melody, drums and bass with HTDemucs v4 on Core ML (about 20 s for a 4-minute track on an M5)
@@ -114,3 +124,7 @@ Measurement harnesses (skipped unless their variable is set; `xcodebuild` only p
 - `TEST_RUNNER_PASSABLE_LAB=list.txt … -only-testing:PassableTests/TransitionLab` does the same for consecutive pairs through the editor's pipeline.
 - `TEST_RUNNER_PASSABLE_PACK=list.txt TEST_RUNNER_PASSABLE_PACK_OUT=set.passable … -only-testing:PassableTests/SetPack` orders the songs as the Set tab does and packs them into a `.passable` file.
 - `TEST_RUNNER_PASSABLE_PROBE=list.txt … -only-testing:PassableTests/RealTrackProbe` prints analysis and placement.
+
+## License
+
+MIT, see [`LICENSE`](LICENSE). [Beat This!](https://github.com/CPJKU/beat_this) (MIT) and HTDemucs (MIT) are used under their own licenses.
