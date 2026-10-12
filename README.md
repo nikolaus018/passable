@@ -1,5 +1,15 @@
 # Passable
 
+![macOS 14+](https://img.shields.io/badge/macOS-14%2B-blue) ![Swift](https://img.shields.io/badge/Swift-SwiftUI-orange) ![Core ML](https://img.shields.io/badge/Core%20ML-HTDemucs-purple)
+
+**Stem-based DJ transition builder for macOS.** Everything runs on-device.
+
+- **Stem separation** into vocals, melody, drums and bass with HTDemucs v4 on Core ML (about 20 s for a 4-minute track on an M5)
+- **Analysis**: neural beat tracking, per-bar grids for songs with a drifting tempo, key detection, song structure and vocal line timing
+- **Automatic set ordering and transitions** based on tempo, key, energy and section alignment
+- **Hand-editable automation**: volume, filter, EQ, reverb and delay lanes for every stem
+- **Sample-exact rendering** to AAC or 24-bit WAV, plus a `.passable` set format and an iPhone companion
+
 A native macOS app that mixes songs like a DJ, stem by stem. Add songs to a set, and Passable puts them in the order that flows best, builds every transition and plays or renders one continuous mix. Any transition can be opened and shaped by hand.
 
 ## Set tab
