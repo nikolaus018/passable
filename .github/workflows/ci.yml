@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (macOS)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        run: |
+          xcodebuild build -project Passable.xcodeproj -scheme Passable \
+            -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO | tail -40

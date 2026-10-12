@@ -1,8 +1,19 @@
-# Passable
+<h1 align="center">Passable</h1>
 
-![macOS 14+](https://img.shields.io/badge/macOS-14%2B-blue) ![Swift](https://img.shields.io/badge/Swift-SwiftUI-orange) ![Core ML](https://img.shields.io/badge/Core%20ML-HTDemucs-purple)
+<p align="center">
+  <b>Stem-based DJ transition builder for macOS.</b><br>
+  Drop in songs, get one continuous mix. Everything runs on-device.
+</p>
 
-**Stem-based DJ transition builder for macOS.** Everything runs on-device.
+<p align="center">
+  <a href="https://github.com/nikolaus018/passable/actions/workflows/ci.yml"><img src="https://github.com/nikolaus018/passable/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/nikolaus018/passable" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/macOS-14%2B-blue" alt="macOS 14+">
+  <img src="https://img.shields.io/badge/Swift-SwiftUI-orange" alt="Swift, SwiftUI">
+  <img src="https://img.shields.io/badge/Core%20ML-HTDemucs-purple" alt="Core ML, HTDemucs">
+</p>
+
+## Highlights
 
 - **Stem separation** into vocals, melody, drums and bass with HTDemucs v4 on Core ML (about 20 s for a 4-minute track on an M5)
 - **Analysis**: neural beat tracking, per-bar grids for songs with a drifting tempo, key detection, song structure and vocal line timing
