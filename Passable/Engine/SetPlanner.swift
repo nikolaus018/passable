@@ -2208,9 +2208,15 @@ enum SetBuilder {
                     vocalOut = (cut.time - start) / blendBar
                     vocalOutKind = cut.kind.rawValue
                 }
+                // B lands whole: its voice opens with its beat, or a beat
+                // before on a pickup. It's never held back while B's song
+                // plays and let in on a breath further on (heard as the
+                // singer cutting in mid-verse).
+                vocalIn = 0
+                vocalInKind = "bar"
                 if let vocalsB = matched.stems[.vocals], let ref = VocalPhrasing.reference(bCounted.structure),
                    let cut = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: ref, opening: true, target: start,
-                                               earliest: start, latest: start + AutoPlacement.vocalWait * blendBar,
+                                               earliest: start - AutoPlacement.pickup * blendBar, latest: start,
                                                bar: blendBar, lines: linesB(start)) {
                     vocalIn = (cut.time - start) / blendBar
                     vocalInKind = cut.kind == .line ? "breath" : "word"

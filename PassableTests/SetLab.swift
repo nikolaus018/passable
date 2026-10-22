@@ -254,7 +254,7 @@ final class SetLab: XCTestCase {
             // sounding right where it was taken out, B's right where it was
             // let in (a line cut in two)?
             var phrasing = ""
-            if t.edit.preset != .echoOut, !t.isEdited {
+            if !t.isEdited {
                 func sounding(_ track: Int, at master: Double) -> Bool {
                     let tr = mix.tracks[track]
                     guard let stem = tr.stems[.vocals], let ref = VocalPhrasing.reference(tr.loaded.analysis.structure)
@@ -269,6 +269,23 @@ final class SetLab: XCTestCase {
                     }
                     return db(i - n) > ref - 12 && db(i) > ref - 12
                 }
+                // A cut or Wash Out drops B in whole: its voice must open
+                // with its beat (or on a pickup just before), and not land
+                // in the middle of a line.
+                func midLine(_ track: Int, _ bar0: Int, at master: Double) -> Bool {
+                    let k = VocalPhrasing.slots * bar0 + Int(((master - t.start) / t.barSeconds * Double(VocalPhrasing.slots)).rounded())
+                    return mix.tracks[track].loaded.analysis.structure?.midLine(at: k) ?? true
+                }
+                if t.edit.preset == .echoOut {
+                    let vin = t.vocalIn ?? t.start
+                    if vin > t.start + 0.05 * t.barSeconds,
+                       stride(from: t.start, to: vin, by: t.barSeconds / 8).contains(where: { sounding(t.to, at: $0) }) {
+                        phrasing += " B-HELD"
+                    }
+                    if vin >= t.start - 0.01, sounding(t.to, at: t.start), midLine(t.to, t.edit.cueBar, at: t.start) {
+                        phrasing += " B-LANDS-MIDLINE"
+                    }
+                }
                 let n = Double(t.edit.bars), p = t.plan.placement
                 let gridIn = t.start + min(n, max(n / 2, Double(p.vocalHandoff))) * t.barSeconds
                 let vin = t.vocalIn ?? gridIn
@@ -278,12 +295,9 @@ final class SetLab: XCTestCase {
                 // opening on a word's attack is sounding by design.
                 // (Nor is a voice cut between two lines of its words,
                 // sounding or not: a rapper leaves no breath there.)
-                func midLine(_ track: Int, _ bar0: Int, at master: Double) -> Bool {
-                    let k = VocalPhrasing.slots * bar0 + Int(((master - t.start) / t.barSeconds * Double(VocalPhrasing.slots)).rounded())
-                    return mix.tracks[track].loaded.analysis.structure?.midLine(at: k) ?? true
-                }
-                if t.vocalOutKind != "bar", sounding(t.from, at: out), midLine(t.from, t.edit.entryBar, at: out) { phrasing += " A-CUT" }
-                if t.vocalInKind == "grid", sounding(t.to, at: vin), midLine(t.to, t.edit.cueBar, at: vin) { phrasing += " B-MIDLINE" }
+                if t.edit.preset != .echoOut, t.vocalOutKind != "bar", sounding(t.from, at: out), midLine(t.from, t.edit.entryBar, at: out) { phrasing += " A-CUT" }
+                if t.edit.preset != .echoOut, t.vocalInKind == "grid", sounding(t.to, at: vin),
+                   midLine(t.to, t.edit.cueBar, at: vin) { phrasing += " B-MIDLINE" }
             }
             // A Wash Out never layers two beats: its bridge is the blend.
             if together < min(6, t.edit.bars / 2 + 2), t.edit.preset != .echoOut { phrasing += " STRUNG-TOGETHER" }

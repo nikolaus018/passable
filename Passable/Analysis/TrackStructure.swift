@@ -873,6 +873,10 @@ enum AutoPlacement {
     /// and more.
     static let partWeight: Float = 2.2
 
+    /// Bars before a cut's downbeat B's voice may come in on a pickup: a
+    /// beat, in the half-beat gap and A's last echo.
+    static let pickup = 0.25
+
     /// Where A's voice leaves, given where B's will really be singing (or
     /// B takes over): at the end of the phrase A is in, if that's no more
     /// than two bars before. A singer who starts the next phrase only to
@@ -1636,15 +1640,22 @@ enum AutoPlacement {
                         func entry(from first: Int) -> (bar: Double, kind: VocalPhrasing.Cut?) {
                             let aim = sa.isActive(.vocals, bar: e + first) && first >= n / 2
                                 ? min(max(v, first), max(first, min(n, sw ?? n))) : first
-                            // (A Wash Out drops B's beat with its voice
-                            // open, or on its next word.)
-                            return AutoPlacement.vocalCut(sb, at: c, opening: true, target: echo ? 0 : Double(aim),
+                            // (A cut or Wash Out drops B in whole, its
+                            // voice with its beat: never held back while
+                            // the song plays, then let in mid-verse. What
+                            // counts is whether a line starts there, or a
+                            // pickup a beat before, in the gap.)
+                            if echo {
+                                return AutoPlacement.vocalCut(sb, at: c, opening: true, target: 0,
+                                                              earliest: -AutoPlacement.pickup, latest: 0)
+                            }
+                            return AutoPlacement.vocalCut(sb, at: c, opening: true, target: Double(aim),
                                                           // (Half a bar before its floor too: a line
                                                           // that starts with a pickup is let in on the
                                                           // pickup, not on a gap between its words
                                                           // just past the bar line.)
-                                                          earliest: echo ? 0 : max(0, Double(aim) - (clashHere ? 0 : 0.5)),
-                                                          latest: (echo ? 0 : Double(aim)) + AutoPlacement.vocalWait)
+                                                          earliest: max(0, Double(aim) - (clashHere ? 0 : 0.5)),
+                                                          latest: Double(aim) + AutoPlacement.vocalWait)
                         }
                         /// Before the swap B's voice sings over A's melody
                         /// and bass line: only where it sits on them (as
@@ -1804,8 +1815,11 @@ enum AutoPlacement {
                     guard !echo else {
                         // B's beat drops with its vocal open: not in the
                         // middle of a line. A's vocal should find a line end
-                        // in the bridge's last bars.
+                        // in the bridge's last bars. (B landing mid-line on
+                        // a cut is the first thing heard of it: twice the
+                        // cost of a blend's entry.)
                         s -= AutoPlacement.cutCost(in: heardIn, out: heardExit)
+                            + AutoPlacement.cutCost(in: heardIn, out: .line)
                         s += AutoPlacement.partWeight * (bound(partsA, e) + bound(partsB, c + Int((heardVocal ?? 0).rounded())))
                         // (And B's voice shouldn't trail its beat by bars.)
                         s -= 0.3 * Float(heardVocal ?? 0)

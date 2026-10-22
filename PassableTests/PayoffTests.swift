@@ -490,6 +490,24 @@ final class PayoffTests: XCTestCase {
         }
     }
 
+    /// A cut drops B in whole: its voice opens with its beat (never held
+    /// back and let in later, mid-verse), or a beat early on a pickup, with
+    /// A's voice gone by then.
+    func testACutLandsBsVoiceWithItsBeat() {
+        func vocal(_ lanes: [Lane], _ side: DeckSide, bar: Double) -> Double {
+            lanes.first { $0.side == side && $0.stem == .vocals }!.value(.volume, at: bar * 2)
+        }
+        let late = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 1, vocalIn: 0.4).lanes
+        XCTAssertEqual(vocal(late, .b, bar: 0.01), 1, "B's voice with its beat, whatever the caller asked")
+        let pickup = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 1,
+                                            vocalIn: -0.2, vocalOut: -0.1).lanes
+        XCTAssertEqual(vocal(pickup, .b, bar: -0.19), 1, "a pickup sings into the gap")
+        XCTAssertEqual(vocal(pickup, .b, bar: -0.3), 0)
+        XCTAssertEqual(vocal(pickup, .a, bar: -0.19), 0, accuracy: 0.01, "one voice at a time")
+        let wash = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 8, vocalIn: 1.5).lanes
+        XCTAssertEqual(vocal(wash, .b, bar: 0.01), 1)
+    }
+
     /// The kick and bass change hands only where B has a low end to take
     /// them: never into a part of B without one (a pre-chorus, a bare
     /// intro), where the floor would lose its weight for bars.

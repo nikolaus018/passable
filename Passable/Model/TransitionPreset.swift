@@ -588,14 +588,16 @@ struct TransitionBuilder {
             automate(.a, .drums, .filter, [(-1, 0.5, .exponential), (-0.126, 0.6, .hold)])
             automate(.a, .drums, .delay, [(-0.5, 0, .exponential), (-0.25, 0.5, .hold), (0, 0, .linear)])
             automate(.a, .other, .reverb, [(-0.5, 0, .linear), (-0.125, 0.6, .hold), (0.001, 0, .linear)])
+            // B's voice with its beat, or a beat before on a pickup.
+            let vin = max(-AutoPlacement.pickup, min(0, vocalIn ?? 0))
             // A's voice leaves on a line end in its last bars, at the cut
-            // at the latest, thrown into the echo.
-            let out = max(-4, min(-0.125, vocalOut ?? -0.125))
+            // (or B's pickup) at the latest, thrown into the echo.
+            let out = max(-4, min(-0.125, vin, vocalOut ?? -0.125))
             echoOutVocal(at: out, send: 0.85, tail: max(0.25, min(1, -out)))
             for stem in [StemKind.drums, .bass, .other] {
                 automate(.b, stem, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
             }
-            bringInVocal(at: max(0, vocalIn ?? 0))
+            bringInVocal(at: vin)
 
         case .echoOut:
             // The tempos can't be matched, so two beats must never play at
@@ -620,7 +622,8 @@ struct TransitionBuilder {
             automate(.a, .other, .volume, [(-0.125, 1, .hold), (-0.124, 0, .linear)])
             // The echo is timed to A's tempo: its send closes by B's
             // downbeat, so no more than its last repeats ring over B's beat.
-            let out = max(-e, min(0, vocalOut ?? -1))
+            let vin = max(-AutoPlacement.pickup, min(0, vocalIn ?? 0))
+            let out = max(-e, min(vin, vocalOut ?? -1))
             echoOutVocal(at: out, send: 0.85, tail: max(0.25, min(2, -out)))
             // The tempos differ: B's melody never plays over A's (two
             // rhythms that can't line up). It lands with B's beat, as A's
@@ -628,9 +631,9 @@ struct TransitionBuilder {
             for stem in [StemKind.drums, .bass, .other] {
                 automate(.b, stem, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
             }
-            // B's voice with its beat, or on its next word if the downbeat
-            // falls in the middle of one.
-            bringInVocal(at: max(0, vocalIn ?? 0))
+            // B's voice with its beat, or a beat before on a pickup: never
+            // held back while its song plays.
+            bringInVocal(at: vin)
         }
     }
 }
