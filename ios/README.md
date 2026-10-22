@@ -9,7 +9,7 @@ The Mac renders; the phone plays. Nothing is mixed on the phone.
 
 1. Open Passable on the iPhone and leave it on screen (it says **Ready for your Mac**).
 2. In Passable on the Mac, build a set, then click **iPhone** in the transport bar and pick the phone.
-3. Tap **Accept** on the phone. The Mac renders the set (a few seconds per song), packs it and sends it over Wi-Fi.
+3. Tap **Accept** on the phone right away. The Mac then renders the set (a few seconds per song) while the phone keeps its screen on, packs it and sends it over Wi-Fi.
 
 Both devices must be on the same Wi-Fi. The first time, each asks for **Local Network** access: say yes.
 The phone asks before every transfer and everything is encrypted in transit.
@@ -22,8 +22,9 @@ No Wi-Fi? In the Mac's iPhone panel choose **Save as File…** and AirDrop the `
   decks, and slide into each other across a transition.
 - **Player** with artwork, BPM and key, a *Mixing into…* strip while a blend plays, a scrubbable waveform with the
   song's name under your finger, and a **track list** showing each blend (type and length) between songs.
-- **Next / Previous** jump between songs. Songs overlap, so a skip lands on **the takeover**: the moment the
-  new song takes over, not where it starts to mix in.
+- **Next / Previous** skip between transitions. A skip lands **four bars before the blend** into the next song
+  (the Mac's cue point, stored per transition), never after it, so the transition is always heard. Previous restarts
+  that lead-in; pressed again within three seconds it goes to the one before.
 - Lock screen, Control Center and headphone buttons show the playing *song* with its own length, and Next/Previous work.
 - Resumes where you left off, per mix. Pauses when headphones are unplugged.
 

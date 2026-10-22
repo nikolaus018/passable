@@ -61,22 +61,27 @@ final class PhoneLink: NSObject, ObservableObject {
 
     // MARK: - Sending
 
-    /// Asks `phone` and, once it accepts, sends `file`. `progress` runs with 0...1.
-    func send(_ file: URL, to phone: Phone, invitation: PassableMix.Invitation,
-              progress: @escaping @MainActor (Double) -> Void) async throws {
+    /// Asks `phone` and returns once its owner has accepted. The connection
+    /// is held (and the phone list kept alive) until `transfer` or `cancel`,
+    /// so a set can be rendered after the phone said yes, not before.
+    func connect(to phone: Phone, invitation: PassableMix.Invitation) async throws {
         guard !sending else { throw LinkError.busy }
         sending = true
-        defer {
-            sending = false
-            session.disconnect()
-            if stopWhenDone { stopWhenDone = false; stopLooking() }
+        do {
+            let context = try JSONEncoder().encode(invitation)
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                waitingForConnection = continuation
+                browser.invitePeer(phone.peer, to: session, withContext: context, timeout: 90)
+            }
+        } catch {
+            cancel()
+            throw error
         }
-        let context = try JSONEncoder().encode(invitation)
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            waitingForConnection = continuation
-            browser.invitePeer(phone.peer, to: session, withContext: context, timeout: 90)
-        }
+    }
 
+    /// Sends `file` over the connection `connect` made. `progress` runs with 0...1.
+    func transfer(_ file: URL, to phone: Phone, progress: @escaping @MainActor (Double) -> Void) async throws {
+        defer { cancel() }
         let name = file.lastPathComponent
         var observation: NSKeyValueObservation?
         defer { observation?.invalidate() }
@@ -90,6 +95,22 @@ final class PhoneLink: NSObject, ObservableObject {
             }
         }
         progress(1)
+    }
+
+    /// Lets go of the connection (nothing more will be sent).
+    func cancel() {
+        guard sending else { return }
+        sending = false
+        waitingForConnection = nil
+        session.disconnect()
+        if stopWhenDone { stopWhenDone = false; stopLooking() }
+    }
+
+    /// Asks `phone` and, once it accepts, sends `file`.
+    func send(_ file: URL, to phone: Phone, invitation: PassableMix.Invitation,
+              progress: @escaping @MainActor (Double) -> Void) async throws {
+        try await connect(to: phone, invitation: invitation)
+        try await transfer(file, to: phone, progress: progress)
     }
 
     fileprivate func connectionChanged(_ peer: MCPeerID, _ state: MCSessionState) {

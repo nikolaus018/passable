@@ -134,6 +134,32 @@ final class PassableMixTests: XCTestCase {
         XCTAssertEqual(m.previousTarget(from: 182, .blend), 80, "C only just blending in, B still the song: back to B")
     }
 
+    func testSkipLandsBeforeTheBlendNotAfter() {
+        let m = manifest()
+        // A has no tempo: four bars fall back to 8 s, so B's lead-in is 72.
+        XCTAssertEqual(m.nextTarget(from: 10, .lead)!, 72, accuracy: 1e-9)
+        XCTAssertLessThan(m.nextTarget(from: 10, .lead)!, m.transitions[0].begins)
+        // Inside the lead-in already: on to the next transition's lead-in
+        // (B is 124 BPM, so four bars are 7.74 s).
+        XCTAssertEqual(m.nextTarget(from: 75, .lead)!, 180 - 4 * 240 / 124, accuracy: 1e-9)
+        XCTAssertNil(m.nextTarget(from: 190, .lead), "nothing after the last blend")
+    }
+
+    func testStoredCueWinsAndStaysInsideTheSongGoingOut() {
+        var m = manifest()
+        m.transitions[0].cue = 60
+        XCTAssertEqual(m.nextTarget(from: 10, .lead), 60)
+        m.transitions[1].cue = 20   // before B has even taken over: clamped to B's handover
+        XCTAssertEqual(m.leadIn(of: m.transitions[1]), 90)
+    }
+
+    func testPreviousGoesToTheLeadInThenTheOneBefore() {
+        let m = manifest()
+        XCTAssertEqual(m.previousTarget(from: 150, .lead), 72, "deep into B: back to the lead-in of its blend")
+        XCTAssertEqual(m.previousTarget(from: 74, .lead), 0, "just after the lead-in began: the one before")
+        XCTAssertEqual(m.previousTarget(from: 40, .lead), 0)
+    }
+
     func testSongLength() {
         let m = manifest()
         XCTAssertEqual(m.length(ofSong: 0), 90)

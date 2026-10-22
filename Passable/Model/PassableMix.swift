@@ -85,6 +85,10 @@ enum PassableMix {
         var style: String
         /// What makes it more than a crossfade, in words.
         var notes: [String] = []
+        /// Four bars before anything happens: where a skip lands so the
+        /// whole transition is heard. Absent in older files (the phone then
+        /// works it out from the song's tempo).
+        var cue: Double? = nil
     }
 
     /// What the Mac tells the phone before sending a mix over Wi-Fi, so the
@@ -100,6 +104,9 @@ enum PassableMix {
 
     /// What "Next" and "Previous" jump to.
     enum SkipLanding: String, Codable, CaseIterable, Identifiable {
+        /// A few bars *before* the blend into the new song, so the mix is
+        /// heard from its lead-in.
+        case lead
         /// The new song as it starts to blend in: the transition plays.
         case blend
         /// The new song as it takes over: straight to the good part.
@@ -138,9 +145,23 @@ extension PassableMix.Manifest {
         return max(0, next - songs[i].handover)
     }
 
+    /// Where a skip to song `i` lands.
     func landing(of i: Int, _ mode: PassableMix.SkipLanding) -> Double {
         let s = songs[i]
-        return mode == .blend ? s.start : s.handover
+        switch mode {
+        case .lead: return transitions.first { $0.to == i }.map(leadIn(of:)) ?? s.start
+        case .blend: return s.start
+        case .handover: return s.handover
+        }
+    }
+
+    /// Where listening to `t` starts: its stored cue, else four bars of the
+    /// song going out. Never inside the blend into that song.
+    func leadIn(of t: PassableMix.Transition) -> Double {
+        let out = songs.indices.contains(t.from) ? songs[t.from] : nil
+        let bar = (out?.bpm).flatMap { $0 > 0 ? 240 / $0 : nil } ?? 2
+        let cue = t.cue ?? t.begins - 4 * bar
+        return min(t.begins, max(cue, out?.handover ?? 0, 0))
     }
 
     /// Where Next lands from `time`: the first later song start that's
@@ -157,6 +178,12 @@ extension PassableMix.Manifest {
     /// Where Previous lands: the start of the song that's playing, or, in
     /// its first seconds, the start of the one before.
     func previousTarget(from time: Double, _ mode: PassableMix.SkipLanding) -> Double {
+        if mode == .lead {
+            // Like a CD player: the lead-in being heard restarts, pressed
+            // again right away it goes to the one before.
+            let starts = [0] + songs.indices.dropFirst().map { landing(of: $0, .lead) }
+            return starts.last { $0 < time - 3 } ?? 0
+        }
         let current = songIndex(at: time)
         guard songs.indices.contains(current) else { return 0 }
         let own = current == 0 ? 0 : landing(of: current, mode)

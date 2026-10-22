@@ -15,9 +15,9 @@ final class Player {
     private(set) var currentTime: Double = 0
     private(set) var duration: Double = 0
     var errorMessage: String?
-    /// Next and Previous land where a song takes over, not where it starts
-    /// to blend in: a skip goes straight to the song.
-    private let landing = PassableMix.SkipLanding.handover
+    /// Next and Previous land a few bars before the blend into a song, never
+    /// after it: a skip must not jump over the transition it is meant to find.
+    private let landing = PassableMix.SkipLanding.lead
     /// The song that's playing. Stored (not worked out from `currentTime`), so
     /// a view that shows the song isn't redrawn on every tick of the clock.
     private(set) var songIndex = 0
@@ -172,7 +172,7 @@ final class Player {
         seek(to: m.previousTarget(from: currentTime, landing))
     }
 
-    /// Straight to a song, from the track list.
+    /// To a song, from the track list: its lead-in, so its transition plays.
     func jump(toSong i: Int) {
         guard let m = manifest, m.songs.indices.contains(i) else { return }
         Haptics.tap()

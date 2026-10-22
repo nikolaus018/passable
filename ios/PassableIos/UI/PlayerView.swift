@@ -323,7 +323,7 @@ private struct TransportControls: View {
                     .frame(width: 64, height: 64)
                     .contentShape(Rectangle())
             }
-            .accessibilityLabel("Previous song")
+            .accessibilityLabel("Previous")
 
             Button { player.toggle() } label: {
                 ZStack {
@@ -345,7 +345,7 @@ private struct TransportControls: View {
             }
             .disabled(!player.canGoNext)
             .opacity(player.canGoNext ? 1 : 0.35)
-            .accessibilityLabel("Next song")
+            .accessibilityLabel("Next transition")
         }
         .buttonStyle(PressableStyle())
         .foregroundStyle(.white)

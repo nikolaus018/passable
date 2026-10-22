@@ -31,7 +31,7 @@ struct MiniPlayer: View {
                 }
                 .disabled(!player.canGoNext)
                 .opacity(player.canGoNext ? 1 : 0.35)
-                .accessibilityLabel("Next song")
+                .accessibilityLabel("Next transition")
             }
             .buttonStyle(PressableStyle())
             .foregroundStyle(.white)

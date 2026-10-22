@@ -1009,6 +1009,18 @@ final class SetSession: ObservableObject {
             defer { try? FileManager.default.removeItem(at: temp) }
             let outcome: Result<PhoneOutcome, Error>
             do {
+                // The phone is asked first: rendering takes minutes, and its
+                // owner shouldn't have to keep it unlocked for all of them
+                // before finding out whether to say yes.
+                if case .phone(let phone) = destination {
+                    await self?.setPhoneStatus("Waiting for \(phone.name)…", progress: 0)
+                    // 256 kbit/s AAC.
+                    let estimate = Int(manifest.duration * 32_000)
+                    let invitation = PassableMix.Invitation(title: title, songs: manifest.songs.count, bytes: estimate,
+                                                            minutes: Int((manifest.duration / 60).rounded()))
+                    try await link.connect(to: phone, invitation: invitation)
+                    await self?.setPhoneStatus("Rendering…", progress: 0)
+                }
                 try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
                 let audio = temp.appendingPathComponent("mix.m4a")
                 try Exporter.render(snapshot: snapshot, range: frames, tail: 3, to: audio) { p in
@@ -1022,17 +1034,14 @@ final class SetSession: ObservableObject {
                 case .phone(let phone):
                     let package = temp.appendingPathComponent(PhoneMix.suggestedFileName(title))
                     try PassableMix.write(manifest, audio: audio, to: package)
-                    let size = (try? FileManager.default.attributesOfItem(atPath: package.path)[.size] as? Int) ?? 0
-                    await self?.setPhoneStatus("Waiting for \(phone.name)…", progress: 0.92)
-                    let invitation = PassableMix.Invitation(title: title, songs: manifest.songs.count, bytes: size,
-                                                            minutes: Int((manifest.duration / 60).rounded()))
-                    try await link.send(package, to: phone, invitation: invitation) { p in
+                    try await link.transfer(package, to: phone) { p in
                         self?.exportLabel = "Sending to \(phone.name)…"
                         self?.exportProgress = 0.92 + p * 0.08
                     }
                     outcome = .success(.sent(phone.name))
                 }
             } catch {
+                await link.cancel()
                 outcome = .failure(error)
             }
             await self?.finishPhoneExport(outcome)

@@ -233,7 +233,9 @@ struct ReceiverCard: View {
         switch receiver.state {
         case .off: return "Open Passable to listen for sets from your Mac."
         case .ready: return "On your Mac, click the iPhone button and pick “\(receiver.displayName)”."
-        case .receiving(_, let p): return "\(Int(p * 100))% · keep this screen open"
+        case .receiving(_, let p):
+            return p < 0.005 ? "Your Mac is rendering the set. Keep this screen open."
+                             : "\(Int(p * 100))% · keep this screen open"
         }
     }
 

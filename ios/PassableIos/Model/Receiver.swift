@@ -20,7 +20,14 @@ final class Receiver {
         let invitation: PassableMix.Invitation
     }
 
-    private(set) var state: State = .off
+    private(set) var state: State = .off {
+        // The Mac renders for minutes after the phone says yes: don't let
+        // the screen lock (and the connection die) in the meantime.
+        didSet {
+            if case .receiving = state { UIApplication.shared.isIdleTimerDisabled = true }
+            else if case .receiving = oldValue { UIApplication.shared.isIdleTimerDisabled = false }
+        }
+    }
     /// A Mac is asking to send this: show it, then `accept()` or `decline()`.
     private(set) var offer: Offer?
     var errorMessage: String?
@@ -40,6 +47,8 @@ final class Receiver {
     /// Asked to stop (the app went to the background) while a mix was on
     /// its way: it stops once that has arrived, not by dropping it.
     @ObservationIgnored private var stopWhenDone = false
+    /// The Mac gives up on an unanswered invitation after this long; so does the phone.
+    @ObservationIgnored private var offerExpiry: Task<Void, Never>?
 
     init() {
         displayName = UIDevice.current.name
@@ -74,6 +83,7 @@ final class Receiver {
     func accept() {
         guard let handler = pendingHandler, let offer else { return }
         pendingHandler = nil
+        offerExpiry?.cancel()
         title = offer.invitation.title
         self.offer = nil
         state = .receiving(title: title, progress: 0)
@@ -86,6 +96,7 @@ final class Receiver {
     }
 
     private func declinePending() {
+        offerExpiry?.cancel()
         pendingHandler?(false, nil)
         pendingHandler = nil
     }
@@ -98,8 +109,17 @@ final class Receiver {
         let invitation = context.flatMap { try? JSONDecoder().decode(PassableMix.Invitation.self, from: $0) }
             ?? PassableMix.Invitation(title: "A mix", songs: 0, bytes: 0, minutes: 0)
         pendingHandler = handler
-        offer = Offer(macName: peer.displayName, invitation: invitation)
+        let shown = Offer(macName: peer.displayName, invitation: invitation)
+        offer = shown
         Haptics.tap()
+        // The Mac can't tell the phone it stopped asking, so a question left
+        // unanswered would stay on screen for an offer that no longer exists.
+        offerExpiry?.cancel()
+        offerExpiry = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(85))
+            guard !Task.isCancelled, let self, self.offer?.id == shown.id else { return }
+            self.decline()
+        }
     }
 
     fileprivate func started(_ progress: Progress) {
