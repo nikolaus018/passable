@@ -56,10 +56,15 @@ struct TrackStructure: Codable, Equatable {
     /// elsewhere in the song (0…1: a chorus; -1: nothing sung).
     var lineStarts: [Int]?, lineEnds: [Int]?
     var lyricRepeat: [Float]?
-    /// The same per sixteenth, for looking up quickly: 1 where one line
-    /// ends and the next starts (`lineTurns`), 2 where one is being sung
-    /// through (`midLine`).
+    /// The same per sixteenth, for looking up quickly: 4 where a part of
+    /// the vocal starts (`partStart`), 8 inside one (`midPart`), 16 where
+    /// a sentence ends and 32 a clause at a comma (`clauseEnd`), 64 inside
+    /// a sentence (`midSentence`).
     var lineMarks: [UInt8]?
+    /// How the marks were made: structures whose marks were made another
+    /// way have their lines put on the grid again on load.
+    var linesVersion: Int?
+    static let linesVersion = 5
 
     /// How loud the track is when it's going: the level of its loud bars
     /// (80th percentile), which is what a DJ matches with the trim knob.
@@ -394,6 +399,7 @@ extension TrackStructure {
     mutating func setLines(_ lines: [VocalLine]?, tried: String?, grid: BeatGrid) {
         vocalLines = lines
         lyricsTried = tried
+        linesVersion = Self.linesVersion
         // (The words aren't used for the hooks: tried, lines that come
         // back counting as much as harmony that does, placement chased
         // hooks into worse handovers.)
@@ -417,9 +423,22 @@ extension TrackStructure {
             return !VocalPhrasing.quiet(level[k], reference)
         }
         var starts: [Int] = [], ends: [Int] = []
-        for line in lines {
+        // (And for each, the line it's a stretch of, and whether it starts it.)
+        var owner: [Int] = [], opens: [Bool] = []
+        // (Where a stretch ends a clause: the sentence (true), or at a
+        // comma (false). Ends of the others are breaths inside a clause.)
+        var closes: [Int: Bool] = [:]
+        for (i, line) in lines.enumerated() {
             let marks = [line.start] + line.breaks.filter { $0 > line.start && $0 < line.end } + [line.end]
+            let first = starts.count
+            func stretch(_ a: Int, _ b: Int) {
+                starts.append(a)
+                ends.append(b)
+                owner.append(i)
+                opens.append(starts.count - 1 == first)
+            }
             for (from, to) in zip(marks, marks.dropFirst()) where slot(to) > slot(from) {
+                defer { if starts.count > first { closes[starts.count - 1] = to == marks.last } }
                 var k = slot(from), run: Int?
                 let end = slot(to)
                 var silent = 0
@@ -430,8 +449,7 @@ extension TrackStructure {
                     } else if let r = run {
                         silent += 1
                         if silent == 3 {
-                            starts.append(r)
-                            ends.append(k - 2)
+                            stretch(r, k - 2)
                             run = nil
                         }
                     }
@@ -441,19 +459,12 @@ extension TrackStructure {
                     // (To where it last sounded: a trailing silence isn't sung.)
                     var e = end
                     while e > r + 1, !sounds(e - 1) { e -= 1 }
-                    starts.append(r)
-                    ends.append(e)
+                    stretch(r, e)
                 }
             }
         }
         (lineStarts, lineEnds) = (starts, ends)
         var marks = [UInt8](repeating: 0, count: VocalPhrasing.slots * (loudness.count + 1) + 2)
-        for (a, b) in zip(starts, ends) {
-            for k in [a, b] where k >= 0 && k < marks.count { marks[k] |= 1 }
-            let from = max(0, a + 2), to = min(marks.count, b - 1)
-            if from < to { for k in from..<to { marks[k] |= 2 } }
-        }
-        lineMarks = marks
         lyricRepeat = (0..<loudness.count).map { g in
             let from = grid.downbeat(g), to = grid.downbeat(g + 1), bar = to - from
             var sung = 0.0, back = 0.0
@@ -465,24 +476,103 @@ extension TrackStructure {
             }
             return sung > 0.1 * bar ? Float(back / sung) : -1
         }
+        // The parts the voice sings (a verse, a chorus, a hook): it comes
+        // back after a rest, or a new part starts under it, on the first
+        // line of it: the words go from lines sung once to lines that come
+        // back (a verse into its chorus) or the other way, or the music
+        // turns a corner where the line starts. Inside one a singer goes
+        // from line to line with hardly a breath, and the recogniser makes
+        // a sentence of every bar or two: one that starts there is still
+        // the middle of the verse, and a voice let in on it is heard
+        // cutting in mid-sentence (Don't Stop The Music, a verse sung
+        // through from bar 11 to 35, let in on bar 24).
+        // (Line by line, not on four-bar phrases: where a song's phrases
+        // are counted two bars off, its chorus was no part at all.)
+        let n = VocalPhrasing.slots
+        let boundary = boundaryStrength()
+        let corners = Set(boundary.indices.filter { g in
+            boundary[g] >= 0.5 && (max(0, g - 2)...min(boundary.count - 1, g + 2)).allSatisfy { boundary[$0] <= boundary[g] }
+        })
+        /// A line sung once (0), or one that comes back (1); nil: once more
+        /// only, which says neither.
+        func kind(_ i: Int) -> Int? { lines[i].repeats >= 2 ? 1 : lines[i].repeats == 0 ? 0 : nil }
+        var parts: [(start: Int, end: Int)] = []
+        var lastKind: Int?
+        for j in starts.indices.sorted(by: { starts[$0] < starts[$1] }) {
+            let (a, b, i) = (starts[j], ends[j], owner[j])
+            // The words turn: this line is another kind than the last
+            // known one, and so is the next (one line alone is no part).
+            let k = kind(i)
+            let words = opens[j] && k != nil && lastKind != nil && k != lastKind
+                && (i + 1 < lines.count ? kind(i + 1) ?? k : k) == k
+            if opens[j], let k { lastKind = k }
+            // The music turns on the bar the line starts on (up to two
+            // beats of pickup, or a beat late).
+            let g = Int((Double(a + n / 2) / Double(n)).rounded(.down))
+            let music = opens[j] && corners.contains(g) && a <= g * n + 4
+            // (Once to a part: not again half a bar on.)
+            let turns = (words || music) && (parts.last.map { $0.start < a - n / 2 } ?? true)
+            if let last = parts.last, a - last.end < Self.partRest, !turns {
+                parts[parts.count - 1].end = max(last.end, b)
+            } else {
+                if let last = parts.last { parts[parts.count - 1].end = min(last.end, a) }
+                parts.append((a, b))
+            }
+        }
+        func mark(_ k: Int, _ bit: UInt8) { if k >= 0 && k < marks.count { marks[k] |= bit } }
+        for p in parts {
+            // (On the sixteenth its first word starts: a sixteenth later
+            // clips the word, one earlier has the last of the line before.)
+            mark(p.start, 4)
+            let from = max(0, p.start + 2), to = min(marks.count, p.end)
+            if from < to { for k in from..<to { marks[k] |= 8 } }
+        }
+        // Where a voice can be taken out between the words: at the end of
+        // a sentence, or of a clause at a comma; not on a breath in the
+        // middle of one ("I gotta get my body | moving").
+        for (j, sentence) in closes { mark(ends[j], sentence ? 16 : 32) }
+        for i in lines.indices {
+            let own = starts.indices.filter { owner[$0] == i }
+            guard let a = own.map({ starts[$0] }).min(), let b = own.map({ ends[$0] }).max() else { continue }
+            for k in (a + 2)..<max(a + 2, b - 1) { mark(k, 64) }
+        }
+        lineMarks = marks
     }
 
-    /// Whether a line of the vocal starts on sixteenth `slot` of the song
-    /// or one has just ended there: a place between two lines, where a
-    /// voice can be cut whether or not it falls silent. False for a song
-    /// whose words weren't heard.
-    func lineTurns(at slot: Int) -> Bool {
-        if let marks = lineMarks { return slot >= 0 && slot < marks.count && marks[slot] & 1 != 0 }
-        guard let starts = lineStarts, let ends = lineEnds else { return false }
-        return starts.contains(slot) || ends.contains(slot)
+    /// Whether a voice taken out on sixteenth `slot` leaves between two
+    /// clauses of its words: a sentence's end, or a comma's.
+    func clauseEnd(at slot: Int) -> Bool {
+        guard linesVersion == Self.linesVersion, let marks = lineMarks else { return false }
+        return slot >= 0 && slot < marks.count && marks[slot] & (16 | 32) != 0
     }
 
-    /// Whether a line is being sung through sixteenth `slot`: it started
-    /// before it and goes on after (nil: the song's words weren't heard).
-    func midLine(at slot: Int) -> Bool? {
-        guard let starts = lineStarts, let ends = lineEnds, !starts.isEmpty else { return nil }
-        if let marks = lineMarks { return slot >= 0 && slot < marks.count && marks[slot] & 2 != 0 }
-        return starts.indices.contains { starts[$0] < slot - 1 && ends[$0] > slot + 1 }
+    /// Whether sixteenth `slot` is in the middle of one of the recogniser's
+    /// sentences (nil: the song's words weren't heard).
+    func midSentence(at slot: Int) -> Bool? {
+        guard linesVersion == Self.linesVersion, let starts = lineStarts, !starts.isEmpty, let marks = lineMarks else { return nil }
+        return slot >= 0 && slot < marks.count && marks[slot] & 64 != 0
+    }
+
+    /// Sixteenths the voice has to rest for, at the least, for what it
+    /// sings next to be a new part of the song: two beats. (Between two
+    /// lines of a verse a singer takes a breath; parts come every 16 bars
+    /// or so at this, about a verse or a chorus.)
+    static let partRest = 8
+
+    /// Whether a part of the vocal starts on sixteenth `slot`: where a
+    /// voice is let in (see `setLines`). False for a song whose words
+    /// weren't heard.
+    func partStart(at slot: Int) -> Bool {
+        guard linesVersion == Self.linesVersion, let marks = lineMarks else { return false }
+        return slot >= 0 && slot < marks.count && marks[slot] & 4 != 0
+    }
+
+    /// Whether sixteenth `slot` is in the middle of a part of the vocal: a
+    /// voice let in there comes in mid-verse, whatever line starts there
+    /// (nil: the song's words weren't heard).
+    func midPart(at slot: Int) -> Bool? {
+        guard linesVersion == Self.linesVersion, let starts = lineStarts, !starts.isEmpty, let marks = lineMarks else { return nil }
+        return slot >= 0 && slot < marks.count && marks[slot] & 8 != 0
     }
 
     /// The song as it plays when its beat is looped: up to bar `entry` as
@@ -1045,9 +1135,31 @@ enum AutoPlacement {
     static let loopExit = (before: 0.75, after: 0.25)
 
     /// Bars B's voice may wait for a clean line past the bar it's due on
-    /// (where A's leaves): longer, and nobody sings for bars on end. It
-    /// then comes in on the bar, eased in if it's mid-line.
+    /// (where A's leaves) where its words weren't heard: longer, and nobody
+    /// sings for bars on end. It then comes in on the bar, eased in if it's
+    /// mid-line. (Heard, it waits for the start of a part: `entryLatest`.)
     static let vocalWait = 2.0
+
+    /// How long B's voice may wait to come in (bars from B's entry), due
+    /// at `aim` in a blend of `bars`. Where its words were heard, for the
+    /// start of a part to the blend's end: a few bars of the two beats
+    /// alone are a handover, a singer cutting in mid-verse isn't. (Where
+    /// waiting leaves bars with nobody singing, placement prices them and
+    /// finds a spot where B's part starts as A's ends.)
+    static func entryLatest(_ s: TrackStructure?, aim: Double, bars: Int) -> Double {
+        s?.midPart(at: 0) != nil ? max(aim + vocalWait, Double(bars)) : aim + vocalWait
+    }
+
+    /// Bars before the bar it's due to leave on that A's voice may leave
+    /// instead, at the end of a sentence (or a comma's clause): a beat or
+    /// two alone between two singers is a handover, a sentence cut off on
+    /// a breath isn't.
+    static let exitBack = 2.0
+
+    /// What it costs a spot that B's voice comes in in the middle of a
+    /// part of it (see `TrackStructure.midPart`), on top of the part's edge
+    /// it doesn't get: more than waiting a few bars for the next part.
+    static let midPartCost: Float = 2.0
 
     /// Where the builder will cut a vocal in or out (bars from the
     /// transition's start, with the song at its bar `bar0` there), found
@@ -1068,10 +1180,12 @@ enum AutoPlacement {
             let beats = s.vocalBeatLevel ?? [], i = j >= 0 ? j / 4 : -1
             return i >= 0 && i < beats.count ? beats[i] : -90
         }
+        // (Let in: on the start of a part; taken out: between clauses, as
+        // the builder does.)
         let found = VocalPhrasing.cut(opening: opening, from: Int((earliest * slots).rounded(.up)) - t,
                                       through: Int((latest * slots).rounded(.down)) - t, reference: reference,
-                                      turns: { s.lineTurns(at: base + t + $0) },
-                                      inside: { s.midLine(at: base + t + $0) ?? false }) {
+                                      turns: { opening ? s.partStart(at: base + t + $0) : s.clauseEnd(at: base + t + $0) },
+                                      inside: { (opening ? s.midPart(at: base + t + $0) : s.midSentence(at: base + t + $0)) ?? false }) {
             level(base + t + $0)
         }
         return found.map { (Double(t + $0.slot) / slots, $0.kind) } ?? (target, nil)
@@ -1557,6 +1671,13 @@ enum AutoPlacement {
                     var heardVocal: Double?, heardOut: Double?
                     // What each voice is cut on (nil: faded mid-word).
                     var heardIn: VocalPhrasing.Cut? = .line, heardExit: VocalPhrasing.Cut? = .line
+                    // Whether B's voice comes in in the middle of a part
+                    // of it (no part starts in reach), and A's leaves in
+                    // the middle of one of its own.
+                    var heardMid = false, heardOutMid = false
+                    // And whether A's is cut off in the middle of a sentence
+                    // (no clause of it ends in reach).
+                    var heardOutCut = false
                     var heardCarry = false
                     var cautious: (out: Double?, vin: Double)?
                     if handoff == mash {
@@ -1616,7 +1737,7 @@ enum AutoPlacement {
                             let target = AutoPlacement.phraseEnd(before: min(untilB, limit))
                             let after = clashHere ? 0 : target >= limit ? 0.5 : 2
                             return AutoPlacement.vocalCut(sa, at: e, opening: false, target: target,
-                                                          earliest: target - min(1, target),
+                                                          earliest: target - min(AutoPlacement.exitBack, target),
                                                           latest: min(target + after, max(target, untilB), Double(n)))
                         }
                         var plans: [Plan] = []
@@ -1655,7 +1776,7 @@ enum AutoPlacement {
                                                           // pickup, not on a gap between its words
                                                           // just past the bar line.)
                                                           earliest: max(0, Double(aim) - (clashHere ? 0 : 0.5)),
-                                                          latest: Double(aim) + AutoPlacement.vocalWait)
+                                                          latest: AutoPlacement.entryLatest(sb, aim: Double(aim), bars: n))
                         }
                         /// Before the swap B's voice sings over A's melody
                         /// and bass line: only where it sits on them (as
@@ -1714,6 +1835,11 @@ enum AutoPlacement {
                         let heardPlan = plans.first { $0.mashup } ?? plans[plans.count - 1]
                         heardVocal = heardPlan.vin
                         heardOut = heardPlan.out
+                        heardMid = sb.midPart(at: VocalPhrasing.slots * c
+                                                + Int((heardPlan.vin * Double(VocalPhrasing.slots)).rounded())) == true
+                        let outSlot = heardPlan.out.map { VocalPhrasing.slots * e + Int(($0 * Double(VocalPhrasing.slots)).rounded()) }
+                        heardOutMid = outSlot.map { whole.midPart(at: $0) == true } ?? false
+                        heardOutCut = outSlot.map { whole.midSentence(at: $0) == true && !whole.clauseEnd(at: $0) } ?? false
                         // (And as the cautious plan would have them, where the
                         // grooves aren't known to lock: see below.)
                         if preset == .stemSwap, !drumsLock, !heardPlan.mashup { cautious = (plans[0].out, plans[0].vin) }
@@ -1820,7 +1946,10 @@ enum AutoPlacement {
                         // cost of a blend's entry.)
                         s -= AutoPlacement.cutCost(in: heardIn, out: heardExit)
                             + AutoPlacement.cutCost(in: heardIn, out: .line)
-                        s += AutoPlacement.partWeight * (bound(partsA, e) + bound(partsB, c + Int((heardVocal ?? 0).rounded())))
+                        // (Nor in the middle of a verse: twice too.)
+                        s -= heardMid ? 2 * AutoPlacement.midPartCost : 0
+                        s += AutoPlacement.partWeight * (bound(partsA, e)
+                                                         + (heardMid ? 0 : bound(partsB, c + Int((heardVocal ?? 0).rounded()))))
                         // (And B's voice shouldn't trail its beat by bars.)
                         s -= 0.3 * Float(heardVocal ?? 0)
                         if s > best.score { best = (e, c, handoff, sw, s); bestHeard = heard; bestVocal = heardVocal; bestCarry = heardCarry }
@@ -1840,8 +1969,17 @@ enum AutoPlacement {
                     // and let in at the start of one, not between two lines
                     // of a verse. That, more than a clean cut, is what makes
                     // a handover sound meant.
-                    s += AutoPlacement.partWeight * (bound(partsA, e + AutoPlacement.partBar(leaving: heardOut ?? Double(out)))
-                                + bound(partsB, c + Int((heardVocal ?? Double(handoff)).rounded())))
+                    // (B's let in mid-verse is no edge, whatever bar it's on;
+                    // nor is A's taken out with its verse half sung, if
+                    // less of a flaw: B's voice takes the ear from there. At
+                    // half as much as here, blends shortened to find A's
+                    // part ends: 10 bars of both songs fewer in 10
+                    // transitions, for handovers no cleaner by the words.
+                    // Cut off mid-sentence, more.)
+                    s -= (heardMid ? AutoPlacement.midPartCost : 0) + (heardOutMid ? AutoPlacement.midPartCost / 4 : 0)
+                        + (heardOutCut ? AutoPlacement.midPartCost / 2 : 0)
+                    s += AutoPlacement.partWeight * ((heardOutMid ? 0 : bound(partsA, e + AutoPlacement.partBar(leaving: heardOut ?? Double(out))))
+                                + (heardMid ? 0 : bound(partsB, c + Int((heardVocal ?? Double(handoff)).rounded()))))
                     // And nobody singing where a song has words: A's voice
                     // gone before B's has come (or B's held back where A
                     // has nothing to sing) is a hole in the blend's middle.

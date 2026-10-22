@@ -1051,10 +1051,10 @@ final class PayoffTests: XCTestCase {
         XCTAssertLessThanOrEqual(heard.edge[16], 0.1, "a line sung through the one of bar 16")
         XCTAssertGreaterThanOrEqual(heard.edge[40], 0.9, "the voice comes in on bar 40 after bars of silence")
         XCTAssertEqual(heard.starts, plain.starts)
-        XCTAssertTrue(s.lineTurns(at: 16 * 40))
-        XCTAssertEqual(s.midLine(at: 16 * 16), true)
-        XCTAssertEqual(s.midLine(at: 16 * 20), false)
-        XCTAssertNil(popSong().midLine(at: 0), "no words heard: nothing to say")
+        XCTAssertTrue(s.partStart(at: 16 * 40))
+        XCTAssertEqual(s.midSentence(at: 16 * 16), true)
+        XCTAssertEqual(s.midSentence(at: 16 * 20), false)
+        XCTAssertNil(popSong().midSentence(at: 0), "no words heard: nothing to say")
     }
 
     /// A voice that never falls silent is still cut between two lines of
@@ -1093,11 +1093,39 @@ final class PayoffTests: XCTestCase {
         s.vocalSixteenthLevel = (0..<1024).map { (260..<268).contains($0) ? -80 : -20 }
         s.setLines([VocalLine(start: 30, end: 36, words: 10, repeats: 0),
                     VocalLine(start: 200, end: 210, words: 6, repeats: 0)], tried: "test", grid: BeatGrid(bpm: 120, firstDownbeat: 0))
-        XCTAssertEqual(s.midLine(at: 250), true)
-        XCTAssertEqual(s.midLine(at: 264), false, "the pause")
-        XCTAssertTrue(s.lineTurns(at: 268), "the second half starts after it")
-        XCTAssertEqual(s.midLine(at: 280), true)
-        XCTAssertFalse(s.lineTurns(at: 5000))
+        XCTAssertEqual(s.lineEnds?.first, 260, "the first half stops where the voice does")
+        XCTAssertTrue(s.lineStarts?.contains(268) == true, "the second half starts after it")
+        XCTAssertEqual(s.midSentence(at: 280), true)
+        XCTAssertFalse(s.clauseEnd(at: 5000))
+        // Taken out, though, the voice leaves between clauses, not on the
+        // breath in the middle of its sentence.
+        XCTAssertFalse(s.clauseEnd(at: 260), "the breath")
+        XCTAssertEqual(s.midSentence(at: 260), true)
+        XCTAssertTrue(s.clauseEnd(at: 288), "the sentence's end")
+    }
+
+    /// A verse sung straight through is one part of the song, however many
+    /// sentences the recogniser makes of it: a voice let in on one of them
+    /// is heard cutting in mid-verse. It comes in where the chorus starts.
+    func testAVoiceComesInWhereAPartStarts() {
+        var s = popSong()
+        s.stemLevel = ["vocals": [Float](repeating: -20, count: 64)]
+        s.vocalSixteenthLevel = [Float](repeating: -20, count: 1024)
+        // At 120 BPM: the verse from bar 8 to 24, the chorus from 24 to 32,
+        // a sentence every two bars and hardly a breath between them.
+        let verse = stride(from: 16.0, to: 48, by: 4).map { VocalLine(start: $0, end: $0 + 3.94, words: 8, repeats: 0) }
+        let chorus = stride(from: 48.0, to: 64, by: 4).map { VocalLine(start: $0, end: $0 + 3.94, words: 6, repeats: 3) }
+        s.setLines(verse + chorus, tried: "test", grid: BeatGrid(bpm: 120, firstDownbeat: 0))
+        XCTAssertTrue(s.lineStarts?.contains(16 * 16) == true, "a sentence starts on bar 16")
+        XCTAssertEqual(s.midPart(at: 16 * 16), true, "in the middle of the verse")
+        XCTAssertTrue(s.partStart(at: 16 * 8))
+        XCTAssertTrue(s.partStart(at: 16 * 24), "the chorus")
+        XCTAssertNil(popSong().midPart(at: 0), "no words heard: nothing to say")
+        let level = s.vocalSixteenthLevel!
+        let cut = VocalPhrasing.cut(opening: true, from: -8, through: 16 * 10, reference: -20,
+                                    turns: { s.partStart(at: 16 * 16 + $0) },
+                                    inside: { s.midPart(at: 16 * 16 + $0) ?? false }) { level[16 * 16 + $0] }
+        XCTAssertEqual(cut?.slot, 16 * 8, "waits for the chorus rather than cutting in on bar 16")
     }
 
     /// Two kits that flam can still share hats: B's alone come in through

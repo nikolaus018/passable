@@ -38,6 +38,21 @@ final class TrackProcessor: @unchecked Sendable {
     /// Renditions only stretch audio (no GPU), so several can run at once.
     private let matchQueue = DispatchQueue(label: "com.nikolausmarek.passable.matching", qos: .userInitiated,
                                            attributes: .concurrent)
+    /// One rendition of a song at a time, for any processor: two builds
+    /// asking for the same one (a rebuild started while the one it
+    /// cancelled still renders, or two sets of the same songs) rendered it
+    /// twice and the second couldn't move it into place, which failed the
+    /// whole build; asking for two, each deleted the other's as stale while
+    /// it was being read. The second now waits and takes the first's.
+    private static let renditions = OSAllocatedUnfairLock(initialState: [String: NSLock]())
+    private static func renditionLock(_ directory: URL) -> NSLock {
+        renditions.withLock { locks in
+            if let lock = locks[directory.path] { return lock }
+            let lock = NSLock()
+            locks[directory.path] = lock
+            return lock
+        }
+    }
     private var separator: StemSeparator?
 
     func load(_ url: URL, ticket: Ticket,
@@ -71,6 +86,13 @@ final class TrackProcessor: @unchecked Sendable {
                         let old = analysis.structure
                         analysis.structure = TrackStructure.measure(stems: stems, grid: analysis.grid)
                         analysis.structure?.setLines(old?.vocalLines, tried: old?.lyricsTried, grid: analysis.grid)
+                        StemCache.saveAnalysis(analysis, to: directory)
+                    }
+                    // (Lines put on the grid another way: again, from the
+                    // words already heard.)
+                    if let structure = analysis.structure, structure.vocalLines?.isEmpty == false,
+                       structure.linesVersion != TrackStructure.linesVersion {
+                        analysis.structure?.setLines(structure.vocalLines, tried: structure.lyricsTried, grid: analysis.grid)
                         StemCache.saveAnalysis(analysis, to: directory)
                     }
                 } else {
@@ -152,6 +174,9 @@ final class TrackProcessor: @unchecked Sendable {
                 if plan.map.isIdentity && plan.semitones == 0 {
                     return Matched(plan: plan, stems: loaded.stems, peaks: loaded.peaks)
                 }
+                let lock = Self.renditionLock(loaded.directory)
+                lock.lock()
+                defer { lock.unlock() }
                 let root = loaded.directory.appendingPathComponent("matched", isDirectory: true)
                 let directory = root.appendingPathComponent(plan.cacheName, isDirectory: true)
                 StemCache.removeLegacyMatches(in: loaded.directory)

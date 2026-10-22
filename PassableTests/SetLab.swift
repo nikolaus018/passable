@@ -32,6 +32,8 @@ final class SetLab: XCTestCase {
             if let failed = set.items.first(where: { if case .failed = $0.status { return true } else { return false } }) {
                 XCTFail("\(failed.title): \(failed.status)"); return
             }
+            // (A build that failed says so, and nothing more comes.)
+            if let alert = set.alert { XCTFail("build failed: \(alert)"); return }
             try await Task.sleep(nanoseconds: 200_000_000)
         }
         let mix = try XCTUnwrap(set.mix)
@@ -139,6 +141,8 @@ final class SetLab: XCTestCase {
         var resumes: [Double] = [], silences: [Double] = []
         var partEdges: [(Float, Float)] = []
         var lyricCuts: [String: Int] = [:]
+        var midParts = 0
+        var exitWords: [String: Int] = [:]
         for t in mix.transitions {
             let bar = t.barSeconds
             // A Wash Out happens in the bars before B's downbeat.
@@ -272,9 +276,19 @@ final class SetLab: XCTestCase {
                 // A cut or Wash Out drops B in whole: its voice must open
                 // with its beat (or on a pickup just before), and not land
                 // in the middle of a line.
-                func midLine(_ track: Int, _ bar0: Int, at master: Double) -> Bool {
+                // A voice cut at `master` in the middle of one of its song's
+                // sentences (between two of its clauses is no cut).
+                func midSentence(_ track: Int, _ bar0: Int, at master: Double) -> Bool {
                     let k = VocalPhrasing.slots * bar0 + Int(((master - t.start) / t.barSeconds * Double(VocalPhrasing.slots)).rounded())
-                    return mix.tracks[track].loaded.analysis.structure?.midLine(at: k) ?? true
+                    guard let st = mix.tracks[track].loaded.analysis.structure, let inside = st.midSentence(at: k) else { return true }
+                    return inside && !st.clauseEnd(at: k)
+                }
+                // B's voice let in in the middle of a part of it (a verse
+                // it sings through): heard as cutting in mid-sentence,
+                // whatever line of the recogniser's starts there.
+                func midPart(at master: Double) -> Bool {
+                    let k = VocalPhrasing.slots * t.edit.cueBar + Int(((master - t.start) / t.barSeconds * Double(VocalPhrasing.slots)).rounded())
+                    return mix.tracks[t.to].loaded.analysis.structure?.midPart(at: k) ?? false
                 }
                 if t.edit.preset == .echoOut {
                     let vin = t.vocalIn ?? t.start
@@ -282,9 +296,13 @@ final class SetLab: XCTestCase {
                        stride(from: t.start, to: vin, by: t.barSeconds / 8).contains(where: { sounding(t.to, at: $0) }) {
                         phrasing += " B-HELD"
                     }
-                    if vin >= t.start - 0.01, sounding(t.to, at: t.start), midLine(t.to, t.edit.cueBar, at: t.start) {
-                        phrasing += " B-LANDS-MIDLINE"
+                    if vin >= t.start - 0.01, sounding(t.to, at: t.start), midSentence(t.to, t.edit.cueBar, at: t.start) {
+                        phrasing += " B-LANDS-MIDSENTENCE"
                     }
+                }
+                if let vin = t.vocalIn, sounding(t.to, at: vin + 0.06), midPart(at: vin) {
+                    phrasing += " B-MIDPART"
+                    midParts += 1
                 }
                 let n = Double(t.edit.bars), p = t.plan.placement
                 let gridIn = t.start + min(n, max(n / 2, Double(p.vocalHandoff))) * t.barSeconds
@@ -295,9 +313,9 @@ final class SetLab: XCTestCase {
                 // opening on a word's attack is sounding by design.
                 // (Nor is a voice cut between two lines of its words,
                 // sounding or not: a rapper leaves no breath there.)
-                if t.edit.preset != .echoOut, t.vocalOutKind != "bar", sounding(t.from, at: out), midLine(t.from, t.edit.entryBar, at: out) { phrasing += " A-CUT" }
+                if t.edit.preset != .echoOut, t.vocalOutKind != "bar", sounding(t.from, at: out), midSentence(t.from, t.edit.entryBar, at: out) { phrasing += " A-CUT" }
                 if t.edit.preset != .echoOut, t.vocalInKind == "grid", sounding(t.to, at: vin),
-                   midLine(t.to, t.edit.cueBar, at: vin) { phrasing += " B-MIDLINE" }
+                   midSentence(t.to, t.edit.cueBar, at: vin) { phrasing += " B-MIDSENTENCE" }
             }
             // A Wash Out never layers two beats: its bridge is the blend.
             if together < min(6, t.edit.bars / 2 + 2), t.edit.preset != .echoOut { phrasing += " STRUNG-TOGETHER" }
@@ -387,11 +405,24 @@ final class SetLab: XCTestCase {
                 // And by the words, where they were heard: a voice taken
                 // out or let in while a line is being sung.
                 func words(_ st: TrackStructure, _ k: Int?) -> String {
-                    guard let k, let mid = st.midLine(at: k) else { return "?" }
-                    return mid ? "MID-LINE" : "between lines"
+                    guard let k, let mid = st.midSentence(at: k) else { return "?" }
+                    return mid && !st.clauseEnd(at: k) ? "MID-SENTENCE" : "between sentences"
                 }
                 let wa = words(fa, slot(t.vocalOut, t.edit.entryBar)), wb = words(fb, slot(t.vocalIn, t.edit.cueBar))
                 note += "  words: A out \(wa), B in \(wb)"
+                // And by the recogniser's own sentences (a line of the
+                // above can be half of one, split at a comma or a breath),
+                // from where the voice really starts singing one to where
+                // it stops (the recogniser stretches a first word back over
+                // the silence before it): where A's voice leaves, if it was
+                // singing there.
+                if let k = slot(t.vocalOut, t.edit.entryBar), k < la.count, let inside = fa.midSentence(at: k),
+                   (k..<min(la.count, k + 4)).contains(where: { !VocalPhrasing.quiet(la[$0], ra) }) {
+                    let kind = inside ? (fa.clauseEnd(at: k) ? "at a comma" : "MID-SENTENCE")
+                        : fa.midPart(at: k) == true ? "sentence end in a part" : "part end"
+                    exitWords[kind, default: 0] += 1
+                    note += " (\(kind))"
+                }
                 lyricCuts[wa, default: 0] += 1
                 lyricCuts[wb, default: 0] += 1
                 print(note)
@@ -468,6 +499,8 @@ final class SetLab: XCTestCase {
         print(String(format: "Songs pitch-shifted: %d of %d;  stretch over 4%%: %d, largest %.1f%%", shifted,
                      mix.transitions.count, stretches.filter { $0 > 4 }.count, stretches.max() ?? 0))
         print("Vocals: " + vocalCuts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+        print("B's voice let in mid-part (in a verse it sings through): \(midParts) of \(mix.transitions.count)")
+        print("A's voice leaves, while singing, by its words: " + exitWords.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
         print("How much of a part's end A's voice leaves on, and of a part's start B's comes in on (0…1): "
               + partEdges.map { String(format: "%.1f/%.1f", $0.0, $0.1) }.joined(separator: " ")
               + String(format: "  mean %.2f/%.2f", partEdges.map(\.0).reduce(0, +) / Float(max(1, partEdges.count)),

@@ -390,7 +390,7 @@ struct PairPlan: Equatable {
 /// (or a planner that prices differently: `version`) is priced again.
 enum PairCosts {
     /// Bumped whenever planning or pricing changes.
-    static let version = "4"
+    static let version = "5"
 
     private static var url: URL {
         StemCache.root.deletingLastPathComponent().appendingPathComponent("pair-costs.json")
@@ -1576,20 +1576,23 @@ enum VocalPhrasing {
     /// `from...through`.
     /// - Parameter level: the voice's level (dB) over sixteenth k.
     /// - Parameter reference: the level it sings at.
-    /// - Parameter turns: whether one line of the lyrics ends and the next
-    ///   starts at sixteenth k (see `TrackStructure.lineTurns`): between
-    ///   two sentences is a line's end whether or not the voice breathes
-    ///   there, which a rapper, or a chorus over its own backing voices,
-    ///   doesn't.
-    /// - Parameter inside: whether a line of the lyrics is being sung
-    ///   through sixteenth k (see `TrackStructure.midLine`): a breath there
-    ///   is a pause in the middle of a sentence, cut only where nothing
-    ///   better is near.
+    /// - Parameter turns: whether a clause of the lyrics ends at sixteenth
+    ///   k (see `TrackStructure.clauseEnd`): between two sentences is a
+    ///   line's end whether or not the voice breathes there, which a
+    ///   rapper, or a chorus over its own backing voices, doesn't.
+    /// - Parameter inside: whether a sentence of the lyrics is being sung
+    ///   through sixteenth k (see `TrackStructure.midSentence`): a breath
+    ///   there is a pause in the middle of it, cut only where nothing
+    ///   clean is in reach.
+    /// Let in, `turns` is where a part of the voice starts and `inside`
+    /// the middle of one (see `TrackStructure.partStart`): a voice comes in
+    /// on a part's start wherever one is in reach, never on a line in the
+    /// middle of a verse because it's nearer.
     static func cut(opening: Bool, from: Int, through: Int, reference: Float, turns: ((Int) -> Bool)? = nil,
                     inside: ((Int) -> Bool)? = nil, level: (Int) -> Float) -> (slot: Int, kind: Cut)? {
         guard from <= through else { return nil }
         func silent(_ k: Int) -> Bool { quiet(level(k), reference) }
-        var best: (slot: Int, kind: Cut, cost: Double)?
+        var best: (slot: Int, kind: Cut, cost: Double)?, clean: (slot: Int, kind: Cut, cost: Double)?
         for k in from...through {
             let gap = opening ? k - 1 : k
             var kind: Cut?, extra = 0.0
@@ -1606,14 +1609,16 @@ enum VocalPhrasing {
             guard let kind else { continue }
             // (By more than a bar's distance: a line that ends anywhere in
             // the window beats a cut through a sentence right on target.)
-            if !turn, inside?(k) == true { extra += 4.4 }
+            let within = !turn && inside?(k) == true
+            if within { extra += 4.4 }
             // Taken out late, it sings over the song that has taken over;
             // let in early, over the one that hasn't left.
             let wrongSide = opening ? k < 0 : k > 0
             let cost = 2 * Double(abs(k)) / Double(slots) + (kind == .word ? 0.25 : 0) + extra / 2 + (wrongSide ? 0.1 : 0)
             if cost < best?.cost ?? .infinity { best = (k, kind, cost) }
+            if !within, cost < clean?.cost ?? .infinity { clean = (k, kind, cost) }
         }
-        return best.map { ($0.slot, $0.kind) }
+        return (clean ?? best).map { ($0.slot, $0.kind) }
     }
 
     /// Mean square of `stem` over `length` seconds starting at `time`
@@ -1646,8 +1651,12 @@ enum VocalPhrasing {
                     earliest: Double, latest: Double, bar: Double,
                     lines: (song: TrackStructure, slot: Int)? = nil) -> (time: Double, kind: Cut)? {
         let slot = bar / Double(slots)
-        let turns: ((Int) -> Bool)? = lines.map { lines in { lines.song.lineTurns(at: lines.slot + $0) } }
-        let inside: ((Int) -> Bool)? = lines.map { lines in { lines.song.midLine(at: lines.slot + $0) ?? false } }
+        let turns: ((Int) -> Bool)? = lines.map { lines in
+            opening ? { lines.song.partStart(at: lines.slot + $0) } : { lines.song.clauseEnd(at: lines.slot + $0) }
+        }
+        let inside: ((Int) -> Bool)? = lines.map { lines in
+            opening ? { lines.song.midPart(at: lines.slot + $0) ?? false } : { lines.song.midSentence(at: lines.slot + $0) ?? false }
+        }
         let found = cut(opening: opening, from: Int(((earliest - target) / slot).rounded(.up)),
                         through: Int(((latest - target) / slot).rounded(.down)), reference: reference, turns: turns,
                         inside: inside) { k in
@@ -2253,7 +2262,9 @@ enum SetBuilder {
                     if let entry = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: refB, opening: true,
                                                      target: start + window.earliest * bar,
                                                      earliest: start + window.earliest * bar,
-                                                     latest: start + window.latest * bar, bar: bar, lines: linesB(start + window.earliest * bar)), entry.kind == .line {
+                                                     latest: start + window.latest * bar, bar: bar, lines: linesB(start + window.earliest * bar)), entry.kind == .line,
+                       // (On the start of a part of B's, not a line in the middle of its verse.)
+                       linesB(entry.time).map({ $0.song.midPart(at: $0.slot) != true }) ?? true {
                         let tin = entry.time
                         if let refA, loop == 0 {
                             // A's line has to end right before B's starts:
@@ -2339,18 +2350,20 @@ enum SetBuilder {
                         let aim = aSings && first >= n / 2 ? min(max(v, first), max(first, sw)) : first
                         // On the breath before a line or, failing that,
                         // in the gap before a word, as near as it comes to
-                        // where it's due and no more than a couple of bars
-                        // past it: B's voice waiting longer for a line to
-                        // start, with A's gone, left bars on end with
-                        // nobody singing. Singing straight through, it
-                        // comes in on the bar (eased in below).
+                        // where it's due: where its words were heard, on
+                        // the start of a part, waiting for one to the end
+                        // of the blend if it must (`AutoPlacement.entryLatest`);
+                        // otherwise no more than a couple of bars past it.
+                        // Singing straight through, it comes in on the bar
+                        // (eased in below).
                         // (From half a bar before it's due where that's
                         // allowed: a line often starts with a pickup
                         // ahead of its bar.)
                         if let cut = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: ref, opening: true,
                                                        target: start + aim * bar,
                                                        earliest: start + max(0, aim - (keysClash ? 0 : 0.5)) * bar,
-                                                       latest: start + (aim + AutoPlacement.vocalWait) * bar, bar: bar, lines: linesB(start + aim * bar)) {
+                                                       latest: start + AutoPlacement.entryLatest(bCounted.structure, aim: aim, bars: edit.bars) * bar,
+                                                       bar: bar, lines: linesB(start + aim * bar)) {
                             vocalIn = (cut.time - start) / bar
                             vocalInKind = cut.kind == .line ? "breath" : "word"
                         } else {
@@ -2381,8 +2394,10 @@ enum SetBuilder {
                     // bars before: further back, a whole line of A's would
                     // go unsung with nobody singing instead, so it sings
                     // up to there and blends out (decided below).
-                    // On the breath or the gap between words nearest to that:
-                    // up to a bar before, or a little after
+                    // On the breath or the gap between words nearest to that,
+                    // between two clauses of its words if one ends in reach:
+                    // up to two bars before (`AutoPlacement.exitBack`), or a
+                    // little after
                     // (to the end of a word that runs over the bar line)
                     // while B's isn't singing yet.
                     // (At the end of the phrase it's in rather than a bar or two
@@ -2392,7 +2407,7 @@ enum SetBuilder {
                         let after = acappella || keysClash ? 0 : target >= sw ? 0.5 : 2
                         let cut = VocalPhrasing.cut(vocalsA, offset: aOffset, reference: refA, opening: false,
                                                     target: start + target * bar,
-                                                    earliest: start + (target - min(1, target)) * bar,
+                                                    earliest: start + (target - min(AutoPlacement.exitBack, target)) * bar,
                                                     latest: start + min(target + after, max(target, untilB), n) * bar, bar: bar, lines: linesA(start + target * bar))
                         // (No cut to be found: on the nearest downbeat.)
                         vocalOut = cut.map { ($0.time - start) / bar } ?? min(max(target.rounded(), 0), max(target, untilB), n)

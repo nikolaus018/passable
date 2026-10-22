@@ -15,7 +15,20 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v7
-      - name: Build
+      # The Core ML models are made locally (tools/convert-*/convert.py) and
+      # aren't checked in; the app loads them at run time. A project
+      # generated here from project.yml leaves them out (and shows that the
+      # spec still builds).
+      - name: Generate the project
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
         run: |
-          xcodebuild build -project Passable.xcodeproj -scheme Passable \
+          brew install xcodegen
+          xcodegen generate
+      # (bash with pipefail: the step fails when xcodebuild does, not only
+      # when tail does.)
+      - name: Build the app and its tests
+        shell: bash
+        run: |
+          xcodebuild build-for-testing -project Passable.xcodeproj -scheme Passable \
             -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO | tail -40

@@ -10,3 +10,4 @@ Passable/Resources/HTDemucs.mlpackage/
 Passable/Resources/BeatThis.mlpackage/
 tools/convert-beats/.venv/
 tools/convert-beats/fixtures/
+__pycache__/
