@@ -26,8 +26,14 @@ enum TransitionPreset: String, CaseIterable, Codable, Identifiable {
         case .longBlend:
             return "A slow EQ blend: B's drums and melody come up with their low end killed, the lows and bass lines trade places mid-way, A filters out."
         case .echoOut:
-            return "For a song with no steady beat to match (a live drummer): A's beat sinks away first, its melody and vocal float on beatless into a reverb wash, the music stops for half a beat, then B drops in whole on its downbeat. Two beats never play at once."
+            return "Two beats never play at once, so each song keeps its own tempo. At 1 bar it's a cut on the one (tempos too far apart to blend): A plays whole to its phrase end, its last beat echoes into half a beat of silence, and B lands whole on its downbeat. Longer, it's a bridge for a song with no steady beat (a live drummer): A's beat sinks away first and its melody and vocal float on into a reverb wash before B drops in."
         }
+    }
+
+    /// What a transition of this preset and length is called: a Wash Out
+    /// one bar long is a cut.
+    func name(bars: Int) -> String {
+        self == .echoOut && bars <= 1 ? "Cut" : displayName
     }
 
     var defaultBars: Int {
@@ -566,6 +572,30 @@ struct TransitionBuilder {
             }
             automate(.a, .drums, .volume, [(3 * q, 1, .sCurve), (4 * q, 0, .linear)])
             bringInVocal(at: vin)
+
+        case .echoOut where n <= 1:
+            // A cut on the one, for tempos too far apart to blend: what a
+            // club DJ does rather than play a record everyone knows 15 %
+            // off its tempo. A plays whole, at its own tempo, to the end
+            // of its phrase; over its last bar its beat lifts (a gentle
+            // high-pass) and its last beat goes into the echo, timed to A,
+            // which rings on into half a beat of silence. Then B lands
+            // whole on its downbeat at its own tempo. The beat stops for
+            // that half-beat only: no bridge for the floor to cool in.
+            for stem in [StemKind.drums, .bass, .other] {
+                automate(.a, stem, .volume, [(-0.125, 1, .hold), (-0.124, 0, .linear)])
+            }
+            automate(.a, .drums, .filter, [(-1, 0.5, .exponential), (-0.126, 0.6, .hold)])
+            automate(.a, .drums, .delay, [(-0.5, 0, .exponential), (-0.25, 0.5, .hold), (0, 0, .linear)])
+            automate(.a, .other, .reverb, [(-0.5, 0, .linear), (-0.125, 0.6, .hold), (0.001, 0, .linear)])
+            // A's voice leaves on a line end in its last bars, at the cut
+            // at the latest, thrown into the echo.
+            let out = max(-4, min(-0.125, vocalOut ?? -0.125))
+            echoOutVocal(at: out, send: 0.85, tail: max(0.25, min(1, -out)))
+            for stem in [StemKind.drums, .bass, .other] {
+                automate(.b, stem, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
+            }
+            bringInVocal(at: max(0, vocalIn ?? 0))
 
         case .echoOut:
             // The tempos can't be matched, so two beats must never play at

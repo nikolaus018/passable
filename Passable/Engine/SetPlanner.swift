@@ -38,19 +38,20 @@ enum MixMath {
     /// Stretches up to this are the incoming song's alone.
     static let shareAbove = 0.03
 
-    /// Beyond this (B's rate to A), the two don't share a beat: Wash Out.
-    /// No two tempos are that far apart once folded by an octave (the
-    /// most is a factor of √2): any two songs with a steady beat are
-    /// beat-matched, meeting half-way (see `shared`). A bridge with no
-    /// beat in it empties a floor every time, and a tempo ridden to the
-    /// next record's is what a DJ does about it. (At 12 %, as this was,
-    /// 95 into 118 BPM was bridged; the two blend.)
-    static let maxStretch = 0.42
+    /// Beyond this (B's rate to A), the two aren't beat-matched: B comes in
+    /// on a cut, each song at its own tempo (see `TransitionPreset.echoOut`
+    /// at one bar). Up to it they meet half-way (see `shared`), each no
+    /// more than 5 % off its own tempo: what a club DJ's pitch fader does
+    /// with key lock on before a record everyone knows sounds too fast or
+    /// too slow. (At 42 %, as this was, every steady pair was blended, and
+    /// songs played up to 19 % off their own tempo: heard as wrong at once.
+    /// 146 into 135 BPM, 8 %, still blends.)
+    static let maxStretch = 0.10
 
-    /// Up to this the stretch is a pitch fader's everyday work (each song
-    /// no more than 6 % off its own tempo). Past it the blend is a quick
-    /// one, and costs the set's order like the jump in tempo it is.
-    static let easyStretch = 0.12
+    /// Up to this (each song no more than 4 % off its own tempo) a blend
+    /// may run long. Past it the blend is a quick one: both songs are off
+    /// their own tempo through it, which is heard the longer it lasts.
+    static let easyStretch = 0.08
 
     static func recommendedPreset(rate: Double) -> TransitionPreset {
         abs(rate - 1) > maxStretch ? .echoOut : .stemSwap
@@ -71,11 +72,13 @@ enum MixMath {
     }
 
     /// Bars B takes to glide from A's tempo back to its own once A is gone:
-    /// about 1.5 % per bar, so the change is felt as a lift, not heard as a
-    /// wobble.
+    /// about 0.5 % per bar, as a DJ rides the pitch fader back over half a
+    /// minute while a record plays alone, so no one hears the song speed up
+    /// or slow down. (At 1.5 % a bar, as this was, 4.5 % went by in three
+    /// bars, six seconds: heard as the song changing speed.)
     static func glideBars(rate: Double) -> Int {
         let percent = abs(rate - 1) * 100
-        return percent < 0.05 ? 1 : min(16, max(2, Int((percent / 1.5).rounded(.up))))
+        return percent < 0.05 ? 1 : min(16, max(2, Int((percent / 0.5).rounded(.up))))
     }
 
     /// Bars A takes to glide to the blend's tempo before it (0 where the
@@ -163,7 +166,10 @@ struct PairPlan: Equatable {
         // as counted in A's bars (see `Metre`), and cued in its own. Two
         // of its bars to one can be counted from either of them: both
         // are tried, since a part of B may start on any bar of its own.
-        if steady, fixed?.preset != .echoOut, MixMath.tempoMultiplier(a: a.grid.bpm, b: b.grid.bpm) != 1 {
+        // (Only where the two are beat-matched at all: a cut plays B in its
+        // own bars.)
+        if steady, (fixed?.preset ?? MixMath.preset(a, b)) != .echoOut,
+           MixMath.tempoMultiplier(a: a.grid.bpm, b: b.grid.bpm) != 1 {
             var counts = [Metre(a: a.grid, b: b.grid, cue: fixed?.cueBar ?? 0)]
             if fixed == nil, counts[0].bars == 2 { counts.append(Metre(a: a.grid, b: b.grid, cue: 1)) }
             return counts.map { metre -> PairPlan in
@@ -246,10 +252,19 @@ struct PairPlan: Equatable {
         var options = [(preset: preset, bars: preset.defaultBars, prior: preset == .echoOut ? 0 : length(preset.defaultBars),
                         loop: 0)]
         if preset == .echoOut {
-            // A shorter bridge too (two bars for A's beat to leave, two of
-            // its melody floating on): which one leaves less of a hole
-            // where it's placed is for the simulation to say.
-            options.append((.echoOut, 4, 0, 0))
+            if steady {
+                // Two steady beats too far apart in tempo: a cut on the
+                // one, so the beat goes on. A beatless bridge between two
+                // songs that both have a beat is a hole in the floor.
+                options = [(.echoOut, 1, 0, 0)]
+            } else {
+                // A song without a steady beat: a shorter bridge too (two
+                // bars for A's beat to leave, two of its melody floating
+                // on), or a cut. Which one leaves less of a hole where
+                // it's placed is for the simulation to say.
+                options.append((.echoOut, 4, 0, 0))
+                options.append((.echoOut, 1, 0, 0))
+            }
         }
         if preset == .stemSwap {
             options.append((.stemSwap, 8, length(8), 0))
@@ -337,14 +352,13 @@ struct PairPlan: Equatable {
     func cost(a: TrackAnalysis, b: TrackAnalysis) -> Double {
         let stretch = abs(MixMath.rate(a: a.grid.bpm, b: b.grid.bpm) - 1) * 100
         var cost: Double
-        // A Wash Out is priced as one whatever the tempos say. A blend of
-        // tempos far apart costs as much: it's a jump in tempo either way,
-        // fine once, not all night.
+        // A Wash Out or a cut is priced as one whatever the tempos say:
+        // it's a jump in tempo, fine once, not all night. A blend costs as
+        // much more as the songs are pulled off their own tempos.
         switch stretch {
         case _ where preset == .echoOut: cost = 1.5 + 0.05 * stretch // fine once, not all night
         case ..<3: cost = 0.05 * stretch
-        case ..<(100 * MixMath.easyStretch): cost = 0.15 + 0.14 * (stretch - 3)
-        default: cost = 1.5 + 0.05 * stretch
+        default: cost = 0.15 + 0.14 * (stretch - 3)
         }
         // Clashing songs can't blend, only swap: next to each other they
         // sound like two songs in a row. (A Wash Out never plays the two
@@ -376,7 +390,7 @@ struct PairPlan: Equatable {
 /// (or a planner that prices differently: `version`) is priced again.
 enum PairCosts {
     /// Bumped whenever planning or pricing changes.
-    static let version = "2"
+    static let version = "4"
 
     private static var url: URL {
         StemCache.root.deletingLastPathComponent().appendingPathComponent("pair-costs.json")
@@ -1672,6 +1686,10 @@ enum SetBuilder {
     struct Exit: Equatable {
         var range: ClosedRange<Int>
         var skip: Range<Int>?
+        /// A's bar its way out may start gliding from at the earliest (A
+        /// is already playing up to there): where the next song is brought
+        /// in now, A gets to the blend's tempo quicker rather than late.
+        var wayOutFrom: Int? = nil
     }
 
     /// Everything a transition is built from (see `build(previous:)`).
@@ -1812,7 +1830,8 @@ enum SetBuilder {
                     let drawn = edit.rolls.first { $0.side == .a && $0.seamless == true }
                     let back = byHand ? drawn.map { Int((($0.start - $0.anchor) / bar).rounded()) } ?? 0
                         : plan.placement.loopBack
-                    let runUp = min(MixMath.glideBars(rate: share.a), max(0, edit.entryBar - back - settledBar))
+                    let earliest = max(settledBar, asked?.wayOutFrom ?? settledBar)
+                    let runUp = min(MixMath.glideBars(rate: share.a), max(0, edit.entryBar - back - earliest))
                     let from = plans[k - 1].map.output(ga.downbeat(edit.entryBar - back - runUp) * sr)
                     // (As many output frames as play `runUp` bars of A while
                     // its rate goes from 1 to its share.)
@@ -2179,9 +2198,13 @@ enum SetBuilder {
                 // A's voice floats on over the bridge and leaves on a
                 // breath in its last bars; B's beat drops with its voice
                 // open, or with it joining on its next word.
+                // (On a cut it sings up to it, leaving on a line end in the
+                // last four bars: A's beat may ride on alone after it.)
+                let ahead = edit.bars <= 1 ? 0.0 : 1.0, back = edit.bars <= 1 ? 4.0 : 3.0
                 if let vocalsA = a.stems[.vocals], let ref = VocalPhrasing.reference(a.loaded.analysis.structure),
-                   let cut = VocalPhrasing.cut(vocalsA, offset: aOffset, reference: ref, opening: false, target: start - blendBar,
-                                               earliest: start - 3 * blendBar, latest: start, bar: blendBar, lines: linesA(start - blendBar)) {
+                   let cut = VocalPhrasing.cut(vocalsA, offset: aOffset, reference: ref, opening: false,
+                                               target: start - ahead * blendBar, earliest: start - back * blendBar,
+                                               latest: start, bar: blendBar, lines: linesA(start - ahead * blendBar)) {
                     vocalOut = (cut.time - start) / blendBar
                     vocalOutKind = cut.kind.rawValue
                 }

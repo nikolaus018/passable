@@ -13,7 +13,8 @@ final class ChoreographyProbe: XCTestCase {
         }
         var built = 0
         for preset in [TransitionPreset.stemSwap, .dropSwap, .longBlend, .echoOut] {
-            for n in [8, 16] {
+            // (A Wash Out also as its short bridge and as a one-bar cut.)
+            for n in preset == .echoOut ? [1, 4, 8, 16] : [8, 16] {
                 let swaps: [Int?] = preset == .stemSwap ? [nil] + Array(1...n).map { $0 } : [nil]
                 for sw in swaps {
                     for clash in [false, true] {

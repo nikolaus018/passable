@@ -295,7 +295,7 @@ final class SetLab: XCTestCase {
             if vocalGap > 2 { phrasing += " VOCAL-GAP" }
             if melx2 > 0, keyClash > Harmony.clashTolerance { phrasing += " KEY-CLASH" }
             let line = String(format: "%2d→%2d at %@  %@  together %d bars  level %.1f → %.1f dB (%+.1f)  dip %.1f  bump %.1f  lowx2 %d  vocx2 %d  flam %.0f ms [%@] nudge %+.0f ms lock %.0f%%%@",
-                              t.from + 1, t.to + 1, Theme.time(t.start), t.plan.preset.displayName, together, before, after,
+                              t.from + 1, t.to + 1, Theme.time(t.start), t.plan.preset.name(bars: t.edit.bars), together, before, after,
                               after - before, dip, bump, lowx2, vocx2, flam,
                               flams.map { String(format: "%.0f", $0) }.joined(separator: " "), t.nudge * 1000, t.grooveLock * 100, phrasing)
             print(line)

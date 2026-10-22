@@ -33,7 +33,7 @@ enum PhoneMix {
             PassableMix.Transition(from: t.from, to: t.to,
                                    begins: min(length, max(0, t.begins)), handover: min(length, max(0, t.start)),
                                    end: min(length, max(0, t.end)),
-                                   style: t.edit.preset.displayName, notes: t.payoff)
+                                   style: t.edit.preset.name(bars: t.edit.bars), notes: t.payoff)
         }
 
         return PassableMix.Manifest(

@@ -457,18 +457,62 @@ final class PayoffTests: XCTestCase {
         XCTAssertEqual(PairPlan.make(a: double, b: a, fixed: chosen).placement.cueBar, 9)
     }
 
-    /// Tempos far apart are beat-matched all the same (the two meet
-    /// half-way), in a quick blend, and cost the order like the jump in
-    /// tempo they are.
-    func testFarTemposBlendQuickly() {
+    /// Tempos far apart aren't beat-matched: no song is played far off its
+    /// own tempo. B comes in on a cut, each at its own tempo, with the
+    /// beat stopping for half a beat only, and the order pays for the jump.
+    /// A pair a pitch fader's reach apart still blends, quickly.
+    func testFarTemposCutOnTheOne() {
         let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
         let a = song(scale: 0, key: c, bpm: 100), near = song(scale: 0, key: c, bpm: 104), far = song(scale: 0, key: c, bpm: 125)
         let plan = PairPlan.make(a: a, b: far)
-        XCTAssertNotEqual(plan.preset, .echoOut)
-        XCTAssertLessThanOrEqual(plan.bars, 8)
-        XCTAssertEqual(plan.rate, 0.8, accuracy: 1e-9)
-        XCTAssertEqual(plan.shared.a * plan.rate, plan.shared.b, accuracy: 1e-9)
+        XCTAssertEqual(plan.preset, .echoOut)
+        XCTAssertEqual(plan.bars, 1)
+        XCTAssertEqual(plan.preset.name(bars: plan.bars), "Cut")
+        XCTAssertEqual(plan.rate, 1)
+        XCTAssertEqual(plan.shared.a, 1)
+        XCTAssertEqual(plan.shared.b, 1)
         XCTAssertGreaterThan(plan.cost(a: a, b: far), PairPlan.make(a: a, b: near).cost(a: a, b: near) + 1)
+        // 8 % apart: each song 4 % off its own, in a quick blend.
+        let reach = song(scale: 0, key: c, bpm: 109)
+        let quick = PairPlan.make(a: a, b: reach)
+        XCTAssertNotEqual(quick.preset, .echoOut)
+        XCTAssertLessThanOrEqual(quick.bars, 8)
+        XCTAssertLessThan(abs(quick.shared.a - 1), 0.05)
+        XCTAssertLessThan(abs(quick.shared.b - 1), 0.05)
+        // A plays whole up to half a beat before B's downbeat; B lands whole.
+        let lanes = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 1).lanes
+        for stem in [StemKind.drums, .bass, .other] {
+            XCTAssertEqual(value(lanes, .a, stem, bar: -0.9), 1)
+            XCTAssertEqual(value(lanes, .a, stem, bar: -0.13), 1)
+            XCTAssertEqual(value(lanes, .a, stem, bar: -0.1), 0, accuracy: 0.01)
+            XCTAssertEqual(value(lanes, .b, stem, bar: -0.01), 0)
+            XCTAssertEqual(value(lanes, .b, stem, bar: 0.01), 1)
+        }
+    }
+
+    /// The kick and bass change hands only where B has a low end to take
+    /// them: never into a part of B without one (a pre-chorus, a bare
+    /// intro), where the floor would lose its weight for bars.
+    func testLowEndSwapsOnlyWhereBHasOne() throws {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        func levels(_ s: inout TrackStructure, bassless: Range<Int>) {
+            s.stemLevel = Dictionary(uniqueKeysWithValues: StemKind.allCases.map { ($0.rawValue, [Float](repeating: -18, count: 64)) })
+            s.stemLowLevel = Dictionary(uniqueKeysWithValues: StemKind.allCases.map { stem in
+                (stem.rawValue, (0..<64).map { k -> Float in
+                    stem == .bass || stem == .drums ? (bassless.contains(k) ? -60 : -20) : -60
+                })
+            })
+            s.lowSplit = TrackStructure.lowSplit
+        }
+        var a = song(scale: 0, key: c), b = song(scale: 0, key: c)
+        var sa = try XCTUnwrap(a.structure), sb = try XCTUnwrap(b.structure)
+        levels(&sa, bassless: 0..<0)
+        levels(&sb, bassless: 0..<20)
+        (a.structure, b.structure) = (sa, sb)
+        let plan = PairPlan.make(a: a, b: b)
+        XCTAssertEqual(plan.preset, .stemSwap)
+        let sw = Int(TransitionBuilder.switchBar(plan.preset, bars: plan.bars, lowSwap: plan.placement.lowSwap))
+        XCTAssertGreaterThanOrEqual(plan.placement.cueBar + sw, 20, "B takes the low end where it has one")
     }
 
     /// The set's last song fades out without undoing its way in: a part
@@ -829,14 +873,14 @@ final class PayoffTests: XCTestCase {
         XCTAssertEqual(Set(SetOrdering.order(big)), Set(0..<16))
     }
 
-    /// A Wash Out's bridge comes in two lengths, and the plan says which.
+    /// A Wash Out's bridge comes in two lengths or a cut, and the plan says which.
     func testAWashOutPicksItsBridge() {
         let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
         var drummer = song(scale: 0, key: c, bpm: 125)
         (drummer.grid.downbeats, drummer.grid.wanders) = ((0..<64).map { drummer.grid.downbeat($0) }, true)
         let plan = PairPlan.make(a: song(scale: 0, key: c, bpm: 100), b: drummer)
         XCTAssertEqual(plan.preset, .echoOut)
-        XCTAssertTrue([4, 8].contains(plan.bars))
+        XCTAssertTrue([1, 4, 8].contains(plan.bars))
         let lanes = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 4).lanes
         XCTAssertEqual(value(lanes, .a, .drums, bar: -4.01), 1)
         XCTAssertEqual(value(lanes, .a, .drums, bar: -1.99), 0, accuracy: 0.01)

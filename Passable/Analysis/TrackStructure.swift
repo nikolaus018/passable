@@ -1413,6 +1413,21 @@ enum AutoPlacement {
                 || (bound(boundB, c + switchAt) >= 0.5 && rise >= 3)
         }
         let wholePower = AutoPlacement.powers(whole, trim: trimA), powerB = AutoPlacement.powers(sb, trim: trimB)
+        // B's low end (kick, bass line, 808s below 150 Hz) bar by bar, and
+        // how much of it its full sections carry (80th percentile).
+        let lowB: [Float] = powerB.map { p in
+            (0..<barsB).map { k in
+                10 * log10(max(1e-9, p.values.reduce(Float(0)) { $0 + (k < $1.count ? $1[k].low : 0) }))
+            }
+        } ?? []
+        let fullLowB = lowB.isEmpty ? 0 : lowB.sorted()[Int(Double(lowB.count - 1) * 0.8)]
+        /// dB B's low end falls short of its full sections over the two bars
+        /// from bar `bar` of B: where it takes the kick and bass over.
+        func lowShort(at bar: Int) -> Float {
+            let bars = (max(0, bar)..<min(lowB.count, bar + 2)).map { lowB[$0] }
+            guard let landing = bars.max() else { return 0 }
+            return max(0, fullLowB - landing)
+        }
         /// Whether the melodies clash at this spot, heard in the notes both
         /// songs play where they'd overlap (as the builder will judge it on
         /// the audio), not only guessed from the two keys. Where they do,
@@ -1518,6 +1533,14 @@ enum AutoPlacement {
                     // section of B and the end of one of A's.
                     score += 0.4 * bound(boundB, c + sw) + (loop > 0 ? 0 : 0.3 * bound(boundA, e + sw))
                 }
+                // A's kick and bass leave on the switch (a cut's too): B must
+                // have a low end there to take them over. Handed to a part
+                // of B without one (a pre-chorus, a breakdown, a bare intro)
+                // the floor loses its weight for bars, however loud B's top
+                // is. A DJ swaps the bass where the next record's bass is.
+                // (4 dB under its full sections is still a groove; 10 under
+                // is the floor going thin for bars, which outweighs a hook.)
+                score -= min(2.5, 0.25 * max(0, lowShort(at: c + switchAt) - 4))
                 // B's vocal may also come in right on the switch, so a hook
                 // landing there isn't muted until the end of the blend.
                 let options = sw.map { $0 > n / 2 && $0 < n && !handoffs.contains($0) ? handoffs + [$0] : handoffs } ?? handoffs
@@ -1661,7 +1684,11 @@ enum AutoPlacement {
                                         : sitsOnA(from: n / 2, until: swap) ? n / 2 : swap)
                         func plan(from first: Int, drumsLayer: Bool) -> Plan {
                             let vin = entry(from: first)
-                            let out = echo ? AutoPlacement.vocalCut(sa, at: e, opening: false, target: -1, earliest: -3, latest: 0)
+                            // (On a cut A's beat may ride on alone for up to four
+                            // bars after its singer's last line.)
+                            let ahead = n <= 1 ? 0.0 : 1.0, back = n <= 1 ? 4.0 : 3.0
+                            let out = echo ? AutoPlacement.vocalCut(sa, at: e, opening: false, target: -ahead,
+                                                                    earliest: -back, latest: 0)
                                 : exit(for: vin.bar)
                             return Plan(vocalBar: v, mashup: false, vin: vin.bar, drumsLayer: drumsLayer,
                                         out: echo ? nil : out.bar, inCut: vin.kind, outCut: out.kind)

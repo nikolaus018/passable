@@ -191,8 +191,10 @@ final class PairBuildProbe: XCTestCase {
         // (At the spot on lines three and four, A's bar and B's, if given.)
         let lines = list.split(separator: "\n").map(String.init)
         var edits: [PairKey: TransitionEdit] = [:]
+        // (And the blend's length on line five: 16 if not.)
         if lines.count >= 4, let entry = Int(lines[2]), let cue = Int(lines[3]) {
-            edits[PairKey(from: urls[0], to: urls[1])] = TransitionEdit(entryBar: entry, cueBar: cue, preset: .stemSwap, bars: 16,
+            let bars = lines.count >= 5 ? Int(lines[4]) ?? 16 : 16
+            edits[PairKey(from: urls[0], to: urls[1])] = TransitionEdit(entryBar: entry, cueBar: cue, preset: .stemSwap, bars: bars,
                                                                         semitones: 0, lanes: [], byHand: false)
         }
         let mix = try await SetBuilder.build(tracks, edits: edits, processor: processor) { _ in }
@@ -235,6 +237,10 @@ final class PairBuildProbe: XCTestCase {
                 return String(format: "%3.0f", 10 * log10(max(1e-12, e / Float(2 * n))))
             }
         }
+        print("PAIR   A drums  " + level(0, .drums).joined(separator: " "))
+        print("PAIR   B drums  " + level(1, .drums).joined(separator: " "))
+        print("PAIR   A bass   " + level(0, .bass).joined(separator: " "))
+        print("PAIR   B bass   " + level(1, .bass).joined(separator: " "))
         print("PAIR   A voice  " + level(0, .vocals).joined(separator: " "))
         print("PAIR   A melody " + level(0, .other).joined(separator: " "))
         print("PAIR   B melody " + level(1, .other).joined(separator: " "))

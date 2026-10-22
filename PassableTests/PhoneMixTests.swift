@@ -53,7 +53,7 @@ final class PhoneMixTests: XCTestCase {
         let t = mix.transitions[0]
         XCTAssertEqual(s1.handover, t.start, accuracy: 1e-6)
         XCTAssertEqual(s1.start, t.begins, accuracy: 1e-6)
-        XCTAssertEqual(manifest.transitions[0].style, t.edit.preset.displayName)
+        XCTAssertEqual(manifest.transitions[0].style, t.edit.preset.name(bars: t.edit.bars))
         XCTAssertNotNil(s0.bpm)
         XCTAssertNotNil(s1.key)
 

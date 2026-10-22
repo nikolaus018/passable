@@ -244,9 +244,12 @@ final class SetSession: ObservableObject {
             say("“\(SongTitle.of(key.to))” is about to come in as it is")
             return
         }
+        // (A's glide to the blend's tempo starts no sooner than the first
+        // bar that hasn't been heard yet.)
+        let ahead = (0..<bar).first { track.master(grid.downbeat($0)) >= now + liveLead + Self.liveAhead } ?? bar
         adjusting = (key, exits[key], tries, true)
         liveStarted = Date()
-        exits[key] = .init(range: bar...bar, skip: skipped)
+        exits[key] = .init(range: bar...bar, skip: skipped, wayOutFrom: ahead)
         say("Bringing in “\(SongTitle.of(key.to))”…", lasting: false)
         rebuild()
     }
@@ -499,12 +502,12 @@ final class SetSession: ObservableObject {
         // Drawn by hand, only what was drawn is known; a chosen spot or
         // preset is still planned, and described, like any other.
         if t.isEdited, t.edit.byHand {
-            var parts = [t.edit.preset.displayName]
+            var parts = [t.edit.preset.name(bars: t.edit.bars)]
             if t.edit.preset != .echoOut { parts.append("\(t.edit.bars) bars") }
             if t.edit.semitones != 0 { parts.append("B \(t.edit.semitones > 0 ? "+" : "")\(t.edit.semitones) st") }
             return parts.joined(separator: " · ")
         }
-        var parts = [t.plan.preset.displayName]
+        var parts = [t.plan.preset.name(bars: t.plan.bars)]
         if t.plan.preset != .echoOut {
             parts.append("\(t.plan.bars) bars")
             let share = t.plan.shared

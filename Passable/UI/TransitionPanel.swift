@@ -69,7 +69,7 @@ struct TransitionPanel: View {
                 Spacer()
             }
             .help(session.preset == .echoOut
-                  ? "Wash Out never layers the two beats, so B keeps its own tempo. Only a song without a steady beat (a live drummer) is mixed this way automatically."
+                  ? "Wash Out never layers the two beats, so B keeps its own tempo. It's chosen automatically as a cut (1 bar) where the tempos are too far apart to blend without either song sounding too fast or too slow, and as a bridge for a song without a steady beat (a live drummer)."
                   : (share.a != 1
                      ? "The two meet at a tempo between theirs, so neither is heard far off its own: A glides there over its last bars alone, B glides back to its own after the blend and plays untouched."
                      : "B matches A's tempo only while they overlap, then glides back to its own over \(session.glideBars) bars and plays untouched.")
