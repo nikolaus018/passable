@@ -928,7 +928,9 @@ final class SetSession: ObservableObject {
             frames = 0..<Int(length * sr)
         case .focusedTransition:
             guard let t = mix.transitions.first(where: { $0.from == focused }) else { return }
-            frames = Int(max(0, t.start - 8 * t.barSeconds) * sr)..<Int(min(length, t.settled + 8 * t.barSeconds) * sr)
+            // (From four bars before anything happens, as Listen plays it: a
+            // Wash Out's bridge begins up to eight bars before B's downbeat.)
+            frames = Int(max(0, min(t.cue, t.start - 8 * t.barSeconds)) * sr)..<Int(min(length, t.settled + 8 * t.barSeconds) * sr)
         }
         let snapshot = makeSnapshot()
         exportLabel = "Rendering…"

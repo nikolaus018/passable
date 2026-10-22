@@ -84,7 +84,10 @@ struct BeatGrid: Codable, Equatable {
 
     /// The grid as it would be heard played `rate` times faster.
     func scaled(by rate: Double) -> BeatGrid {
-        BeatGrid(bpm: bpm * rate, firstDownbeat: firstDownbeat / rate, downbeats: downbeats.map { $0.map { $0 / rate } })
+        // (Steady or not, and where its count is in doubt, as before: a
+        // song with one odd bar played faster isn't a drummer's.)
+        BeatGrid(bpm: bpm * rate, firstDownbeat: firstDownbeat / rate, downbeats: downbeats.map { $0.map { $0 / rate } },
+                 wanders: wanders, doubtful: doubtful.map { $0.map { ($0.lowerBound / rate)...($0.upperBound / rate) } })
     }
 
     /// The same beats with the bars counted another way (see `Metre`):

@@ -390,15 +390,22 @@ struct PairPlan: Equatable {
 /// (or a planner that prices differently: `version`) is priced again.
 enum PairCosts {
     /// Bumped whenever planning or pricing changes.
-    static let version = "5"
+    static let version = "6"
 
-    private static var url: URL {
-        StemCache.root.deletingLastPathComponent().appendingPathComponent("pair-costs.json")
-    }
+    /// One file per version: prices of another planner are dropped with
+    /// it, not carried until the file fills up.
+    private static var folder: URL { StemCache.root.deletingLastPathComponent() }
+    private static var url: URL { folder.appendingPathComponent("pair-costs-\(version).json") }
     private static let lock = NSLock()
 
     static func fingerprint(_ analysis: TrackAnalysis) -> String {
-        let data = (try? JSONEncoder().encode(analysis)) ?? Data()
+        // (Keys sorted: a dictionary's are written in an order that changes
+        // with every launch, and an analysis has several. Unsorted, no
+        // song had the same fingerprint twice and nothing was ever
+        // remembered from one launch to the next.)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let data = (try? encoder.encode(analysis)) ?? Data()
         return SHA256.hash(data: data + Data(version.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -414,6 +421,10 @@ enum PairCosts {
         // past that it starts over.)
         let kept = costs.count > 200_000 ? [:] : costs
         if let data = try? JSONEncoder().encode(kept) { try? data.write(to: url, options: .atomic) }
+        for old in (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        where old.lastPathComponent.hasPrefix("pair-costs") && old.lastPathComponent != url.lastPathComponent {
+            try? FileManager.default.removeItem(at: old)
+        }
     }
 }
 
@@ -2652,8 +2663,16 @@ enum SetBuilder {
 
     private static func match(_ loaded: TrackProcessor.Loaded, plan: TrackProcessor.MatchPlan,
                               processor: TrackProcessor) async throws -> TrackProcessor.Matched {
-        try await withCheckedThrowingContinuation { continuation in
-            processor.match(loaded, plan: plan, ticket: .init()) { continuation.resume(with: $0) }
+        // (Called off with the build: a build started over this one, after
+        // an edit or a song brought in now, doesn't wait behind renditions
+        // nobody will hear.)
+        let ticket = TrackProcessor.Ticket()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                processor.match(loaded, plan: plan, ticket: ticket) { continuation.resume(with: $0) }
+            }
+        } onCancel: {
+            ticket.cancel()
         }
     }
 }

@@ -145,6 +145,15 @@ final class SetLab: XCTestCase {
         var exitWords: [String: Int] = [:]
         for t in mix.transitions {
             let bar = t.barSeconds
+            // B as the blend counts it (see `Metre`): at half or double A's
+            // tempo two of its bars make one of the blend's, or one two, and
+            // its levels, lines and parts are read in those bars (as the
+            // builder reads them). A cut plays B at its own tempo.
+            let metreB = t.edit.preset == .echoOut ? Metre()
+                : Metre(a: mix.tracks[t.from].loaded.analysis.grid, b: mix.tracks[t.to].loaded.analysis.grid, cue: t.edit.cueBar)
+            let structureB = mix.tracks[t.to].loaded.analysis.counted(metreB).structure
+            let cueB = metreB.counted(t.edit.cueBar)
+            let barB = t.edit.preset == .echoOut ? mix.tracks[t.to].loaded.analysis.grid.barSeconds : bar
             // A Wash Out happens in the bars before B's downbeat.
             let from = t.start - Double(8 + (t.edit.preset == .echoOut ? min(8, t.edit.bars) : 0)) * bar
             // "After" is B's first eight bars on its own: what the blend
@@ -170,7 +179,7 @@ final class SetLab: XCTestCase {
             let lead = Int(((t.start - from) / bar).rounded())
             func ownBreak(_ k: Int) -> Bool {
                 let sides = [(mix.tracks[t.from].loaded.analysis.structure?.loudness, t.edit.entryBar),
-                             (mix.tracks[t.to].loaded.analysis.structure?.loudness, t.edit.cueBar)]
+                             (structureB?.loudness, cueB)]
                 return sides.contains { loud, first in
                     guard let loud else { return false }
                     let x = first + k - lead
@@ -236,7 +245,7 @@ final class SetLab: XCTestCase {
             // whoever sings.)
             var vocalGap = 0, heldBack = 0
             if t.edit.preset != .echoOut, let sa = mix.tracks[t.from].loaded.analysis.structure,
-               let sb = mix.tracks[t.to].loaded.analysis.structure {
+               let sb = structureB {
                 let lead = Int(((t.start - from) / bar).rounded())
                 var runA = 0, runB = 0
                 for rel in 0..<min(t.edit.bars + 4, all.count - lead) {
@@ -244,7 +253,7 @@ final class SetLab: XCTestCase {
                     let silent = vocA[k] <= -40 && vocB[k] <= -40
                     // (Looped, A's song isn't singing on: its part was over.)
                     runA = silent && t.loopBars == 0 && sa.isActive(.vocals, bar: t.edit.entryBar + rel) ? runA + 1 : 0
-                    runB = silent && sb.isActive(.vocals, bar: t.edit.cueBar + rel) ? runB + 1 : 0
+                    runB = silent && sb.isActive(.vocals, bar: cueB + rel) ? runB + 1 : 0
                     if rel < t.edit.bars { vocalGap = max(vocalGap, runA) }
                     heldBack = max(heldBack, runB)
                 }
@@ -278,17 +287,17 @@ final class SetLab: XCTestCase {
                 // in the middle of a line.
                 // A voice cut at `master` in the middle of one of its song's
                 // sentences (between two of its clauses is no cut).
-                func midSentence(_ track: Int, _ bar0: Int, at master: Double) -> Bool {
-                    let k = VocalPhrasing.slots * bar0 + Int(((master - t.start) / t.barSeconds * Double(VocalPhrasing.slots)).rounded())
-                    guard let st = mix.tracks[track].loaded.analysis.structure, let inside = st.midSentence(at: k) else { return true }
+                func midSentence(_ st: TrackStructure?, _ bar0: Int, _ barLength: Double, at master: Double) -> Bool {
+                    let k = VocalPhrasing.slots * bar0 + Int(((master - t.start) / barLength * Double(VocalPhrasing.slots)).rounded())
+                    guard let st, let inside = st.midSentence(at: k) else { return true }
                     return inside && !st.clauseEnd(at: k)
                 }
                 // B's voice let in in the middle of a part of it (a verse
                 // it sings through): heard as cutting in mid-sentence,
                 // whatever line of the recogniser's starts there.
                 func midPart(at master: Double) -> Bool {
-                    let k = VocalPhrasing.slots * t.edit.cueBar + Int(((master - t.start) / t.barSeconds * Double(VocalPhrasing.slots)).rounded())
-                    return mix.tracks[t.to].loaded.analysis.structure?.midPart(at: k) ?? false
+                    let k = VocalPhrasing.slots * cueB + Int(((master - t.start) / barB * Double(VocalPhrasing.slots)).rounded())
+                    return structureB?.midPart(at: k) ?? false
                 }
                 if t.edit.preset == .echoOut {
                     let vin = t.vocalIn ?? t.start
@@ -296,7 +305,7 @@ final class SetLab: XCTestCase {
                        stride(from: t.start, to: vin, by: t.barSeconds / 8).contains(where: { sounding(t.to, at: $0) }) {
                         phrasing += " B-HELD"
                     }
-                    if vin >= t.start - 0.01, sounding(t.to, at: t.start), midSentence(t.to, t.edit.cueBar, at: t.start) {
+                    if vin >= t.start - 0.01, sounding(t.to, at: t.start), midSentence(structureB, cueB, barB, at: t.start) {
                         phrasing += " B-LANDS-MIDSENTENCE"
                     }
                 }
@@ -313,9 +322,10 @@ final class SetLab: XCTestCase {
                 // opening on a word's attack is sounding by design.
                 // (Nor is a voice cut between two lines of its words,
                 // sounding or not: a rapper leaves no breath there.)
-                if t.edit.preset != .echoOut, t.vocalOutKind != "bar", sounding(t.from, at: out), midSentence(t.from, t.edit.entryBar, at: out) { phrasing += " A-CUT" }
+                if t.edit.preset != .echoOut, t.vocalOutKind != "bar", sounding(t.from, at: out),
+                   midSentence(mix.tracks[t.from].loaded.analysis.structure, t.edit.entryBar, bar, at: out) { phrasing += " A-CUT" }
                 if t.edit.preset != .echoOut, t.vocalInKind == "grid", sounding(t.to, at: vin),
-                   midSentence(t.to, t.edit.cueBar, at: vin) { phrasing += " B-MIDSENTENCE" }
+                   midSentence(structureB, cueB, barB, at: vin) { phrasing += " B-MIDSENTENCE" }
             }
             // A Wash Out never layers two beats: its bridge is the blend.
             if together < min(6, t.edit.bars / 2 + 2), t.edit.preset != .echoOut { phrasing += " STRUNG-TOGETHER" }
@@ -358,20 +368,20 @@ final class SetLab: XCTestCase {
             // silent before it's let in (the start of a part, or a line
             // somewhere inside it). In beats.
             if t.edit.preset != .echoOut, let fa = mix.tracks[t.from].loaded.analysis.structure,
-               let fb = mix.tracks[t.to].loaded.analysis.structure,
+               let fb = structureB,
                let la = fa.vocalSixteenthLevel, let lb = fb.vocalSixteenthLevel, let ra = fa.vocalReference, let rb = fb.vocalReference {
-                func slot(_ master: Double?, _ bar0: Int) -> Int? {
-                    master.map { 16 * bar0 + Int((($0 - t.start) / t.barSeconds * 16).rounded()) }
+                func slot(_ master: Double?, _ bar0: Int, _ barLength: Double = t.barSeconds) -> Int? {
+                    master.map { 16 * bar0 + Int((($0 - t.start) / barLength * 16).rounded()) }
                 }
                 let pa = AutoPlacement.phrases(fa, boundary: fa.boundaryStrength()).edge
                 let pb = AutoPlacement.phrases(fb, boundary: fb.boundaryStrength()).edge
-                func edge(_ parts: [Float], _ bar0: Int, _ master: Double?, leaving: Bool) -> Float {
+                func edge(_ parts: [Float], _ bar0: Int, _ master: Double?, leaving: Bool, _ barLength: Double = t.barSeconds) -> Float {
                     guard let master else { return 1 }
-                    let bar = (master - t.start) / t.barSeconds
+                    let bar = (master - t.start) / barLength
                     let g = bar0 + (leaving ? AutoPlacement.partBar(leaving: bar) : Int(bar.rounded()))
                     return g >= 0 && g < parts.count ? parts[g] : 1
                 }
-                let ea = edge(pa, t.edit.entryBar, t.vocalOut, leaving: true), eb = edge(pb, t.edit.cueBar, t.vocalIn, leaving: false)
+                let ea = edge(pa, t.edit.entryBar, t.vocalOut, leaving: true), eb = edge(pb, cueB, t.vocalIn, leaving: false, barB)
                 partEdges.append((ea, eb))
                 var note = "      voices:"
                 note += String(format: " part edge A %.2f, B %.2f;", ea, eb)
@@ -383,7 +393,7 @@ final class SetLab: XCTestCase {
                     }.map { String(format: "%d(%.2f)", $0, b[$0]) }.joined(separator: " ")
                 }
                 let ga = t.edit.entryBar + AutoPlacement.partBar(leaving: ((t.vocalOut ?? t.start) - t.start) / t.barSeconds)
-                let gb = t.edit.cueBar + Int((((t.vocalIn ?? t.start) - t.start) / t.barSeconds).rounded())
+                let gb = cueB + Int((((t.vocalIn ?? t.start) - t.start) / barB).rounded())
                 print("      A's voice leaves on its bar \(ga) (entry \(t.edit.entryBar)); corners near: \(corners(fa, near: ga)).  B's comes in on its bar \(gb) (cue \(t.edit.cueBar)); corners near: \(corners(fb, near: gb))")
                 if let k = slot(t.vocalOut, t.edit.entryBar) {
                     var j = k
@@ -392,7 +402,7 @@ final class SetLab: XCTestCase {
                     resumes.append(rest)
                     note += String(format: " A out on %@, would sing on after %.1f beats;", t.vocalOutKind ?? "-", rest)
                 }
-                if let k = slot(t.vocalIn, t.edit.cueBar) {
+                if let k = slot(t.vocalIn, cueB, barB) {
                     var j = k - 1
                     while j >= 0, j > k - 16 * 16, VocalPhrasing.quiet(lb[j], rb) { j -= 1 }
                     let silent = Double(k - 1 - j) / 4
@@ -408,7 +418,7 @@ final class SetLab: XCTestCase {
                     guard let k, let mid = st.midSentence(at: k) else { return "?" }
                     return mid && !st.clauseEnd(at: k) ? "MID-SENTENCE" : "between sentences"
                 }
-                let wa = words(fa, slot(t.vocalOut, t.edit.entryBar)), wb = words(fb, slot(t.vocalIn, t.edit.cueBar))
+                let wa = words(fa, slot(t.vocalOut, t.edit.entryBar)), wb = words(fb, slot(t.vocalIn, cueB, barB))
                 note += "  words: A out \(wa), B in \(wb)"
                 // And by the recogniser's own sentences (a line of the
                 // above can be half of one, split at a comma or a breath),

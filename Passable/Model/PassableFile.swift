@@ -143,9 +143,11 @@ enum PassableFile {
         let input = try AVAudioFile(forReading: source)
         let description = input.fileFormat.streamDescription.pointee
         let bits = Int(description.mBitsPerChannel)
+        // (Not 32-bit integers: Float32, which the samples pass through,
+        // holds 24 bits exactly and no more. Such a file is stored as is.)
         guard description.mFormatID == kAudioFormatLinearPCM,
               description.mFormatFlags & kAudioFormatFlagIsFloat == 0,
-              [16, 20, 24, 32].contains(bits) else { return nil }
+              [16, 20, 24].contains(bits) else { return nil }
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatAppleLossless,
             AVSampleRateKey: input.fileFormat.sampleRate,

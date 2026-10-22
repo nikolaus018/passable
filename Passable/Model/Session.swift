@@ -821,6 +821,12 @@ final class Session: ObservableObject {
         }
         while grid.firstDownbeat >= grid.barSeconds { grid.firstDownbeat -= grid.barSeconds }
         while grid.firstDownbeat < 0 { grid.firstDownbeat += grid.barSeconds }
+        // Bars one by one, the same way: the first downbeat inside the
+        // song's first bar, none before the file (a bar there has nothing
+        // to measure), none missing after its start. (The song's edits
+        // are dropped with its grid, so its bars may be counted afresh.)
+        while let d = grid.downbeats, d.count > 2, d[0] < 0 { grid.downbeats = Array(d.dropFirst()) }
+        while let d = grid.downbeats, d.count >= 2, d[0] - (d[1] - d[0]) >= 0 { grid.downbeats = [d[0] - (d[1] - d[0])] + d }
         if let first = grid.downbeats?.first { grid.firstDownbeat = first }
         loaded.analysis.grid = grid
         let old = loaded.analysis.structure

@@ -134,6 +134,9 @@ struct TrackStructure: Codable, Equatable {
             while true {
                 let start = Int(grid.downbeat(bar) * sr), end = Int(grid.downbeat(bar + 1) * sr)
                 guard end <= stem.count else { break }
+                // (A bar that starts before the file, where a grid nudged
+                // earlier puts its first downbeat: nothing to read there.)
+                guard start >= 0 else { bars.append(0); levels.append(-90); lows.append(-90); bar += 1; continue }
                 let n = end - start
                 var l: Float = 0, r: Float = 0
                 vDSP_rmsqv(stem.left.pointer + start, 1, &l, vDSP_Length(n))
@@ -144,7 +147,6 @@ struct TrackStructure: Codable, Equatable {
                 vDSP_measqv(stem.right.pointer + start, 1, &mr, vDSP_Length(n))
                 levels.append(10 * log10(max((ml + mr) / 2, 1e-9)))
                 let total = (ml + mr) / 2
-                guard start >= 0 else { lows.append(-90); bar += 1; continue }
                 var restL = Array(UnsafeBufferPointer(start: stem.left.pointer + start, count: n))
                 var restR = Array(UnsafeBufferPointer(start: stem.right.pointer + start, count: n))
                 for i in isolator.indices { isolator[i].process(&restL, &restR, count: n) }
@@ -192,6 +194,7 @@ struct TrackStructure: Codable, Equatable {
                 let start = Int(grid.time(bars: Double(i) / perBar) * sr)
                 let end = Int(grid.time(bars: Double(i + 1) / perBar) * sr)
                 guard end <= vocals.count else { break }
+                guard start >= 0 else { out.append(-90); i += 1; continue }
                 var l: Float = 0, r: Float = 0
                 vDSP_measqv(vocals.left.pointer + start, 1, &l, vDSP_Length(end - start))
                 vDSP_measqv(vocals.right.pointer + start, 1, &r, vDSP_Length(end - start))
@@ -613,7 +616,7 @@ extension TrackStructure {
         // The level of what loops: the song there less its voice.
         s.loudness = loop(loudness)
         if let levels = s.stemLevel {
-            for g in entry..<s.loudness.count {
+            for g in entry..<max(entry, s.loudness.count) {
                 let power = levels.values.reduce(Float(0)) { $0 + (g < $1.count ? pow(10, $1[g] / 10) : 0) }
                 s.loudness[g] = 10 * log10(max(power, 1e-9))
             }
@@ -1023,9 +1026,12 @@ enum AutoPlacement {
                 && (max(0, g - 2)...min(boundary.count - 1, g + 2)).allSatisfy { boundary[$0] <= boundary[g] }
         }
         guard !corners.isEmpty else {
-            // Nothing to count from: the phase most sections start on.
+            // Nothing to count from: the phase most sections start on
+            // (and, as below, no edge in the middle of a phrase).
             let phase = s.phrasePhase()
-            return ((0..<count).map { ($0 - phase) % 8 == 0 ? 0.7 : 0.2 }, (0..<count).map { (($0 - phase) % 4 + 4) % 4 == 0 })
+            let starts = (0..<count).map { (($0 - phase) % 4 + 4) % 4 == 0 }
+            let edge: [Float] = (0..<count).map { !starts[$0] ? 0 : (($0 - phase) % 8 + 8) % 8 == 0 ? 0.7 : 0.2 }
+            return (lyricEdges(s, edge: edge, starts: starts), starts)
         }
         var edge = [Float](repeating: 0, count: count), starts = [Bool](repeating: false, count: count)
         for g in 0..<count {

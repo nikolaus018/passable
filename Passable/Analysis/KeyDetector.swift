@@ -17,14 +17,10 @@ struct MusicalKey: Codable, Equatable, Hashable {
         MusicalKey(tonicPitchClass: ((tonicPitchClass + semitones) % 12 + 12) % 12, isMajor: isMajor)
     }
 
-    /// The smallest pitch shift that puts `self` in a key that mixes cleanly
-    /// with `target`: the same key, its relative major/minor, or a fifth either
-    /// side on the Camelot wheel. A shift of ±5 semitones and up is audible as
-    /// chipmunking, so a fifth-neighbour one step away usually beats a big
-    /// jump to the exact key.
     /// Like `harmonicShift(toMatch:)`, but nil when every compatible key is
     /// further than `limit` semitones away: past ±2 the shift itself is
-    /// audible, and a clean key clash is often the lesser evil.
+    /// audible, and a clean key clash is often the lesser evil. (With a
+    /// limit of 0: whether the two keys mix as they are.)
     func harmonicShift(toMatch target: MusicalKey, limit: Int) -> Int? {
         let shift = harmonicShift(toMatch: target)
         if abs(shift) <= limit { return shift }
@@ -37,6 +33,11 @@ struct MusicalKey: Codable, Equatable, Hashable {
         return nil
     }
 
+    /// The smallest pitch shift that puts `self` in a key that mixes cleanly
+    /// with `target`: the same key, its relative major/minor, or a fifth either
+    /// side on the Camelot wheel. A shift of ±5 semitones and up is audible as
+    /// chipmunking, so a fifth-neighbour one step away usually beats a big
+    /// jump to the exact key.
     func harmonicShift(toMatch target: MusicalKey) -> Int {
         // The tonic `self` would need, in its own mode, to share target's scale.
         let sameScale: Int

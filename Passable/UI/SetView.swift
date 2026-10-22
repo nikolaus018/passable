@@ -84,7 +84,7 @@ struct SetView: View {
                 Label("Auto-Order", systemImage: "wand.and.stars")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(!set.isReady || set.items.count < 3)
+            .disabled(!set.isReady || set.items.count < 2)
             .help("Order the songs so every transition flows and the energy keeps building")
         }
     }

@@ -190,7 +190,12 @@ enum LaneParameter: Int, CaseIterable, Codable, Identifiable {
             case .lowPass(let hz): return "LP \(Self.hz(hz))"
             case .highPass(let hz): return "HP \(Self.hz(hz))"
             }
-        case .low, .mid, .high:
+        case .low:
+            // (The mixer's low band is a kill, an isolator, from its kill
+            // point down: see `MixRenderer.updateFilters`.)
+            let db = Self.eqDecibels(v)
+            return db <= MixRenderer.killDB ? "Kill" : String(format: "%+.1f dB", db)
+        case .mid, .high:
             let db = Self.eqDecibels(v)
             return db <= -39.5 ? "Kill" : String(format: "%+.1f dB", db)
         }

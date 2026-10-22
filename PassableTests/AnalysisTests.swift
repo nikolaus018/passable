@@ -219,5 +219,42 @@ final class KeyLimitTests: XCTestCase {
         let blip: [Int] = (0..<40).map { 4 * $0 + ((10..<14).contains($0) ? 2 : 0) }
         XCTAssertNil(Steadiness.oddBars(grid: grid, heard: .init(beats: heard.beats, downbeats: blip.map { 0.5 * Double($0) }),
                                         duration: 85, turns: { _ in 1 }))
+        // Played faster it's still the same song: steady, its odd bar where
+        // it was, and what's in doubt in doubt.
+        own.doubtful = [10...20]
+        let faster = own.scaled(by: 1.04)
+        XCTAssertTrue(faster.isSteady)
+        XCTAssertEqual(faster.downbeat(21), 41 / 1.04, accuracy: 1e-9)
+        XCTAssertEqual(faster.doubtful?.first?.lowerBound ?? 0, 10 / 1.04, accuracy: 1e-9)
+    }
+
+    /// A grid whose first downbeat lies before the file (nudged there by
+    /// hand): its first bar has nothing to measure, and nothing is read
+    /// from before the stems.
+    func testABarBeforeTheFileIsMeasuredAsSilence() {
+        let sr = AudioIO.sampleRate
+        let tone = (0..<Int(20 * sr)).map { Float(0.3 * sin(2 * Double.pi * 220 * Double($0) / sr)) }
+        let stem = StemAudio(left: MappedChannel(samples: tone), right: MappedChannel(samples: tone))
+        let stems = Dictionary(uniqueKeysWithValues: StemKind.allCases.map { ($0, stem) })
+        var grid = BeatGrid(bpm: 120, firstDownbeat: 0)
+        grid.downbeats = (0..<11).map { -0.5 + 2 * Double($0) }
+        let s = TrackStructure.measure(stems: stems, grid: grid)
+        XCTAssertEqual(s.loudness.first, -90)
+        XCTAssertEqual(s.stemLevel?["vocals"]?.first, -90)
+        XCTAssertGreaterThan(s.loudness[1], -20)
+        XCTAssertEqual(s.vocalSixteenthLevel?.first, -90)
+    }
+
+    /// What ordering remembers a pair's price by is the same for the same
+    /// analysis, however its dictionaries happen to be laid out (they're
+    /// written in another order every launch).
+    func testAPairPriceIsRememberedByTheSameFingerprint() throws {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        let s = TrackStructure(activity: ["drums": [1, 0.5], "bass": [0.2, 1], "other": [0.3, 0.4], "vocals": [0, 1]],
+                               loudness: [-12, -10])
+        let analysis = TrackAnalysis(grid: BeatGrid(bpm: 124, firstDownbeat: 0.3), key: c, duration: 200, structure: s,
+                                     version: TrackAnalysis.currentVersion)
+        let copy = try JSONDecoder().decode(TrackAnalysis.self, from: JSONEncoder().encode(analysis))
+        XCTAssertEqual(PairCosts.fingerprint(analysis), PairCosts.fingerprint(copy))
     }
 }
