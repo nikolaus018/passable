@@ -1424,8 +1424,9 @@ enum AutoPlacement {
         /// dB B's low end falls short of its full sections over the two bars
         /// from bar `bar` of B: where it takes the kick and bass over.
         func lowShort(at bar: Int) -> Float {
-            let bars = (max(0, bar)..<min(lowB.count, bar + 2)).map { lowB[$0] }
-            guard let landing = bars.max() else { return 0 }
+            // (Past B's end there's nothing to judge.)
+            let from = max(0, bar), to = min(lowB.count, bar + 2)
+            guard from < to, let landing = lowB[from..<to].max() else { return 0 }
             return max(0, fullLowB - landing)
         }
         /// Whether the melodies clash at this spot, heard in the notes both
