@@ -52,7 +52,19 @@ final class Receiver {
 
     init() {
         displayName = UIDevice.current.name
-        peerID = MCPeerID(displayName: displayName)
+        // The same identity every launch, so a Mac doesn't see a new phone
+        // each time (and keep the old one listed for a while).
+        let key = "peerID.\(displayName)"
+        if let data = UserDefaults.standard.data(forKey: key),
+           let saved = try? NSKeyedUnarchiver.unarchivedObject(ofClass: MCPeerID.self, from: data) {
+            peerID = saved
+        } else {
+            let fresh = MCPeerID(displayName: displayName)
+            if let data = try? NSKeyedArchiver.archivedData(withRootObject: fresh, requiringSecureCoding: true) {
+                UserDefaults.standard.set(data, forKey: key)
+            }
+            peerID = fresh
+        }
         session = MCSession(peer: peerID, securityIdentity: nil, encryptionPreference: .required)
         advertiser = MCNearbyServiceAdvertiser(peer: peerID, discoveryInfo: nil, serviceType: PassableMix.serviceType)
         proxy.owner = self

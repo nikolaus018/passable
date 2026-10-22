@@ -131,6 +131,9 @@ final class PhoneLink: NSObject, ObservableObject {
 
     fileprivate func found(_ peer: MCPeerID) {
         guard peer != peerID, !phones.contains(where: { $0.peer == peer }) else { return }
+        // A phone that relaunched Passable shows up under a new identity while
+        // its old one lingers until Multipeer times it out: one name, one phone.
+        phones.removeAll { $0.name == peer.displayName }
         phones.append(Phone(peer: peer))
     }
 
