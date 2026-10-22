@@ -29,7 +29,8 @@
 - **Analysis**: neural beat tracking, per-bar grids for songs with a drifting tempo, key detection, song structure and vocal line timing
 - **Automatic set ordering and transitions** based on tempo, key, energy and section alignment
 - **Hand-editable automation**: volume, filter, EQ, reverb and delay lanes for every stem
-- **Sample-exact rendering** to AAC or 24-bit WAV, plus a `.passable` set format and an iPhone companion
+- **Sample-exact rendering** to AAC or 24-bit WAV, plus a `.passable` set format
+- **Passable for iPhone** (in [`ios/`](ios)) plays the sets you send it over Wi-Fi, with song-by-song Next/Previous and lock-screen controls
 
 A native macOS app that mixes songs like a DJ, stem by stem. Add songs to a set, and Passable puts them in the order that flows best, builds every transition and plays or renders one continuous mix. Any transition can be opened and shaped by hand.
 
@@ -58,11 +59,11 @@ One transport serves both tabs: **Space** plays or pauses, holding **M** mutes t
 
 ## On your iPhone
 
-**iPhone** in the transport bar sends the set to the Passable app on your phone (project `passableIos`): the set is
+**iPhone** in the transport bar sends the set to the Passable app on your phone (in [`ios/`](ios), see its [README](ios/README.md)): the set is
 rendered here, packed with a map of where each song sits, and sent over Wi-Fi once the phone says yes. On the phone you
 get the playing song, a track list, Next/Previous between songs, and lock-screen controls, instead of one long file.
 **Save as File…** in the same panel writes a `.passablemix` to AirDrop. The format is documented in
-`Passable/Model/PassableMix.swift` (shared with the phone app; keep the two copies identical).
+`Passable/Model/PassableMix.swift`, which the phone app in [`ios/`](ios) compiles too.
 
 ## Set files (.passable)
 
@@ -83,6 +84,8 @@ cd tools/convert-beats && uv venv --python 3.12 .venv && \
   .venv/bin/python convert.py && cd ../..
 xcodegen generate && open Passable.xcodeproj
 ```
+
+The iPhone app needs no models: `cd ios && xcodegen generate && open PassableIos.xcodeproj` (see [`ios/README.md`](ios/README.md) for signing and installing on a phone).
 
 ## How the model runs
 
@@ -117,6 +120,9 @@ With `TEST_RUNNER_PASSABLE_SET_FIXED=1`, SetLab plays the songs in the order lis
 | `Passable/Model` | automation envelopes, presets, session |
 | `Passable/Library` | online search and download: YouTube (yt-dlp) |
 | `Passable/UI` | SwiftUI: decks, transition panel, timeline, search |
+| `PassableTests` | unit tests, and the measurement harnesses below |
+| `ios` | Passable for iPhone: plays `.passablemix` sets sent from the Mac (compiles `Passable/Model/PassableMix.swift`) |
+| `tools` | Core ML model export, the beat audit, the app icon |
 
 Measurement harnesses (skipped unless their variable is set; `xcodebuild` only passes variables prefixed with `TEST_RUNNER_`), each taking a file with one path per line:
 

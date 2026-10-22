@@ -4,8 +4,7 @@ import Foundation
 /// every transition already inside it) plus the map of where each song sits.
 /// Passable on the Mac writes it, the Passable app on the iPhone plays it.
 ///
-/// This exact file lives in both projects (Passable/Model and
-/// passableIos/Shared); change one, change the other.
+/// The iPhone app (`ios/`) compiles this same file: one format, one source.
 ///
 /// Layout, all integers little-endian:
 ///

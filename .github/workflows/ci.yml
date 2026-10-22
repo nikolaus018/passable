@@ -32,3 +32,23 @@ jobs:
         run: |
           xcodebuild build-for-testing -project Passable.xcodeproj -scheme Passable \
             -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO | tail -40
+
+  ios:
+    name: Build and test (iPhone)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+      - name: Generate the project
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          brew install xcodegen
+          cd ios && xcodegen generate
+      # On whichever iPhone simulator the runner has.
+      - name: Test on a simulator
+        shell: bash
+        run: |
+          device=$(xcrun simctl list devices available -j | python3 -c "import json,sys; print(next(d['udid'] for r,ds in json.load(sys.stdin)['devices'].items() if 'iOS' in r for d in ds if d['name'].startswith('iPhone')))")
+          cd ios
+          xcodebuild test -project PassableIos.xcodeproj -scheme PassableIos \
+            -destination "platform=iOS Simulator,id=$device" CODE_SIGNING_ALLOWED=NO | tail -40
