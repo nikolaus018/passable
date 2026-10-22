@@ -140,6 +140,11 @@ final class Receiver {
         // The Mac went away before sending anything (or it said no).
         if case .receiving(_, let p) = state, p == 0 { state = .ready }
         if offer != nil, pendingHandler == nil { offer = nil }
+        // (Asked to stop meanwhile: nothing is on its way any more.)
+        if stopWhenDone, state == .ready {
+            stopWhenDone = false
+            stop()
+        }
     }
 }
 
