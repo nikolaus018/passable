@@ -31,7 +31,7 @@ enum TrackAnalyzer {
     /// Analyses a track from its stems, which beats analysing the mix: the
     /// drum stem gives a clean rhythm signal for the beat grid, and bass +
     /// melody give a key estimate that vocals and hi-hats can't skew.
-    static func analyze(stems: [StemKind: StemAudio]) -> TrackAnalysis {
+    static func analyze(stems: [StemKind: StemAudio], tracker: BeatTracker? = BeatTracker.shared) -> TrackAnalysis {
         let sr = AudioIO.sampleRate
         let drums = stems[.drums].map { $0.copyStereo().mono() } ?? []
         let harmony = sum(of: [stems[.bass], stems[.other]].compactMap { $0 })
@@ -42,7 +42,7 @@ enum TrackAnalyzer {
         let layers = [StemKind.drums, .bass, .other].compactMap { stems[$0]?.copyStereo().mono() }
         // The beat as a trained tracker hears it in the whole song (the
         // stems add up to the mix it was trained on).
-        let heard = try? BeatTracker.shared?.track(sum(of: Array(stems.values)))
+        let heard = try? tracker?.track(sum(of: Array(stems.values)))
         var grid = TempoEstimator.estimate(rhythm: rhythm, harmony: harmony, layers: layers, heard: heard, sampleRate: sr)
         if let heard { grid = bars(of: grid, heard: heard, duration: duration, stems: stems) }
         let key = KeyDetector.detect(samples: harmony, sampleRate: sr)

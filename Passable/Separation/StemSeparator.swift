@@ -35,13 +35,13 @@ final class StemSeparator {
     private let inverseSTFT: DemucsSTFT
     private static let overlap = 0.25
 
-    init() throws {
-        guard let url = Bundle.main.url(forResource: "HTDemucs", withExtension: "mlmodelc") else {
+    init(model modelURL: URL? = nil) throws {
+        guard let url = modelURL ?? Bundle.main.url(forResource: "HTDemucs", withExtension: "mlmodelc") else {
             throw PassableError.message("HTDemucs model is missing from the app bundle. Run tools/convert-demucs/convert.py and rebuild.")
         }
         let config = MLModelConfiguration()
-        // The FP32 graph is GPU-resident; FP16 (the Neural Engine's type)
-        // overflows in HTDemucs' normalisation and attention layers.
+        // The FP16 graph runs on the GPU (see tools/convert-demucs): the
+        // Neural Engine's compiler rejects it, and trying costs seconds.
         config.computeUnits = .cpuAndGPU
         model = try MLModel(contentsOf: url, configuration: config)
         let metadata = model.modelDescription.metadata[.creatorDefinedKey] as? [String: String] ?? [:]

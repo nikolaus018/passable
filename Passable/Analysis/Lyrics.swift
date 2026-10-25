@@ -111,9 +111,21 @@ enum Lyrics {
         // dense: 0.4 to 0.8).
         let candidates = blocking({ await installed() }) ?? []
         let english = candidates.filter { $0.hasPrefix("en") }, others = candidates.filter { !$0.hasPrefix("en") }
+        let order = others + english
+        // Every language at once (one after the other, an English song
+        // waited for the German pass to fail first), then picked from in
+        // that order as before.
+        let transcripts = blocking { () async -> [String: [Word]] in
+            await withTaskGroup(of: (String, [Word]?).self) { group in
+                for locale in order { group.addTask { (locale, await transcribe(url, locale: locale)) } }
+                var all: [String: [Word]] = [:]
+                for await (locale, words) in group { if let words { all[locale] = words } }
+                return all
+            }
+        } ?? [:]
         var best: (words: [Word], locale: String, confidence: Double)?
-        for locale in others + english {
-            guard let words = blocking({ await transcribe(url, locale: locale) }) else { return .failed }
+        for locale in order {
+            guard let words = transcripts[locale] else { return .failed }
             let confidence = words.reduce(0) { $0 + $1.confidence } / Double(max(1, words.count))
             if !locale.hasPrefix("en") {
                 guard words.count >= minimumWords, reads(words, as: locale, among: candidates) else { continue }

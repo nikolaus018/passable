@@ -24,6 +24,7 @@
 		2462BF7F99A015EBCE55C3CC /* MixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B69520316B09120BB126F804 /* MixTests.swift */; };
 		2570BD6B7898D6BC1BED39D1 /* PhoneMixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1F00DF8AB6E58CE92F31935 /* PhoneMixTests.swift */; };
 		2B5C285E85A47F0C3BAC8079 /* DemucsSTFT.swift in Sources */ = {isa = PBXBuildFile; fileRef = 626F56B7CC69E50D409B8CB2 /* DemucsSTFT.swift */; };
+		2F5879DF70B7BCAB7E8F2F23 /* IngestLab.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4D05DC807D59DF5B5AA9B05 /* IngestLab.swift */; };
 		31D6144E118C96797209A45A /* SetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAE2D93E072FDE7F8EEC047F /* SetView.swift */; };
 		326B0469D9BBD33F5856CD05 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9C614A9FFAFC94E7A9329C2 /* Theme.swift */; };
 		37165790AA6BA6DA44CBE3F3 /* TrackAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2347CEEF14E7346534DC915 /* TrackAnalyzer.swift */; };
@@ -47,6 +48,7 @@
 		8A58316BE4AB1EC4A15648B3 /* GridProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3048DB84F0FBC7A060AB54E /* GridProbe.swift */; };
 		8BCAC83384BA4C243CB878CD /* StemSeparator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 977700D9FDD4CAB06C13E6D9 /* StemSeparator.swift */; };
 		8E662C3F480F3359D00AE471 /* TransitionPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A65494D08EBA4673B965AC1 /* TransitionPreset.swift */; };
+		8EC10BEB3EDDCF2BFD603BA0 /* PrecisionLab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B4FB40376F23E5B67E23C1E /* PrecisionLab.swift */; };
 		A04A7D184814164455B642EF /* StemCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33A00403D498E07789E76097 /* StemCache.swift */; };
 		A5FD1CC48AC72EDC93603890 /* TimelineArea.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73DCC498B319117423186FE0 /* TimelineArea.swift */; };
 		AE9EA7FFF2681EACB38A9E04 /* SeparationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BD3C5673D80CB6C6602ED07 /* SeparationTests.swift */; };
@@ -112,6 +114,7 @@
 		63FAB67B2900CD6257C1D17A /* MixRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MixRenderer.swift; sourceTree = "<group>"; };
 		64A942CAB48C8DD5ED1A7DAE /* HTDemucs.mlpackage */ = {isa = PBXFileReference; path = HTDemucs.mlpackage; sourceTree = "<group>"; };
 		683C023C0AB1CCF3B368AA0D /* RealTrackProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealTrackProbe.swift; sourceTree = "<group>"; };
+		6B4FB40376F23E5B67E23C1E /* PrecisionLab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrecisionLab.swift; sourceTree = "<group>"; };
 		6D383015C45F285B6995AFF4 /* EndToEndTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EndToEndTests.swift; sourceTree = "<group>"; };
 		7079AC37C3DD4C737C158B2C /* SetLab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetLab.swift; sourceTree = "<group>"; };
 		73DCC498B319117423186FE0 /* TimelineArea.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineArea.swift; sourceTree = "<group>"; };
@@ -149,6 +152,7 @@
 		E90F393D5126D1D1B90167C8 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		EAE2D93E072FDE7F8EEC047F /* SetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetView.swift; sourceTree = "<group>"; };
 		F1612B817C97CD12331F2300 /* RequestLab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestLab.swift; sourceTree = "<group>"; };
+		F4D05DC807D59DF5B5AA9B05 /* IngestLab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IngestLab.swift; sourceTree = "<group>"; };
 		FE6C44F5546EC863B0C936DF /* PassableApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassableApp.swift; sourceTree = "<group>"; };
 		FFA185FD99CE45F4F53A78AA /* PassableFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassableFile.swift; sourceTree = "<group>"; };
 		FFC80966629C43E1E92B031D /* PhoneMix.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMix.swift; sourceTree = "<group>"; };
@@ -299,6 +303,7 @@
 				6D383015C45F285B6995AFF4 /* EndToEndTests.swift */,
 				D3048DB84F0FBC7A060AB54E /* GridProbe.swift */,
 				B4322FA8044EBA150798F8E4 /* HarmonyProbe.swift */,
+				F4D05DC807D59DF5B5AA9B05 /* IngestLab.swift */,
 				E437400E644FE3BB9ABE4583 /* LibraryFetch.swift */,
 				7561E793DD43EBBD57F42438 /* LiveLab.swift */,
 				1C62F999AF68FAF158B2DC45 /* LyricsProbe.swift */,
@@ -307,6 +312,7 @@
 				4EEC2588B36CA71986AC14E9 /* PayoffTests.swift */,
 				E498312F53D40FD534860992 /* PerfLab.swift */,
 				B1F00DF8AB6E58CE92F31935 /* PhoneMixTests.swift */,
+				6B4FB40376F23E5B67E23C1E /* PrecisionLab.swift */,
 				683C023C0AB1CCF3B368AA0D /* RealTrackProbe.swift */,
 				F1612B817C97CD12331F2300 /* RequestLab.swift */,
 				5BD3C5673D80CB6C6602ED07 /* SeparationTests.swift */,
@@ -426,6 +432,7 @@
 				0B304481FCF7C128FDE18908 /* EndToEndTests.swift in Sources */,
 				8A58316BE4AB1EC4A15648B3 /* GridProbe.swift in Sources */,
 				60F1A83133DB2F5C5280EADB /* HarmonyProbe.swift in Sources */,
+				2F5879DF70B7BCAB7E8F2F23 /* IngestLab.swift in Sources */,
 				5A6238B318AA288716F24F77 /* LibraryFetch.swift in Sources */,
 				BCCE39CEEB6E23FC85A0ACF4 /* LiveLab.swift in Sources */,
 				B6CC20BF8CDA9348A4262E7F /* LyricsProbe.swift in Sources */,
@@ -434,6 +441,7 @@
 				573288BB14DF37B676355955 /* PayoffTests.swift in Sources */,
 				832B279B4D7E3B07CB6DBF5E /* PerfLab.swift in Sources */,
 				2570BD6B7898D6BC1BED39D1 /* PhoneMixTests.swift in Sources */,
+				8EC10BEB3EDDCF2BFD603BA0 /* PrecisionLab.swift in Sources */,
 				6A87BFA23CB053EBC96C6F40 /* RealTrackProbe.swift in Sources */,
 				5CEBC7F1363F1AA1A2532877 /* RequestLab.swift in Sources */,
 				AE9EA7FFF2681EACB38A9E04 /* SeparationTests.swift in Sources */,

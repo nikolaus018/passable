@@ -34,12 +34,14 @@ final class BeatTracker: @unchecked Sendable {
     private let model: MLModel
     private let lock = NSLock()
 
-    init() throws {
-        guard let url = Bundle.main.url(forResource: "BeatThis", withExtension: "mlmodelc") else {
+    init(model modelURL: URL? = nil, computeUnits: MLComputeUnits = .cpuAndGPU) throws {
+        guard let url = modelURL ?? Bundle.main.url(forResource: "BeatThis", withExtension: "mlmodelc") else {
             throw PassableError.message("BeatThis model is missing from the app bundle. Run tools/convert-beats/convert.py and rebuild.")
         }
         let config = MLModelConfiguration()
-        config.computeUnits = .cpuAndGPU
+        // The FP16 graph on the GPU: the Neural Engine and the CPU are
+        // slower (see tools/convert-beats).
+        config.computeUnits = computeUnits
         model = try MLModel(contentsOf: url, configuration: config)
     }
 

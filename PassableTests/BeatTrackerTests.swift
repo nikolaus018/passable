@@ -32,13 +32,17 @@ final class BeatTrackerTests: XCTestCase {
     func testLogitsMatchTorch() throws {
         guard let tracker = BeatTracker.shared else { throw XCTSkip("BeatThis model isn't in the app bundle") }
         let logits = try tracker.logits(spectrogram: BeatTracker.spectrogram(try Self.floats("signal22k.f32")))
-        // Chunked as the library chunks a song: frame for frame the same.
+        // Chunked as the library chunks a song: frame for frame the same,
+        // to FP16's precision (a chunk out of place is off by whole units),
+        // and the same beats picked from them.
         for (name, mine) in [("beat.f32", logits.beat), ("downbeat.f32", logits.downbeat)] {
             let reference = try Self.floats(name)
             XCTAssertEqual(mine.count, reference.count)
             let error = zip(mine, reference).map { abs($0 - $1) }.max()!
-            XCTAssertLessThan(error, 0.02, "\(name): max logit error \(error)")
+            XCTAssertLessThan(error, 0.1, "\(name): max logit error \(error)")
         }
+        XCTAssertEqual(BeatTracker.beats(beat: logits.beat, downbeat: logits.downbeat),
+                       BeatTracker.beats(beat: try Self.floats("beat.f32"), downbeat: try Self.floats("downbeat.f32")))
         // The fixture clicks twice a second from 0.09 s on.
         let beats = BeatTracker.beats(beat: logits.beat, downbeat: logits.downbeat).beats
         XCTAssertGreaterThan(beats.count, 50)

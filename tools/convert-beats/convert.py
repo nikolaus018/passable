@@ -15,7 +15,14 @@ returns
   beat     [1, 1500]     logits: a beat in this frame
   downbeat [1, 1500]     logits: a downbeat in this frame
 
-Usage:  .venv/bin/python convert.py [--checkpoint final0] [--out ../../Passable/Resources]
+The network runs in FP16 on the GPU: under half the time of FP32, and the
+analysis comes out the same (53 of 54 songs to the bit, the last within 3 ms
+and 0.005 BPM; PassableTests/PrecisionLab), since the grid is placed on the
+drum hits anyway. Less GPU time is also less taken from separation running
+alongside. On the Neural Engine or the CPU it is slower, and in FP16 on the
+CPU it loses beats. --fp32 exports the exact one.
+
+Usage:  .venv/bin/python convert.py [--checkpoint final0] [--fp32] [--out ../../Passable/Resources]
         (writes fixtures for the Swift tests to ./fixtures as well)
 """
 
@@ -77,6 +84,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", default="final0")
     parser.add_argument("--out", default="../../Passable/Resources")
+    parser.add_argument("--fp32", action="store_true")
     args = parser.parse_args()
 
     patch_coremltools_cast()
@@ -109,7 +117,7 @@ def main():
         inputs=[ct.TensorType(name="spect", shape=spect.shape, dtype=np.float32)],
         outputs=[ct.TensorType(name="beat"), ct.TensorType(name="downbeat")],
         convert_to="mlprogram",
-        compute_precision=ct.precision.FLOAT32,
+        compute_precision=ct.precision.FLOAT32 if args.fp32 else ct.precision.FLOAT16,
         minimum_deployment_target=ct.target.macOS14,
     )
     ml.short_description = "Beat This! beat and downbeat tracker (CPJKU, MIT), mel filterbank included"

@@ -15,7 +15,14 @@ and returns
 The stem waveform is  wave + istft(spec_out). Swift must reproduce
 `HTDemucs._spec` / `_ispec` exactly (see Passable/Separation/STFT.swift).
 
-Usage:  .venv/bin/python convert.py [--fp16] [--out ../../Passable/Resources]
+The network runs in FP16 on the GPU: twice as fast as FP32, with stems within
+48 dB of it (the difference at least 58 dB under the mix) and the same beat
+grids to the millisecond (PassableTests/PrecisionLab). Keeping the
+normalisation or the convolutions in FP32 buys back almost nothing: the
+difference is spread over the whole network. The Neural Engine's compiler
+rejects the graph at any precision. --fp32 exports the exact one.
+
+Usage:  .venv/bin/python convert.py [--fp32] [--out ../../Passable/Resources]
 Test fixtures: .venv/bin/python make_fixtures.py
 """
 
@@ -154,7 +161,7 @@ def reference_split(m, mix):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--fp16", action="store_true")
+    ap.add_argument("--fp32", action="store_true")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "..", "..", "Passable", "Resources"))
     args = ap.parse_args()
 
@@ -183,7 +190,7 @@ def main():
 
         traced = torch.jit.trace(core, (mix, mag), check_trace=False)
 
-    precision = ct.precision.FLOAT16 if args.fp16 else ct.precision.FLOAT32
+    precision = ct.precision.FLOAT32 if args.fp32 else ct.precision.FLOAT16
     ml = ct.convert(
         traced,
         inputs=[ct.TensorType(name="mix", shape=mix.shape, dtype=np.float32),

@@ -25,7 +25,7 @@
 
 ## Highlights
 
-- **Stem separation** into vocals, melody, drums and bass with HTDemucs v4 on Core ML (about 20 s for a 4-minute track on an M5)
+- **Stem separation** into vocals, melody, drums and bass with HTDemucs v4 on Core ML (about 5 s for a 4-minute track on an M5)
 - **Analysis**: neural beat tracking, per-bar grids for songs with a drifting tempo, key detection, song structure and vocal line timing
 - **Automatic set ordering and transitions** based on tempo, key, energy and section alignment
 - **Hand-editable automation**: volume, filter, EQ, reverb and delay lanes for every stem
@@ -93,7 +93,9 @@ Core ML has no complex tensors, so `convert.py` exports HTDemucs **without** its
 
 Beat grids start from a second model, [Beat This!](https://github.com/CPJKU/beat_this) (MIT), exported by `tools/convert-beats/convert.py` with its mel filterbank inside the graph; `Analysis/BeatTracker.swift` does the STFT and the 30-second chunking. It says which tempo, which hits the beat is on and which beat is the one; `TempoEstimator` then fits the grid to the drum hits to the millisecond. Without the model in the bundle, analysis falls back to onsets alone.
 
-The tests compare the result against PyTorch: stems match at over 110 dB SNR. The model runs in FP32 on the GPU. An FP16 (Neural Engine) export overflows and drifts badly. A 4-minute track separates in about 20 s on an M5. Stems are cached in `~/Library/Caches/Passable`.
+Both models run in FP16 on the GPU, twice as fast as FP32. The stems stay within 46 dB of PyTorch's (the difference at least 58 dB under the mix), and the beat grids come out the same (`PassableTests/PrecisionLab` compares two exports song by song). The Neural Engine's compiler rejects HTDemucs, and runs Beat This! slower than the GPU. A 4-minute track separates in about 5 s on an M5. Stems are cached in `~/Library/Caches/Passable`.
+
+Songs load as a pipeline: while one is separated, the next is decoded (the 48 kHz → 44.1 kHz resampling runs on every core, bit for bit what one pass gives) and the one before is analysed, its words heard alongside its beat and key, in every installed language at once. `PassableTests/IngestLab` (`TEST_RUNNER_PASSABLE_INGEST`) times each stage for songs never seen before, and adding them all at once.
 
 ## Checking a set
 

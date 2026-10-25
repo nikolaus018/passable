@@ -3,8 +3,8 @@ import os
 
 /// Background pipeline: decode → separate → analyse, and tempo/key matching.
 ///
-/// Everything runs on one serial queue. Separation keeps a few hundred MB of
-/// GPU buffers live, and two at once would only fight over the same GPU.
+/// Songs load as a pipeline: while one is separated on the GPU, the next is
+/// decoded and the one before is analysed and listened to (see `separate`).
 final class TrackProcessor: @unchecked Sendable {
     struct Loaded: @unchecked Sendable {
         let directory: URL
@@ -34,7 +34,14 @@ final class TrackProcessor: @unchecked Sendable {
         func cancel() { flag.withLock { $0 = true } }
     }
 
-    private let queue = DispatchQueue(label: "com.nikolausmarek.passable.processing", qos: .userInitiated)
+    /// Three songs in flight: one decoding, one on the GPU, one analysed.
+    private let loads: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "com.nikolausmarek.passable.processing"
+        queue.qualityOfService = .userInitiated
+        queue.maxConcurrentOperationCount = 3
+        return queue
+    }()
     /// Renditions only stretch audio (no GPU), so several can run at once.
     private let matchQueue = DispatchQueue(label: "com.nikolausmarek.passable.matching", qos: .userInitiated,
                                            attributes: .concurrent)
@@ -53,81 +60,129 @@ final class TrackProcessor: @unchecked Sendable {
             return lock
         }
     }
-    private var separator: StemSeparator?
-
     func load(_ url: URL, ticket: Ticket,
               progress: @escaping @Sendable (Progress) -> Void,
               completion: @escaping @Sendable (Result<Loaded, Error>) -> Void) {
-        queue.async { [self] in
-            completion(Result {
-                let directory = try StemCache.directory(for: url)
-                if !StemCache.hasStems(in: directory) {
-                    progress(.decoding)
-                    let mix = try AudioIO.loadStereo(url: url)
-                    if ticket.isCancelled { throw CancellationError() }
-                    progress(.separating(0))
-                    if separator == nil { separator = try StemSeparator() }
-                    let stems = try separator!.separate(mix, progress: { progress(.separating($0)) },
-                                                        isCancelled: { ticket.isCancelled })
-                    for (kind, buffer) in stems {
-                        try StemAudio.save(buffer, directory: directory, name: kind.rawValue)
-                    }
-                }
-                let stems = try StemCache.loadStems(from: directory)
-                var analysis: TrackAnalysis
-                if let cached = StemCache.loadAnalysis(from: directory), cached.version == TrackAnalysis.currentVersion,
-                   (60...200).contains(cached.grid.bpm) {
-                    analysis = cached
-                    if analysis.structure?.stemLevel == nil || analysis.structure?.vocalBeatLevel == nil
-                        || analysis.structure?.hookStart == nil || analysis.structure?.barChroma == nil
-                        || analysis.structure?.harmonyChroma == nil || analysis.structure?.melodyChroma == nil
-                        || analysis.structure?.vocalSixteenthLevel == nil || analysis.structure?.vocalChroma == nil
-                        || analysis.structure?.lowSplit != TrackStructure.lowSplit {
-                        let old = analysis.structure
-                        analysis.structure = TrackStructure.measure(stems: stems, grid: analysis.grid)
-                        analysis.structure?.setLines(old?.vocalLines, tried: old?.lyricsTried, grid: analysis.grid)
-                        StemCache.saveAnalysis(analysis, to: directory)
-                    }
-                    // (Lines put on the grid another way: again, from the
-                    // words already heard.)
-                    if let structure = analysis.structure, structure.vocalLines?.isEmpty == false,
-                       structure.linesVersion != TrackStructure.linesVersion {
-                        analysis.structure?.setLines(structure.vocalLines, tried: structure.lyricsTried, grid: analysis.grid)
-                        StemCache.saveAnalysis(analysis, to: directory)
-                    }
-                } else {
-                    progress(.analyzing)
-                    analysis = TrackAnalyzer.analyze(stems: stems)
-                    StemCache.saveAnalysis(analysis, to: directory)
-                }
-                if analysis.tempoCheck != TrackAnalysis.tempoCheck {
-                    progress(.analyzing)
-                    let checked = TrackAnalyzer.checkingTempo(analysis, stems: stems)
-                    if checked != analysis {
-                        analysis = checked
-                        StemCache.saveAnalysis(analysis, to: directory)
-                    }
-                }
-                // The words, once per song (and again when the languages
-                // on the Mac have changed since: it may be in a new one).
-                let languages = Lyrics.available()
-                if !languages.isEmpty, let vocals = stems[.vocals], let structure = analysis.structure,
-                   structure.vocalLines == nil || structure.lyricsTried != languages {
-                    progress(.analyzing)
-                    switch Lyrics.listen(vocals: vocals) {
-                    case .heard(let heard):
-                        analysis.structure?.setLines(heard.lines, tried: languages, grid: analysis.grid)
-                        StemCache.saveAnalysis(analysis, to: directory)
-                    case .none:
-                        analysis.structure?.setLines([], tried: languages, grid: analysis.grid)
-                        StemCache.saveAnalysis(analysis, to: directory)
-                    case .failed:
-                        break
-                    }
-                }
-                return Loaded(directory: directory, stems: stems, analysis: analysis,
-                              peaks: StemCache.peaks(stems, in: directory, hop: Self.peakHop))
-            })
+        loads.addOperation { [self] in
+            completion(Result { try loadNow(url, ticket: ticket, progress: progress) })
+        }
+    }
+
+    private func loadNow(_ url: URL, ticket: Ticket, progress: @escaping @Sendable (Progress) -> Void) throws -> Loaded {
+        let directory = try StemCache.directory(for: url)
+        let song = Self.songLock(directory)
+        song.lock()
+        defer { song.unlock() }
+        if !StemCache.hasStems(in: directory) {
+            progress(.decoding)
+            let mix = try AudioIO.loadStereo(url: url)
+            if ticket.isCancelled { throw CancellationError() }
+            let stems = try Self.separate(mix, progress: progress, isCancelled: { ticket.isCancelled })
+            for (kind, buffer) in stems {
+                try StemAudio.save(buffer, directory: directory, name: kind.rawValue)
+            }
+        }
+        let stems = try StemCache.loadStems(from: directory)
+        let cached = StemCache.loadAnalysis(from: directory)
+        let usable = cached.flatMap { $0.version == TrackAnalysis.currentVersion && (60...200).contains($0.grid.bpm) ? $0 : nil }
+
+        // The words, once per song (and again when the languages on the
+        // Mac have changed since: it may be in a new one). Heard while the
+        // beat and key are worked out: the recogniser has engines of its
+        // own. (Whether they're wanted is known before the analysis: it
+        // keeps the lines and languages of the cached one.)
+        let languages = Lyrics.available()
+        final class Heard: @unchecked Sendable { var outcome: Lyrics.Outcome? }
+        let heard = Heard()
+        let listening = DispatchGroup()
+        func wantsWords(_ structure: TrackStructure?) -> Bool {
+            structure?.vocalLines == nil || structure?.lyricsTried != languages
+        }
+        if !languages.isEmpty, let vocals = stems[.vocals], usable.map({ wantsWords($0.structure) }) ?? true {
+            DispatchQueue.global(qos: .userInitiated).async(group: listening) {
+                heard.outcome = Lyrics.listen(vocals: vocals)
+            }
+        }
+        defer { listening.wait() }
+
+        var analysis: TrackAnalysis
+        if var cached = usable {
+            if cached.structure?.stemLevel == nil || cached.structure?.vocalBeatLevel == nil
+                || cached.structure?.hookStart == nil || cached.structure?.barChroma == nil
+                || cached.structure?.harmonyChroma == nil || cached.structure?.melodyChroma == nil
+                || cached.structure?.vocalSixteenthLevel == nil || cached.structure?.vocalChroma == nil
+                || cached.structure?.lowSplit != TrackStructure.lowSplit {
+                let old = cached.structure
+                cached.structure = TrackStructure.measure(stems: stems, grid: cached.grid)
+                cached.structure?.setLines(old?.vocalLines, tried: old?.lyricsTried, grid: cached.grid)
+                StemCache.saveAnalysis(cached, to: directory)
+            }
+            // (Lines put on the grid another way: again, from the
+            // words already heard.)
+            if let structure = cached.structure, structure.vocalLines?.isEmpty == false,
+               structure.linesVersion != TrackStructure.linesVersion {
+                cached.structure?.setLines(structure.vocalLines, tried: structure.lyricsTried, grid: cached.grid)
+                StemCache.saveAnalysis(cached, to: directory)
+            }
+            analysis = cached
+        } else {
+            progress(.analyzing)
+            analysis = TrackAnalyzer.analyze(stems: stems)
+            StemCache.saveAnalysis(analysis, to: directory)
+        }
+        if analysis.tempoCheck != TrackAnalysis.tempoCheck {
+            progress(.analyzing)
+            let checked = TrackAnalyzer.checkingTempo(analysis, stems: stems)
+            if checked != analysis {
+                analysis = checked
+                StemCache.saveAnalysis(analysis, to: directory)
+            }
+        }
+        if !languages.isEmpty, let vocals = stems[.vocals], let structure = analysis.structure, wantsWords(structure) {
+            progress(.analyzing)
+            listening.wait()
+            switch heard.outcome ?? Lyrics.listen(vocals: vocals) {
+            case .heard(let heard):
+                analysis.structure?.setLines(heard.lines, tried: languages, grid: analysis.grid)
+                StemCache.saveAnalysis(analysis, to: directory)
+            case .none:
+                analysis.structure?.setLines([], tried: languages, grid: analysis.grid)
+                StemCache.saveAnalysis(analysis, to: directory)
+            case .failed:
+                break
+            }
+        }
+        return Loaded(directory: directory, stems: stems, analysis: analysis,
+                      peaks: StemCache.peaks(stems, in: directory, hop: Self.peakHop))
+    }
+
+    /// Separation, one song at a time for every processor (the editor's
+    /// and the set's): the model keeps a few hundred MB of GPU buffers
+    /// live, and two at once would only fight over the same GPU. Songs
+    /// queued behind it are decoded and analysed meanwhile.
+    private static let gpu = DispatchSemaphore(value: 1)
+    nonisolated(unsafe) private static var separator: StemSeparator?
+
+    private static func separate(_ mix: StereoBuffer, progress: @escaping @Sendable (Progress) -> Void,
+                                 isCancelled: @escaping () -> Bool) throws -> [StemKind: StereoBuffer] {
+        progress(.separating(0))
+        gpu.wait()
+        defer { gpu.signal() }
+        if isCancelled() { throw CancellationError() }
+        if separator == nil { separator = try StemSeparator() }
+        return try separator!.separate(mix, progress: { progress(.separating($0)) }, isCancelled: isCancelled)
+    }
+
+    /// One load of a song at a time, for any processor: two (the editor and
+    /// the set asking for the same song) would both separate it and write
+    /// the same files. The second waits and takes the first's.
+    private static let songs = OSAllocatedUnfairLock(initialState: [String: NSLock]())
+    private static func songLock(_ directory: URL) -> NSLock {
+        songs.withLock { locks in
+            if let lock = locks[directory.path] { return lock }
+            let lock = NSLock()
+            locks[directory.path] = lock
+            return lock
         }
     }
 
