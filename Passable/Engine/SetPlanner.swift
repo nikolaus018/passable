@@ -48,6 +48,13 @@ enum MixMath {
     /// 146 into 135 BPM, 8 %, still blends.)
     static let maxStretch = 0.10
 
+    /// What a cut or Wash Out costs the set's order, against a blend's
+    /// roughly -2 (great) to +1 (weak): a last resort. (At 1.5 a 68-song
+    /// set took 4 cuts where 3 would do; at 3 it takes 3, with 3 fewer
+    /// blends where the two songs are hardly heard together; 5 gives the
+    /// same order of cuts.) Variable only for passable-render's trials.
+    nonisolated(unsafe) static var cutCost = 3.0
+
     /// Up to this (each song no more than 4 % off its own tempo) a blend
     /// may run long. Past it the blend is a quick one: both songs are off
     /// their own tempo through it, which is heard the longer it lasts.
@@ -362,7 +369,7 @@ struct PairPlan: Equatable {
         // it's a jump in tempo, fine once, not all night. A blend costs as
         // much more as the songs are pulled off their own tempos.
         switch stretch {
-        case _ where preset == .echoOut: cost = 1.5 + 0.05 * stretch // fine once, not all night
+        case _ where preset == .echoOut: cost = MixMath.cutCost + 0.05 * stretch // fine once, not all night
         case ..<3: cost = 0.05 * stretch
         default: cost = 0.15 + 0.14 * (stretch - 3)
         }
@@ -396,7 +403,7 @@ struct PairPlan: Equatable {
 /// (or a planner that prices differently: `version`) is priced again.
 enum PairCosts {
     /// Bumped whenever planning or pricing changes.
-    static let version = "6"
+    static let version = "7"
 
     /// One file per version: prices of another planner are dropped with
     /// it, not carried until the file fills up.
@@ -519,12 +526,12 @@ enum SetOrdering {
     /// Exact for sets of up to twelve songs, local search beyond.
     /// - Parameter energies: each song's `energy`, so the set builds: see
     ///   `lostEnergyPenalty`.
-    static func order(_ costs: [[Double]], washOuts: [[Bool]]? = nil, energies: [Double]? = nil) -> [Int] {
+    static func order(_ costs: [[Double]], washOuts: [[Bool]]? = nil, energies: [Double]? = nil, shakes: Int? = nil) -> [Int] {
         let n = costs.count
         // Two songs have an order too: whichever leads into the other best.
         guard n > 1 else { return Array(0..<n) }
         if n <= 12 { return exact(costs, washOuts, energies) }
-        return search(costs, washOuts, energies)
+        return search(costs, washOuts, energies, shakes: shakes)
     }
 
     /// `order` for a set too long to try every order of: the best of a
@@ -533,7 +540,8 @@ enum SetOrdering {
     /// moved or turned round as one, and a few runs swapped at random to
     /// get out of an order no single move improves), keeping what's
     /// better. Always the same for the same songs.
-    static func search(_ costs: [[Double]], _ washOuts: [[Bool]]? = nil, _ energies: [Double]? = nil) -> [Int] {
+    static func search(_ costs: [[Double]], _ washOuts: [[Bool]]? = nil, _ energies: [Double]? = nil,
+                       shakes: Int? = nil) -> [Int] {
         let n = costs.count
         guard n > 2 else { return Array(0..<n) }
         var best = Array(0..<n), bestCost = Double.infinity
@@ -548,8 +556,11 @@ enum SetOrdering {
         bestCost = settle(&best, costs, washOuts, energies)
         guard n >= 8 else { return best }
         var random = SplitMix(state: 0x9E37_79B9_7F4A_7C15)
-        // About as much work whatever the set's length.
-        for _ in 0..<max(24, min(400, 400_000 / (n * n))) {
+        // About as much work whatever the set's length (each settle costs
+        // ~n³): ~500 rounds at 68 songs, a few seconds, where more search
+        // stopped finding anything better (2000 and 10,000 gave the same
+        // order; the 86 used before left two more cuts in).
+        for _ in 0..<(shakes ?? max(60, min(2000, 160_000_000 / (n * n * n)))) {
             // Three cuts, the two middle runs swapped: a change no move of
             // one run undoes in one step.
             var cuts = (0..<3).map { _ in 1 + Int(random.next() % UInt64(n - 1)) }.sorted()
@@ -582,37 +593,60 @@ enum SetOrdering {
                                _ energies: [Double]?) -> Double {
         let n = path.count
         var current = total(path, costs, washOuts, energies)
-        while true {
-            var best: (cost: Double, path: [Int])?
-            func consider(_ p: [Int]) {
-                let c = total(p, costs, washOuts, energies)
-                if c < (best?.cost ?? current) - 1e-9 { best = (c, p) }
+        // Every move, priced on all cores: (block start, length; 0 = turn
+        // round the run from `i` to `j`), then the best taken, ties to the
+        // first in this order (the same set always gets the same order).
+        struct Move { let i: Int, length: Int, j: Int, reversed: Bool }
+        var moves: [Move] = []
+        for length in 1...min(3, n - 1) {
+            for i in 0...(n - length) {
+                for j in 0...(n - length) where j != i {
+                    moves.append(Move(i: i, length: length, j: j, reversed: false))
+                    if length > 1 { moves.append(Move(i: i, length: length, j: j, reversed: true)) }
+                }
             }
-            for length in 1...min(3, n - 1) {
-                for i in 0...(n - length) {
-                    var rest = path
-                    let block = Array(rest[i..<(i + length)])
-                    rest.removeSubrange(i..<(i + length))
-                    for j in 0...rest.count where j != i {
-                        var p = rest
-                        p.insert(contentsOf: block, at: j)
-                        consider(p)
-                        if length > 1 {
-                            p.replaceSubrange(j..<(j + length), with: block.reversed())
-                            consider(p)
+        }
+        for i in 0..<(n - 1) { for j in (i + 1)..<n { moves.append(Move(i: i, length: 0, j: j, reversed: true)) } }
+        /// The song at `p` once `m` is made on `base`, without making it.
+        @inline(__always) func song(_ p: Int, _ m: Move, _ base: UnsafeBufferPointer<Int>) -> Int {
+            if m.length == 0 { return p >= m.i && p <= m.j ? base[m.i + m.j - p] : base[p] }
+            func rest(_ q: Int) -> Int { q < m.i ? base[q] : base[q + m.length] }
+            if p < m.j { return rest(p) }
+            if p < m.j + m.length { let k = p - m.j; return base[m.i + (m.reversed ? m.length - 1 - k : k)] }
+            return rest(p - m.length)
+        }
+        func apply(_ m: Move, to path: [Int]) -> [Int] {
+            var p = path
+            if m.length == 0 { p[m.i...m.j].reverse(); return p }
+            let block = Array(p[m.i..<(m.i + m.length)])
+            p.removeSubrange(m.i..<(m.i + m.length))
+            p.insert(contentsOf: m.reversed ? block.reversed() : block, at: m.j)
+            return p
+        }
+        let chunks = max(1, min(moves.count, ProcessInfo.processInfo.activeProcessorCount * 4))
+        while true {
+            var found = [(cost: Double, index: Int)](repeating: (.infinity, -1), count: chunks)
+            let base = path
+            base.withUnsafeBufferPointer { base in
+                found.withUnsafeMutableBufferPointer { out in
+                    let out = out
+                    DispatchQueue.concurrentPerform(iterations: chunks) { c in
+                        var best = (cost: Double.infinity, index: -1)
+                        var k = c * moves.count / chunks
+                        let end = (c + 1) * moves.count / chunks
+                        while k < end {
+                            let m = moves[k]
+                            let cost = total(count: n, costs, washOuts, energies) { song($0, m, base) }
+                            if cost < best.cost { best = (cost, k) }
+                            k += 1
                         }
+                        out[c] = best
                     }
                 }
             }
-            for i in 0..<(n - 1) {
-                for j in (i + 1)..<n {
-                    var p = path
-                    p[i...j].reverse()
-                    consider(p)
-                }
-            }
-            guard let best else { return current }
-            (path, current) = (best.path, best.cost)
+            guard let best = found.filter({ $0.index >= 0 }).min(by: { ($0.cost, $0.index) < ($1.cost, $1.index) }),
+                  best.cost < current - 1e-9 else { return current }
+            (path, current) = (apply(moves[best.index], to: path), best.cost)
         }
     }
 
@@ -641,23 +675,35 @@ enum SetOrdering {
 
     static func total(_ path: [Int], _ costs: [[Double]], _ washOuts: [[Bool]]? = nil,
                       _ energies: [Double]? = nil) -> Double {
-        var sum = zip(path, path.dropFirst()).reduce(0) { $0 + costs[$1.0][$1.1] }
-        if let energies {
-            // Energy lost and never won back: every song costs by how far
-            // it plays under the hardest one before it.
-            var peak = 0.0
-            for i in path {
-                peak = max(peak, energies[i])
-                sum += lostEnergyPenalty * (peak - energies[i])
+        path.withUnsafeBufferPointer { p in total(count: p.count, costs, washOuts, energies) { p[$0] } }
+    }
+
+    /// `total` of the order whose song at each place `song` gives.
+    @inline(__always)
+    static func total(count n: Int, _ costs: [[Double]], _ washOuts: [[Bool]]?, _ energies: [Double]?,
+                      song: (Int) -> Int) -> Double {
+        guard n > 0 else { return 0 }
+        var sum = 0.0, peak = 0.0, washOutCount = 0, previousWashOut = false
+        var last = song(0)
+        if let energies { peak = energies[last] }
+        for k in 1..<max(1, n) {
+            let next = song(k)
+            sum += costs[last][next]
+            if let energies {
+                peak = max(peak, energies[next])
+                sum += lostEnergyPenalty * (peak - energies[next])
             }
-        }
-        if let washOuts, path.count > 2 {
-            for i in 1..<(path.count - 1) where washOuts[path[i - 1]][path[i]] && washOuts[path[i]][path[i + 1]] {
-                sum += washOutPairPenalty
+            if let washOuts {
+                let w = washOuts[last][next]
+                if w {
+                    washOutCount += 1
+                    if previousWashOut { sum += washOutPairPenalty }
+                }
+                previousWashOut = w
             }
-            let count = zip(path, path.dropFirst()).filter { washOuts[$0][$1] }.count
-            sum += extraWashOutPenalty * Double(max(0, count - 1))
+            last = next
         }
+        if washOuts != nil, n > 2 { sum += extraWashOutPenalty * Double(max(0, washOutCount - 1)) }
         return sum
     }
 

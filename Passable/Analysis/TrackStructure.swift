@@ -23,6 +23,13 @@ struct TrackStructure: Codable, Equatable {
     /// measured another way are measured again on load.
     var lowSplit: Int?
     static let lowSplit = 2
+    /// dB under the song's loud level that a stem's loud bars count as at
+    /// the least, when its activity is measured (see `measure`); how
+    /// activity was measured, so older structures are measured again.
+    static let activityFloor: Float = -30
+    static let activityCap: Float = 2
+    var activityMeasure: Int?
+    static let activityMeasure = 2
     /// The vocal's level per beat, in dB: where its lines start and stop,
     /// which bars are too coarse for. Optional like the above.
     var vocalBeatLevel: [Float]?
@@ -157,6 +164,7 @@ struct TrackStructure: Codable, Equatable {
     static func measure(stems: [StemKind: StemAudio], grid: BeatGrid) -> TrackStructure {
         let sr = AudioIO.sampleRate
         var activity: [String: [Float]] = [:]
+        var rawActivity: [String: (bars: [Float], reference: Float)] = [:]
         var stemLevel: [String: [Float]] = [:], stemLowLevel: [String: [Float]] = [:]
         for (kind, stem) in stems {
             var bars: [Float] = [], levels: [Float] = [], lows: [Float] = []
@@ -201,6 +209,7 @@ struct TrackStructure: Codable, Equatable {
             // level) doesn't.
             let reference = bars.sorted().dropFirst(Int(Double(bars.count) * 0.9)).first ?? 0
             activity[kind.rawValue] = reference > 1e-5 ? bars.map { $0 / reference } : bars.map { _ in 0 }
+            rawActivity[kind.rawValue] = (bars, reference)
         }
         var loudness: [Float] = []
         let count = stems.values.map(\.count).min() ?? 0
@@ -263,6 +272,24 @@ struct TrackStructure: Codable, Equatable {
             return chroma
         }
         let chroma = stems[.other].map { chromaPerBar([$0] + [stems[.vocals]].compactMap { $0 }, normalised: true) } ?? []
+        // A stem that is hardly there (an instrumental's vocal stem: only
+        // what the separation let through) has loud bars of next to
+        // nothing, and against those one bar of a little more bleed read
+        // as hundreds of times its "loud" level, which placement then took
+        // for a voice or a bass line arriving. Its loud bars count as at
+        // least `activityFloor` dB under the song's own.
+        let loud = loudness.filter { $0 > -60 }.sorted()
+        if !loud.isEmpty {
+            let song = pow(10, loud[min(loud.count - 1, Int(Double(loud.count) * 0.8))] / 20)
+            let floor = song * pow(10, Self.activityFloor / 20)
+            for (kind, raw) in rawActivity {
+                let reference = max(raw.reference, floor)
+                // (And a stem that plays in only a few bars, its "loud"
+                // level that of its silence, is at most twice as active as
+                // loud.)
+                activity[kind] = raw.bars.map { min(Self.activityCap, $0 / reference) }
+            }
+        }
         var structure = TrackStructure(activity: activity, loudness: loudness, stemLevel: stemLevel,
                                        stemLowLevel: stemLowLevel, lowSplit: Self.lowSplit, vocalBeatLevel: vocalBeats)
         structure.hookStart = hookStarts(chroma: chroma, structure: structure)
@@ -273,6 +300,7 @@ struct TrackStructure: Codable, Equatable {
         structure.vocalSixteenthLevel = vocalLevels(parts: 4)
         structure.vocalChroma = stems[.vocals].map { chromaPerBar([$0], normalised: false) } ?? []
         structure.heardReference = heardReference(stems: stems, grid: grid)
+        structure.activityMeasure = Self.activityMeasure
         return structure
     }
 

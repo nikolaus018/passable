@@ -18,9 +18,9 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--limiter": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--limiter", "--tempos", "--order-only", "--scores", "--measures": break
     case "--order": ordered = true
-    case "--detail": _ = args.removeFirst()
+    case "--detail", "--shakes", "--cut-cost": _ = args.removeFirst()
     case "--list":
         let text = try String(contentsOfFile: args.removeFirst(), encoding: .utf8)
         songs += text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -35,8 +35,11 @@ guard songs.count >= 2 else { fputs("need at least two songs\n", stderr); exit(2
 
 func seconds(_ since: Date) -> String { String(format: "%.1f s", Date().timeIntervalSince(since)) }
 
+if let k = CommandLine.arguments.firstIndex(of: "--cut-cost") { MixMath.cutCost = Double(CommandLine.arguments[k + 1])! }
+
 // Songs not separated yet need the models: the installed app's.
 ModelLocation.directory = URL(fileURLWithPath: "/Applications/Passable.app/Contents/Resources")
+TrackProcessor.renditionFolder = "render-matched"
 
 let clock = Date()
 let processor = TrackProcessor()
@@ -49,12 +52,83 @@ for url in songs {
     if Date().timeIntervalSince(clock) > 5 { print("  \(tracks.count)/\(songs.count) \(SongTitle.of(url)) (\(seconds(clock)))") }
 }
 print("loaded \(tracks.count) songs in \(seconds(clock))")
+if CommandLine.arguments.contains("--measures") {
+    // The per-bar measures placement scores with, largest value per song:
+    // each should stay within about 0…1.
+    for t in tracks {
+        guard let s = t.loaded.analysis.structure else { continue }
+        let b = s.boundaryStrength()
+        let hooks = (0..<s.loudness.count).map { s.hook($0) }
+        let act = StemKind.allCases.map { k in String(format: "%@ %.1f", k.rawValue, s.activity(k).max() ?? 0) }
+        print(String(format: "boundary %.2f hook %.2f  %@  %@", b.max() ?? 0, hooks.max() ?? 0,
+                     act.joined(separator: " "), SongTitle.of(t.url)))
+    }
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--scores") {
+    // Every pair planned as ordering prices it: the spread of placement
+    // scores, and the pairs at the ends.
+    let a = tracks.map(\.loaded.analysis)
+    let hits = BeatAlign.attacks(of: tracks.map(\.loaded))
+    let n = a.count
+    var rows = [(score: Float, cost: Double, preset: String, i: Int, j: Int)](repeating: (0, 0, "", 0, 0), count: n * n)
+    rows.withUnsafeMutableBufferPointer { out in
+        let out = out
+        DispatchQueue.concurrentPerform(iterations: n * n) { k in
+            let i = k / n, j = k % n
+            guard i != j else { return }
+            let soloFrom = a[i].grid.barCount(duration: a[i].duration) / 4
+            let plan = PairPlan.make(a: a[i], b: a[j], entryRange: (soloFrom + SetBuilder.minimumSoloBars(a[i].grid))...Int.max,
+                                     soloFrom: soloFrom, drums: hits[i].flatMap { x in hits[j].map { (a: x, b: $0) } }, loops: false)
+            out[k] = (plan.placement.score, plan.cost(a: a[i], b: a[j]), plan.preset.name(bars: plan.bars), i, j)
+        }
+    }
+    let all = rows.filter { $0.i != $0.j }.sorted { $0.score < $1.score }
+    func pct(_ p: Double) -> Float { all[Int(Double(all.count - 1) * p)].score }
+    print(String(format: "placement score: min %.1f, 1%% %.1f, 10%% %.1f, median %.1f, 90%% %.1f, 99%% %.1f, max %.1f",
+                 all.first!.score, pct(0.01), pct(0.1), pct(0.5), pct(0.9), pct(0.99), all.last!.score))
+    for r in all.suffix(8).reversed() + all.prefix(4) {
+        print(String(format: "  score %6.1f cost %6.2f %@  %@ → %@", r.score, r.cost, r.preset, SongTitle.of(tracks[r.i].url), SongTitle.of(tracks[r.j].url)))
+    }
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--tempos") {
+    // Each song's tempo and key, and how many others it can share a beat
+    // with (within `maxStretch`, half/double time counted) and a key with.
+    let a = tracks.map(\.loaded.analysis)
+    for (i, t) in a.enumerated().sorted(by: { $0.1.grid.bpm < $1.1.grid.bpm }) {
+        let beat = a.indices.filter { $0 != i && MixMath.preset(t, a[$0]) != .echoOut }
+        let key = beat.filter { !MixMath.keysClash(t.key, a[$0].key) }
+        print(String(format: "%6.1f BPM %@ %@  beat with %2d, beat+key with %2d  %@", t.grid.bpm, t.key.camelotCode,
+                     t.grid.isSteady ? " " : "~", beat.count, key.count, SongTitle.of(tracks[i].url)))
+    }
+    exit(0)
+}
 if ordered {
     // As the app's Auto-Order does it.
     let analyses = tracks.map(\.loaded.analysis)
-    let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: tracks.map(\.loaded)), remembered: true)
-    let order = SetOrdering.order(costs, washOuts: SetOrdering.washOuts(analyses), energies: analyses.map(SetOrdering.energy))
+    let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: tracks.map(\.loaded)), remembered: !CommandLine.arguments.contains("--cut-cost"))
+    let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
+    let shakes = CommandLine.arguments.firstIndex(of: "--shakes").map { Int(CommandLine.arguments[$0 + 1])! }
+    let order = SetOrdering.order(costs, washOuts: washOuts, energies: energies, shakes: shakes)
+    let pairs = zip(order, order.dropFirst())
+    print(String(format: "order cost %.2f (transitions %.2f, Wash Outs/cuts %d, clashing keys %d)",
+                 SetOrdering.total(order, costs, washOuts, energies), pairs.reduce(0) { $0 + costs[$1.0][$1.1] },
+                 pairs.filter { washOuts[$0][$1] }.count,
+                 pairs.filter { MixMath.keysClash(analyses[$0].key, analyses[$1].key) }.count))
+    if CommandLine.arguments.contains("-v") {
+        var peak = 0.0
+        for (k, i) in order.enumerated() {
+            peak = max(peak, energies[i])
+            let next = k + 1 < order.count ? order[k + 1] : nil
+            print(String(format: "%2d  energy %.2f (lost %.2f)  → next %+.2f%@  %@", k + 1, energies[i], peak - energies[i],
+                         next.map { costs[i][$0] } ?? 0, next.map { washOuts[i][$0] ? " CUT" : "" } ?? "", SongTitle.of(tracks[i].url)))
+        }
+    }
     tracks = order.map { tracks[$0] }
+    if CommandLine.arguments.contains("--order-only") { exit(0) }
     try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
     try? tracks.map(\.url.path).joined(separator: "\n").write(to: outDir.appendingPathComponent("order.txt"), atomically: true, encoding: .utf8)
     print("ordered in \(seconds(clock))")

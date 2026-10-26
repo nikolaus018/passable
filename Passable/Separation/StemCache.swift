@@ -40,7 +40,10 @@ enum StemCache {
     /// Renditions and waveform overviews made from the stems as they were.
     static func forgetDerivedAudio(in directory: URL) {
         let fm = FileManager.default
-        try? fm.removeItem(at: directory.appendingPathComponent("matched", isDirectory: true))
+        for item in (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        where item.lastPathComponent.hasPrefix("matched") || item.lastPathComponent == "render-matched" {
+            try? fm.removeItem(at: item)
+        }
         for item in (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
         where item.lastPathComponent.contains(".peaks") {
             try? fm.removeItem(at: item)

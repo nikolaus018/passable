@@ -25,6 +25,11 @@ final class TrackProcessor: @unchecked Sendable {
         case analyzing
     }
 
+    /// Where a song's renditions live in its cache folder. A tool running
+    /// beside the app (passable-render) keeps its own: each clears renditions
+    /// it no longer needs, and would clear the other's while it reads them.
+    nonisolated(unsafe) static var renditionFolder = "matched"
+
     /// Frames per waveform peak (~5.8 ms).
     static let peakHop = 256
 
@@ -125,7 +130,8 @@ final class TrackProcessor: @unchecked Sendable {
                 || cached.structure?.hookStart == nil || cached.structure?.barChroma == nil
                 || cached.structure?.harmonyChroma == nil || cached.structure?.melodyChroma == nil
                 || cached.structure?.vocalSixteenthLevel == nil || cached.structure?.vocalChroma == nil
-                || cached.structure?.lowSplit != TrackStructure.lowSplit {
+                || cached.structure?.lowSplit != TrackStructure.lowSplit
+                || cached.structure?.activityMeasure != TrackStructure.activityMeasure {
                 let old = cached.structure
                 cached.structure = TrackStructure.measure(stems: stems, grid: cached.grid)
                 cached.structure?.setLines(old?.vocalLines, tried: old?.lyricsTried, grid: cached.grid)
@@ -250,7 +256,7 @@ final class TrackProcessor: @unchecked Sendable {
                 let lock = Self.renditionLock(loaded.directory)
                 lock.lock()
                 defer { lock.unlock() }
-                let root = loaded.directory.appendingPathComponent("matched", isDirectory: true)
+                let root = loaded.directory.appendingPathComponent(Self.renditionFolder, isDirectory: true)
                 let directory = root.appendingPathComponent(plan.cacheName, isDirectory: true)
                 StemCache.removeLegacyMatches(in: loaded.directory)
                 if StemCache.hasStems(in: directory), let stems = try? StemCache.loadStems(from: directory) {
