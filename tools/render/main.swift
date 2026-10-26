@@ -559,6 +559,16 @@ if CommandLine.arguments.contains("--report") {
                      t.edit.preset.displayName, t.edit.bars, row.excess, row.seam, seamAt, sw, row.together, n, row.dip, row.hole, row.busy, row.moves, row.after, t.plan.placement.together ?? -1,
                      t.melodiesClash ? "  clash" : ""))
     }
+    // How the voices changed hands: A's left on a line end ("line"),
+    // between words ("word") or on the downbeat while singing ("bar");
+    // B's came in likewise.
+    var outKinds: [String: Int] = [:], inKinds: [String: Int] = [:]
+    for t in mix.transitions {
+        outKinds[t.vocalOutKind ?? "none", default: 0] += 1
+        inKinds[t.vocalInKind ?? "none", default: 0] += 1
+    }
+    print("VOICES A out: " + outKinds.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+          + " | B in: " + inKinds.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
     let m = Double(max(1, rows.count))
     print(String(format: "SET %d transitions: excess mean %.2f dB worst %.2f, over 2 dB: %d | seam mean %.2f× worst %.2f× | together mean %.1f, under 4: %d | dips over 4 dB: %d, bar-to-bar drops over 6 dB: %d | busy bars %d | at once max %d mean %.1f | B after the blend under its loud level: mean %.1f dB, over 4 dB: %d",
                  rows.count, rows.map(\.excess).reduce(0, +) / m, rows.map(\.excess).max() ?? 0, rows.filter { $0.excess > 2 }.count,

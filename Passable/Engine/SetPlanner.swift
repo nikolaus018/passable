@@ -1016,8 +1016,37 @@ struct SetMix: @unchecked Sendable {
     /// build, which then plans them right first time.
     var learned = Learned()
 
-    struct Learned {
+    struct Learned: Codable {
         var unlocked: Set<PairKey> = [], clashed: Set<PairKey> = [], locked: Set<PairKey> = []
+
+        /// What builds have learnt, kept between launches: without it the
+        /// first build after every launch planned those pairs wrong again,
+        /// rendered them, heard it, and planned and rendered them a second
+        /// time (and the second renditions replaced the first, so it all
+        /// happened again next launch): ~50 s for a 66-song set.
+        private static var url: URL {
+            StemCache.root.deletingLastPathComponent().appendingPathComponent("learned-pairs-\(PairCosts.version).json")
+        }
+        private static let lock = NSLock()
+
+        static func load() -> Learned {
+            lock.lock(); defer { lock.unlock() }
+            guard let data = try? Data(contentsOf: url) else { return Learned() }
+            return (try? JSONDecoder().decode(Learned.self, from: data)) ?? Learned()
+        }
+
+        static func remember(_ new: Learned) {
+            lock.lock(); defer { lock.unlock() }
+            var all = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(Learned.self, from: $0) } ?? Learned()
+            let before = (all.unlocked.count, all.clashed.count, all.locked.count)
+            all.unlocked.formUnion(new.unlocked)
+            all.clashed.formUnion(new.clashed)
+            all.locked.formUnion(new.locked)
+            guard (all.unlocked.count, all.clashed.count, all.locked.count) != before else { return }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            try? encoder.encode(all).write(to: url, options: .atomic)
+        }
     }
 
     func snapshot(masterGain: Float, including: (Int, StemKind) -> Bool = { _, _ in true }) -> MixSnapshot {
@@ -1826,10 +1855,12 @@ enum SetBuilder {
                       processor: TrackProcessor,
                       progress: @escaping @Sendable (String) -> Void) async throws -> SetMix {
         precondition(!tracks.isEmpty)
-        // (What the last build learnt still holds for the same pairs.)
-        let unlocked = unlocked.union(previous?.learned.unlocked ?? [])
-        let clashed = clashed.union(previous?.learned.clashed ?? [])
-        let locked = locked.union(previous?.learned.locked ?? [])
+        // (What earlier builds learnt still holds for the same pairs, in
+        // this run or before it.)
+        let kept = SetMix.Learned.load()
+        let unlocked = unlocked.union(previous?.learned.unlocked ?? []).union(kept.unlocked)
+        let clashed = clashed.union(previous?.learned.clashed ?? []).union(kept.clashed)
+        let locked = locked.union(previous?.learned.locked ?? []).union(kept.locked)
         let sr = AudioIO.sampleRate
         let first = tracks[0].loaded
         let s0 = first.analysis.structure
@@ -2661,8 +2692,9 @@ enum SetBuilder {
             fadeOut(&env[LaneParameter.volume.rawValue], from: fadeStart, to: end)
             planned[planned.count - 1].envelopes[stem] = env
         }
-        return SetMix(tracks: planned, transitions: transitions, length: end + 1,
-                      learned: .init(unlocked: unlocked, clashed: clashed, locked: locked))
+        let learned = SetMix.Learned(unlocked: unlocked, clashed: clashed, locked: locked)
+        SetMix.Learned.remember(learned)
+        return SetMix(tracks: planned, transitions: transitions, length: end + 1, learned: learned)
     }
 
     /// Fades a stem's volume to nothing by `end`, from `start` or from

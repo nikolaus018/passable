@@ -96,6 +96,16 @@ final class MixRenderer: @unchecked Sendable {
     /// time.
     private var position = 0
     private var needsPreroll = true
+    /// The reverb's and the echo's tails have died away (see `renderBlock`).
+    private var reverbIdle = true, delayIdle = true
+
+    /// Nothing over -120 dBFS in the block.
+    private static func silent(_ l: UnsafePointer<Float>, _ r: UnsafePointer<Float>, _ n: Int) -> Bool {
+        var a: Float = 0, b: Float = 0
+        vDSP_maxmgv(l, 1, &a, vDSP_Length(n))
+        vDSP_maxmgv(r, 1, &b, vDSP_Length(n))
+        return max(a, b) < 1e-6
+    }
     private var prerollL = [Float](repeating: 0, count: blockSize), prerollR = [Float](repeating: 0, count: blockSize)
 
     // Hand-off from the main thread. The render thread only ever *tries* the
@@ -210,6 +220,8 @@ final class MixRenderer: @unchecked Sendable {
     private func resetTails() {
         reverb.reset()
         delay.reset()
+        reverbIdle = true
+        delayIdle = true
         limiter.reset()
         needsPreroll = true
         for i in lanes.indices { lanes[i] = LaneDSP() }
@@ -244,6 +256,7 @@ final class MixRenderer: @unchecked Sendable {
             rR.baseAddress!.update(repeating: 0, count: n)
             eL.baseAddress!.update(repeating: 0, count: n)
             eR.baseAddress!.update(repeating: 0, count: n)
+            var reverbFed = false, delayFed = false
 
             for (i, lane) in snap.lanes.enumerated() {
                 guard lane.audible, let audio = lane.audio else { continue }
@@ -283,18 +296,29 @@ final class MixRenderer: @unchecked Sendable {
 
                 var rev = LaneParameter.gain(value(lane.envelopes, .reverb, tm))
                 if rev > 0 {
+                    reverbFed = true
                     vDSP_vsma(ll, 1, &rev, rL.baseAddress!, 1, rL.baseAddress!, 1, vDSP_Length(n))
                     vDSP_vsma(lr, 1, &rev, rR.baseAddress!, 1, rR.baseAddress!, 1, vDSP_Length(n))
                 }
                 var dly = LaneParameter.gain(value(lane.envelopes, .delay, tm))
                 if dly > 0 {
+                    delayFed = true
                     vDSP_vsma(ll, 1, &dly, eL.baseAddress!, 1, eL.baseAddress!, 1, vDSP_Length(n))
                     vDSP_vsma(lr, 1, &dly, eR.baseAddress!, 1, eR.baseAddress!, 1, vDSP_Length(n))
                 }
             }
 
-            reverb.process(rL.baseAddress!, rR.baseAddress!, count: n)
-            delay.process(eL.baseAddress!, eR.baseAddress!, count: n)
+            // The reverb and the echo only run while something is sent to
+            // them or their tail still sounds: most of a set sends nothing,
+            // and they were most of the renderer's work.
+            if reverbFed || !reverbIdle {
+                reverb.process(rL.baseAddress!, rR.baseAddress!, count: n)
+                reverbIdle = !reverbFed && Self.silent(rL.baseAddress!, rR.baseAddress!, n)
+            }
+            if delayFed || !delayIdle {
+                delay.process(eL.baseAddress!, eR.baseAddress!, count: n)
+                delayIdle = !delayFed && Self.silent(eL.baseAddress!, eR.baseAddress!, n)
+            }
 
             vDSP_vadd(dL.baseAddress!, 1, rL.baseAddress!, 1, left, 1, vDSP_Length(n))
             vDSP_vadd(left, 1, eL.baseAddress!, 1, left, 1, vDSP_Length(n))

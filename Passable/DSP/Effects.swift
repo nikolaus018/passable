@@ -188,6 +188,8 @@ struct Limiter {
     /// those averaged (see `process`).
     private var needed: [Float], least: [Float]
     private var index = 0
+    /// Frames in the window that need the gain down.
+    private var pending = 0
     private var leastSum: Float
     private var gain: Float = 1
 
@@ -207,6 +209,7 @@ struct Limiter {
         leastSum = Float(n)
         gain = 1
         index = 0
+        pending = 0
     }
 
     /// In place: frame `i` out is frame `i - lookahead` in, limited. The
@@ -218,9 +221,12 @@ struct Limiter {
         let n = Self.lookahead + 1
         for i in 0..<count {
             let peak = max(abs(left[i]), abs(right[i]))
+            if needed[index] < 1 { pending -= 1 }
             needed[index] = peak > ceiling ? ceiling / peak : 1
+            if needed[index] < 1 { pending += 1 }
+            // (Nearly always nothing in the window is over: no search.)
             var m: Float = 1
-            for k in 0..<n where needed[k] < m { m = needed[k] }
+            if pending > 0 { for k in 0..<n where needed[k] < m { m = needed[k] } }
             leastSum += m - least[index]
             least[index] = m
             let smooth = min(1, leastSum / Float(n))
