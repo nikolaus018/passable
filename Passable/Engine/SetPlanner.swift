@@ -90,9 +90,15 @@ enum MixMath {
 
     /// Level match for a track, in dB. Boosts are capped: past that a quiet
     /// track would just be squashed by the limiter.
+    /// `targetLoudness` as heard (K-weighted): pop and dance masters read
+    /// 0.4 dB lower K-weighted than plain on average (30 songs), so the
+    /// set as a whole plays as loud as it did.
+    static let targetHeard: Float = -12.4
+
     static func trimDB(_ analysis: TrackAnalysis?) -> Double {
-        guard let reference = analysis?.structure?.referenceLoudness else { return 0 }
-        return Double(max(-12, min(8, targetLoudness - reference)))
+        guard let structure = analysis?.structure else { return 0 }
+        if let heard = structure.heardReference { return Double(max(-12, min(8, targetHeard - heard))) }
+        return Double(max(-12, min(8, targetLoudness - structure.referenceLoudness)))
     }
 
     /// No automatic blend runs longer than this, whatever the songs would

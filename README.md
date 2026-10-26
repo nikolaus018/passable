@@ -99,7 +99,17 @@ Songs load as a pipeline: while one is separated, the next is decoded (the 48 kH
 
 ## Checking a set
 
-`PassableTests/SetLab` builds a set from a list of songs and measures every transition (levels, both songs heard, doubled lows and voices, flams). Its measures come from Passable's own analysis, so a wrong beat grid looks fine to it. For a second opinion, have it write each transition out and run the audit, which tracks the songs and the rendered blends with Beat This! in PyTorch and says where two songs don't share a beat or a bar:
+The quick way is `passable-render`, the engine as a command-line tool (no app, no test host, no Core ML for songs the app has loaded once). It builds in about 15 s and renders a set's transitions in a few seconds:
+
+```sh
+swift build -c release
+.build/release/passable-render --out render-out song1.opus song2.opus song3.opus   # each transition as a WAV
+.build/release/passable-render --moves song1.opus song2.opus                       # every automated move, bar by bar
+.build/release/passable-render --seams song1.opus song2.opus                       # biggest change in a blend vs the songs' own
+.build/release/passable-render --fidelity song1.opus song2.opus                    # set vs the original file where a song plays alone
+```
+
+Songs play in the order given. `PassableTests/SetLab` builds a set from a list of songs and measures every transition (levels, both songs heard, doubled lows and voices, flams). Its measures come from Passable's own analysis, so a wrong beat grid looks fine to it. For a second opinion, have it write each transition out and run the audit, which tracks the songs and the rendered blends with Beat This! in PyTorch and says where two songs don't share a beat or a bar:
 
 ```sh
 TEST_RUNNER_PASSABLE_SET=songs.txt TEST_RUNNER_PASSABLE_SET_AUDIT=/tmp/audit \

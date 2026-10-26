@@ -77,10 +77,24 @@ final class TrackProcessor: @unchecked Sendable {
             progress(.decoding)
             let mix = try AudioIO.loadStereo(url: url)
             if ticket.isCancelled { throw CancellationError() }
-            let stems = try Self.separate(mix, progress: progress, isCancelled: { ticket.isCancelled })
+            var stems = try Self.separate(mix, progress: progress, isCancelled: { ticket.isCancelled })
+            StemResidual.redistribute(mix: mix, stems: &stems)
             for (kind, buffer) in stems {
                 try StemAudio.save(buffer, directory: directory, name: kind.rawValue)
             }
+            StemCache.markExact(directory)
+        } else if !StemCache.isExact(directory) {
+            // Separated before the stems were made to add up to the song:
+            // once, and what was derived from the old stems goes.
+            progress(.decoding)
+            let mix = try AudioIO.loadStereo(url: url)
+            var stems = try StemCache.loadStems(from: directory).mapValues { $0.copyStereo() }
+            StemResidual.redistribute(mix: mix, stems: &stems)
+            for (kind, buffer) in stems {
+                try StemAudio.save(buffer, directory: directory, name: kind.rawValue)
+            }
+            StemCache.forgetDerivedAudio(in: directory)
+            StemCache.markExact(directory)
         }
         let stems = try StemCache.loadStems(from: directory)
         let cached = StemCache.loadAnalysis(from: directory)
@@ -115,6 +129,10 @@ final class TrackProcessor: @unchecked Sendable {
                 let old = cached.structure
                 cached.structure = TrackStructure.measure(stems: stems, grid: cached.grid)
                 cached.structure?.setLines(old?.vocalLines, tried: old?.lyricsTried, grid: cached.grid)
+                StemCache.saveAnalysis(cached, to: directory)
+            }
+            if cached.structure != nil, cached.structure?.heardReference == nil {
+                cached.structure?.heardReference = TrackStructure.heardReference(stems: stems, grid: cached.grid)
                 StemCache.saveAnalysis(cached, to: directory)
             }
             // (Lines put on the grid another way: again, from the

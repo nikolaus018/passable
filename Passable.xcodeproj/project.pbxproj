@@ -30,6 +30,7 @@
 		37165790AA6BA6DA44CBE3F3 /* TrackAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2347CEEF14E7346534DC915 /* TrackAnalyzer.swift */; };
 		3A5B5668F93D8E6C008559EB /* HTDemucs.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 64A942CAB48C8DD5ED1A7DAE /* HTDemucs.mlpackage */; };
 		3EF733298906CFA3A55D16F0 /* Automation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5898144D4E96717801EEC24B /* Automation.swift */; };
+		449CE5BE059B32DCD8314DC2 /* StemResidual.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0C18BC3252B580A2A6B73C3 /* StemResidual.swift */; };
 		45170D78F28BA245E6F372E7 /* SetPack.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E1B704DA053ABB65522FC89 /* SetPack.swift */; };
 		4665C589CC9DED8EB3AFD45E /* SetPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D8665AF29BB0D1C52DA8B0B /* SetPlanner.swift */; };
 		47D6C330665303CF2A8FA78B /* PassableApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE6C44F5546EC863B0C936DF /* PassableApp.swift */; };
@@ -129,6 +130,7 @@
 		8FB901899286FC7C54821A07 /* Passable.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Passable.entitlements; sourceTree = "<group>"; };
 		977700D9FDD4CAB06C13E6D9 /* StemSeparator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StemSeparator.swift; sourceTree = "<group>"; };
 		9E1B704DA053ABB65522FC89 /* SetPack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetPack.swift; sourceTree = "<group>"; };
+		A0C18BC3252B580A2A6B73C3 /* StemResidual.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StemResidual.swift; sourceTree = "<group>"; };
 		A85F3A2C18D4CEA7EE7B1E6D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B00E4246EF6CEFCC25E06269 /* Passable.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Passable.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B1F00DF8AB6E58CE92F31935 /* PhoneMixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMixTests.swift; sourceTree = "<group>"; };
@@ -279,6 +281,7 @@
 			children = (
 				626F56B7CC69E50D409B8CB2 /* DemucsSTFT.swift */,
 				33A00403D498E07789E76097 /* StemCache.swift */,
+				A0C18BC3252B580A2A6B73C3 /* StemResidual.swift */,
 				977700D9FDD4CAB06C13E6D9 /* StemSeparator.swift */,
 			);
 			path = Separation;
@@ -486,6 +489,7 @@
 				CAEE19D81772DC0E77CC176F /* SetSession.swift in Sources */,
 				31D6144E118C96797209A45A /* SetView.swift in Sources */,
 				A04A7D184814164455B642EF /* StemCache.swift in Sources */,
+				449CE5BE059B32DCD8314DC2 /* StemResidual.swift in Sources */,
 				8BCAC83384BA4C243CB878CD /* StemSeparator.swift in Sources */,
 				E193BE23C5AF96BBC1E331E6 /* TempoEstimator.swift in Sources */,
 				326B0469D9BBD33F5856CD05 /* Theme.swift in Sources */,

@@ -28,6 +28,25 @@ enum StemCache {
         StemKind.allCases.allSatisfy { StemAudio.exists(directory: directory, name: $0.rawValue) }
     }
 
+    /// Whether the stems add up to the song (see `StemResidual`).
+    static func isExact(_ directory: URL) -> Bool {
+        FileManager.default.fileExists(atPath: directory.appendingPathComponent("exact.1").path)
+    }
+
+    static func markExact(_ directory: URL) {
+        FileManager.default.createFile(atPath: directory.appendingPathComponent("exact.1").path, contents: Data())
+    }
+
+    /// Renditions and waveform overviews made from the stems as they were.
+    static func forgetDerivedAudio(in directory: URL) {
+        let fm = FileManager.default
+        try? fm.removeItem(at: directory.appendingPathComponent("matched", isDirectory: true))
+        for item in (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        where item.lastPathComponent.contains(".peaks") {
+            try? fm.removeItem(at: item)
+        }
+    }
+
     static func loadStems(from directory: URL) throws -> [StemKind: StemAudio] {
         var stems: [StemKind: StemAudio] = [:]
         for kind in StemKind.allCases {

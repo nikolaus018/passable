@@ -8,6 +8,11 @@ struct TrackStructure: Codable, Equatable {
     var activity: [String: [Float]]
     /// Level of the whole track per bar, in dB (RMS, full scale = 0).
     var loudness: [Float] = []
+    /// How loud the track sounds when it's going: `referenceLoudness`
+    /// measured K-weighted (ITU-R BS.1770), as the ear weighs it. Plain RMS
+    /// is ruled by the sub-bass, so an 808 track read loud and was turned
+    /// down under a bright pop one. Optional: measured on load when missing.
+    var heardReference: Float?
     /// Per stem, per bar: level in dB, all of it and below 150 Hz. What a
     /// transition does to each stem (fades, filters, low kills) is judged
     /// from these before anything is rendered. Optional so structures
@@ -113,6 +118,40 @@ struct TrackStructure: Codable, Equatable {
         let from = max(0, bars.lowerBound), to = min(a.count, bars.upperBound)
         guard from < to else { return 0 }
         return a[from..<to].reduce(0, +) / Float(to - from)
+    }
+
+    /// `heardReference` of a song: the 80th percentile of its bars' level
+    /// through the BS.1770 K-weighting (a +4 dB shelf above 1.7 kHz and a
+    /// high-pass at 38 Hz), bars under -60 dB left out.
+    static func heardReference(stems: [StemKind: StemAudio], grid: BeatGrid) -> Float {
+        let sr = AudioIO.sampleRate
+        let count = stems.values.map(\.count).min() ?? 0
+        var shelf = Biquad(), pass = Biquad()
+        shelf.set(.highShelf(frequency: 1681.97, gainDB: 4.0), sampleRate: sr)
+        pass.set(.highPass(frequency: 38.135, q: 0.5003), sampleRate: sr)
+        var levels: [Float] = []
+        var bar = 0
+        while true {
+            let start = Int(grid.downbeat(bar) * sr), end = Int(grid.downbeat(bar + 1) * sr)
+            guard end <= count, end > start else { break }
+            bar += 1
+            guard start >= 0 else { continue }
+            let n = end - start
+            var l = [Float](repeating: 0, count: n), r = l
+            for stem in stems.values {
+                vDSP_vadd(l, 1, stem.left.pointer + start, 1, &l, 1, vDSP_Length(n))
+                vDSP_vadd(r, 1, stem.right.pointer + start, 1, &r, 1, vDSP_Length(n))
+            }
+            shelf.process(&l, &r, count: n)
+            pass.process(&l, &r, count: n)
+            var ml: Float = 0, mr: Float = 0
+            vDSP_measqv(l, 1, &ml, vDSP_Length(n))
+            vDSP_measqv(r, 1, &mr, vDSP_Length(n))
+            levels.append(10 * log10(max((ml + mr) / 2, 1e-9)))
+        }
+        let loud = levels.filter { $0 > -60 }.sorted()
+        guard !loud.isEmpty else { return -14 }
+        return loud[min(loud.count - 1, Int(Double(loud.count) * 0.8))]
     }
 
     static func measure(stems: [StemKind: StemAudio], grid: BeatGrid) -> TrackStructure {
@@ -233,6 +272,7 @@ struct TrackStructure: Codable, Equatable {
         structure.melodyChroma = stems[.other].map { chromaPerBar([$0], normalised: false) } ?? []
         structure.vocalSixteenthLevel = vocalLevels(parts: 4)
         structure.vocalChroma = stems[.vocals].map { chromaPerBar([$0], normalised: false) } ?? []
+        structure.heardReference = heardReference(stems: stems, grid: grid)
         return structure
     }
 

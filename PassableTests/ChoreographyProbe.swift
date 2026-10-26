@@ -82,6 +82,9 @@ final class ChoreographyProbe: XCTestCase {
         }
         func heard(_ side: DeckSide, _ stem: StemKind, _ t: Double) -> Bool { vol(side, stem, t) > 0.1 }
         let echo = preset == .echoOut
+        // (Parts switch on and off this far ahead of their beat, bars at
+        // the one-second bar made here: see `TransitionBuilder.switchLead`.)
+        let lead = TransitionBuilder.switchLead / 1
         let from = echo ? -Double(min(n, 8)) - 2 : -2.0
         let to = Double(n) + 6
         // Between the grid's lines: a cut takes a thousandth of a bar, and a
@@ -97,10 +100,10 @@ final class ChoreographyProbe: XCTestCase {
         while t < to {
             let inBlend = echo ? t > -Double(min(n, 8)) && t < 0 : t > 0 && t < Double(n)
             // Before B's entry B is silent, and A is as it was.
-            if t < (echo ? -Double(min(n, 8)) : 0) {
+            if t < (echo ? -Double(min(n, 8)) : 0) - lead {
                 for stem in StemKind.allCases where heard(.b, stem, t) { once("B heard before its entry (\(stem))") }
             }
-            if !echo && t < 0 {
+            if !echo && t < -lead {
                 for stem in StemKind.allCases where vol(.a, stem, t) < 0.99 { once("A not whole before the blend (\(stem))") }
             }
             // One bass line at a time.
@@ -139,7 +142,7 @@ final class ChoreographyProbe: XCTestCase {
             // hole nobody sings in (only where the caller didn't place A's
             // exit itself).
             if preset == .stemSwap, tag.hasSuffix("vout=nil"), t > 0, let entry = made.vocalEntry,
-               t < min(entry, swapBar(tag, n: n)) - 0.01, !heard(.a, .vocals, t), !heard(.b, .vocals, t) {
+               t < min(entry, swapBar(tag, n: n)) - 0.01 - lead, !heard(.a, .vocals, t), !heard(.b, .vocals, t) {
                 once("voice hole before B's voice or the swap")
             }
             // Two beats at different tempos.

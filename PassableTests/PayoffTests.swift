@@ -483,9 +483,9 @@ final class PayoffTests: XCTestCase {
         let lanes = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 1).lanes
         for stem in [StemKind.drums, .bass, .other] {
             XCTAssertEqual(value(lanes, .a, stem, bar: -0.9), 1)
-            XCTAssertEqual(value(lanes, .a, stem, bar: -0.13), 1)
+            XCTAssertEqual(value(lanes, .a, stem, bar: -0.15), 1)
             XCTAssertEqual(value(lanes, .a, stem, bar: -0.1), 0, accuracy: 0.01)
-            XCTAssertEqual(value(lanes, .b, stem, bar: -0.01), 0)
+            XCTAssertEqual(value(lanes, .b, stem, bar: -0.02), 0)
             XCTAssertEqual(value(lanes, .b, stem, bar: 0.01), 1)
         }
     }
@@ -900,10 +900,10 @@ final class PayoffTests: XCTestCase {
         XCTAssertEqual(plan.preset, .echoOut)
         XCTAssertTrue([1, 4, 8].contains(plan.bars))
         let lanes = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 4).lanes
-        XCTAssertEqual(value(lanes, .a, .drums, bar: -4.01), 1)
+        XCTAssertEqual(value(lanes, .a, .drums, bar: -4.02), 1)
         XCTAssertEqual(value(lanes, .a, .drums, bar: -1.99), 0, accuracy: 0.01)
         XCTAssertEqual(value(lanes, .a, .other, bar: -0.5), 1)
-        XCTAssertEqual(value(lanes, .b, .drums, bar: -0.01), 0)
+        XCTAssertEqual(value(lanes, .b, .drums, bar: -0.02), 0)
         XCTAssertEqual(value(lanes, .b, .drums, bar: 0.01), 1)
     }
 

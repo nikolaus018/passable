@@ -180,7 +180,9 @@ struct TransitionBuilder {
         builder.clearAll()
         builder.write(preset)
         builder.writeLoop()
+        builder.oneThrowAtATime()
         for (side, stem, from, to) in builder.silences { builder.silence(side, stem, from: from, to: to) }
+        builder.switchBeforeTheBeat()
         return Made(lanes: builder.lanes, rolls: builder.rolls, vocalExit: builder.vocalExit,
                     vocalEntry: builder.vocalEntry)
     }
@@ -244,6 +246,109 @@ struct TransitionBuilder {
             rolls.append(Roll(side: .a, stem: stem, start: from, end: start + Double(bars + 4) * barSeconds,
                               anchor: from - Double(loopBack) * barSeconds, length: Double(loop) * barSeconds,
                               seamless: true))
+        }
+    }
+
+    /// Bars within which two effect throws (an echo or reverb send opened
+    /// and closed again) count as at once.
+    static let throwSpacing = 1.5
+
+    /// One effect throw at a time: a DJ has one hand on the echo, and a
+    /// vocal echo, a reverb wash on the melody and a delay on the drums
+    /// landing on the same swap are heard as a splash of effects, not a
+    /// move. The voice's echo wins (it carries the words out), then the
+    /// drums', then the melody's reverb; the others sound dry.
+    private mutating func oneThrowAtATime() {
+        struct Throw { let lane: Int, parameter: LaneParameter, from: Double, to: Double, peak: Double, rank: Int }
+        let ranks: [(StemKind, LaneParameter)] = [(.vocals, .delay), (.vocals, .reverb), (.drums, .delay),
+                                                   (.drums, .reverb), (.other, .delay), (.other, .reverb),
+                                                   (.bass, .delay), (.bass, .reverb)]
+        var all: [Throw] = []
+        for (i, lane) in lanes.enumerated() {
+            for parameter in [LaneParameter.delay, .reverb] {
+                let points = lane[parameter].points
+                guard let rank = ranks.firstIndex(where: { $0 == (lane.stem, parameter) }) else { continue }
+                // A throw: from a closed send through any open points back
+                // to closed.
+                var k = 0
+                while k < points.count {
+                    guard points[k].value > 0.001 else { k += 1; continue }
+                    let first = max(0, k - 1)
+                    var last = k, peak = k
+                    while last < points.count && points[last].value > 0.001 {
+                        if points[last].value > points[peak].value { peak = last }
+                        last += 1
+                    }
+                    let end = min(last, points.count - 1)
+                    all.append(Throw(lane: i, parameter: parameter, from: points[first].time, to: points[end].time,
+                                     peak: points[peak].time, rank: rank * 2 + (lane.side == .a ? 0 : 1)))
+                    k = last + 1
+                }
+            }
+        }
+        var kept: [Throw] = []
+        for t in all.sorted(by: { $0.rank < $1.rank }) {
+            if kept.contains(where: { abs($0.peak - t.peak) < Self.throwSpacing * barSeconds }) {
+                lanes[t.lane][t.parameter].clear(t.from...t.to)
+            } else {
+                kept.append(t)
+            }
+        }
+    }
+
+    /// Seconds ahead of the beat that a part is switched on or off.
+    static let switchLead = 0.025
+    /// Seconds a bass line or a low band is switched over.
+    static let lowRamp = 0.008
+
+    /// A part switched on or off on a beat is switched `switchLead` ahead
+    /// of it. The grid puts a beat where its kick peaks, and a hit starts
+    /// some milliseconds before its peak (measured over a set: a median of
+    /// 6 ms, up to 20), so a part opened on the beat lost the start of its
+    /// first hit (a weak, clicky first kick on the swap), and one closed on
+    /// the beat let the first milliseconds of its next hit through (a click
+    /// that flams the swap). Ahead of the beat sits the tail of the last
+    /// hit, where a switch isn't heard.
+    private mutating func switchBeforeTheBeat() {
+        let lead = Self.switchLead
+        let tiny = 0.0015 * barSeconds + 1e-6
+        func onGrid(_ time: Double) -> Bool {
+            let sixteenths = (time - start) / barSeconds * 16
+            return abs(sixteenths - sixteenths.rounded()) * barSeconds / 16 < 0.003
+        }
+        for i in lanes.indices {
+            for parameter in [LaneParameter.volume, .filter, .low, .mid, .high] {
+                var points = lanes[i][parameter].points
+                var moved = false
+                for k in points.indices.dropFirst() where abs(points[k].value - points[k - 1].value) > 0.05 {
+                    let ramp = points[k].time - points[k - 1].time <= tiny
+                    let held = points[k - 1].curve == .hold
+                    guard ramp || held else { continue }
+                    // Where the step is heard: a short ramp from its first
+                    // point, a held value at the point it jumps to.
+                    let at = ramp ? points[k - 1].time : points[k].time
+                    guard onGrid(at) else { continue }
+                    if ramp {
+                        let floor = k >= 2 ? points[k - 2].time + 1e-6 : -Double.infinity
+                        guard points[k - 1].time - lead > floor else { continue }
+                        points[k - 1].time -= lead
+                        points[k].time -= lead
+                        // Low notes ring through the beat: switched in 2 ms,
+                        // a 50 Hz wave clicks. 8 ms doesn't, and is still a
+                        // cut to the ear.
+                        if lanes[i].stem == .bass || parameter == .low {
+                            points[k - 1].time = max(floor, min(points[k - 1].time, points[k].time - Self.lowRamp))
+                        }
+                    } else {
+                        guard points[k].time - lead > points[k - 1].time + 1e-6 else { continue }
+                        points[k].time -= lead
+                    }
+                    moved = true
+                }
+                guard moved else { continue }
+                lanes[i][parameter].removeAll()
+                for p in points { lanes[i][parameter].insert(p) }
+            }
         }
     }
 

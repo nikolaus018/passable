@@ -11,3 +11,5 @@ Passable/Resources/BeatThis.mlpackage/
 tools/convert-beats/.venv/
 tools/convert-beats/fixtures/
 __pycache__/
+.build/
+render-out/
