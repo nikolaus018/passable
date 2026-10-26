@@ -20,7 +20,7 @@ while !args.isEmpty {
     case "--whole": whole = true
     case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry": break
     case "--order": ordered = true
-    case "--detail", "--shakes", "--cut-cost": _ = args.removeFirst()
+    case "--detail", "--shakes", "--cut-cost", "--clash-cost": _ = args.removeFirst()
     case "--list":
         let text = try String(contentsOfFile: args.removeFirst(), encoding: .utf8)
         songs += text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -52,6 +52,7 @@ guard songs.count >= 2 else { fputs("need at least two songs\n", stderr); exit(2
 func seconds(_ since: Date) -> String { String(format: "%.1f s", Date().timeIntervalSince(since)) }
 
 if let k = CommandLine.arguments.firstIndex(of: "--cut-cost") { MixMath.cutCost = Double(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--clash-cost") { MixMath.clashCost = Double(CommandLine.arguments[k + 1])! }
 
 // Songs not separated yet need the models: the installed app's.
 ModelLocation.directory = URL(fileURLWithPath: "/Applications/Passable.app/Contents/Resources")
@@ -162,7 +163,7 @@ if CommandLine.arguments.contains("--tempos") {
 if ordered {
     // As the app's Auto-Order does it.
     let analyses = tracks.map(\.loaded.analysis)
-    let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: tracks.map(\.loaded)), remembered: !CommandLine.arguments.contains("--cut-cost"))
+    let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: tracks.map(\.loaded)), remembered: true)
     let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
     let shakes = CommandLine.arguments.firstIndex(of: "--shakes").map { Int(CommandLine.arguments[$0 + 1])! }
     let order = SetOrdering.order(costs, washOuts: washOuts, energies: energies, shakes: shakes)

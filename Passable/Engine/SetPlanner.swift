@@ -57,6 +57,13 @@ enum MixMath {
     /// passable-render's trials.
     nonisolated(unsafe) static var cutCost = 15.0
 
+    /// What a pair whose keys clash (melodies swap, never layer) costs
+    /// the order on top. On the 66-song set, with cuts at 15: at 1.2, 16
+    /// clashing swaps; at 2.5, 11; at 3, 9 with the smallest jumps (0.73 dB
+    /// mean), fewest thin blends (5) and dips (17); at 4 a cut comes back.
+    /// Variable only for passable-render's trials.
+    nonisolated(unsafe) static var clashCost = 3.0
+
     /// Up to this (each song no more than 4 % off its own tempo) a blend
     /// may run long. Past it the blend is a quick one: both songs are off
     /// their own tempo through it, which is heard the longer it lasts.
@@ -378,7 +385,7 @@ struct PairPlan: Equatable {
         // Clashing songs can't blend, only swap: next to each other they
         // sound like two songs in a row. (A Wash Out never plays the two
         // together, and is priced as what it is above.)
-        if keysClash, preset != .echoOut { cost += 1.2 }
+        if keysClash, preset != .echoOut { cost += MixMath.clashCost }
         // Nor can a blend where placement already knows the two are hardly
         // heard together (a short one, B's intro too thin under A): as much
         // two songs in a row as a clash, so priced like one.
@@ -408,7 +415,7 @@ enum PairCosts {
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
     static let planner = "8"
-    static var version: String { "\(planner)-cut\(MixMath.cutCost)" }
+    static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
     /// it, not carried until the file fills up.

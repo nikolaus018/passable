@@ -335,7 +335,7 @@ final class SetSession: ObservableObject {
             guard let a, let b else { return 0 }
             let stretch = abs(MixMath.rate(a: a.grid.bpm, b: b.grid.bpm) - 1) * 100
             return (MixMath.preset(a, b) == .echoOut ? MixMath.cutCost : 0.05 * stretch)
-                + (MixMath.keysClash(a.key, b.key) ? 1.2 : 0)
+                + (MixMath.keysClash(a.key, b.key) ? MixMath.clashCost : 0)
         }
         let last = min(songs.count, earliest + requestWindow - 1)
         guard earliest <= last else { return min(earliest, songs.count) }
