@@ -891,6 +891,25 @@ final class PayoffTests: XCTestCase {
         XCTAssertEqual(Set(SetOrdering.order(big)), Set(0..<16))
     }
 
+    /// A request goes where it fits on both sides, soon: not between two
+    /// songs it can't share a beat with when a place a song or two later
+    /// takes it in and out with a beat.
+    func testARequestGoesWhereItFitsBothWays() {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true)
+        let slow = song(scale: 0, key: c, bpm: 100), fast = song(scale: 0, key: c, bpm: 130)
+        // Playing: slow, slow, fast, fast, slow; the request is fast. It
+        // goes where the set already changes tempo (no cut added), not
+        // between the two slow songs (a cut in and a cut out).
+        let set: [TrackAnalysis?] = [slow, slow, fast, fast, slow]
+        XCTAssertEqual(SetSession.requestSlot(fast, between: set, from: 1), 2)
+        // Already between two that fit: right away.
+        XCTAssertEqual(SetSession.requestSlot(slow, between: set, from: 1), 1)
+        // Fits nowhere: where it costs one cut (the set's end, in reach),
+        // not two.
+        XCTAssertEqual(SetSession.requestSlot(song(scale: 0, key: c, bpm: 160), between: [slow, slow, slow], from: 1), 3)
+        XCTAssertEqual(SetSession.requestSlot(song(scale: 0, key: c, bpm: 160), between: [slow, slow, slow, slow, slow, slow], from: 1), 1)
+    }
+
     /// Two downloads of one record are the same song; songs that only
     /// share a key, or the notes at another tempo, are not.
     func testTheSameRecordIsOneSong() {

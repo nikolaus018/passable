@@ -321,9 +321,31 @@ final class SetSession: ObservableObject {
 
     /// Whether `b` can follow `a` on a shared beat: anything but a pair
     /// whose tempos are too far apart to match.
-    private func mixes(_ a: TrackAnalysis?, _ b: TrackAnalysis) -> Bool {
-        guard let a else { return true }
-        return MixMath.preset(a, b) != .echoOut
+    /// Songs a request may wait for a better place to go in.
+    nonisolated static let requestWindow = 4
+
+    /// Where a request goes: of the first `requestWindow` places from
+    /// `earliest`, the one it fits in best, on both sides (a place whose
+    /// song before shares its beat but whose song after doesn't still
+    /// gives a cut out of it), priced as the order prices pairs, less what
+    /// the two neighbours lose by no longer meeting, and a little for each
+    /// song it waits. `songs[k]` is the song at place k.
+    nonisolated static func requestSlot(_ request: TrackAnalysis, between songs: [TrackAnalysis?], from earliest: Int) -> Int {
+        func price(_ a: TrackAnalysis?, _ b: TrackAnalysis?) -> Double {
+            guard let a, let b else { return 0 }
+            let stretch = abs(MixMath.rate(a: a.grid.bpm, b: b.grid.bpm) - 1) * 100
+            return (MixMath.preset(a, b) == .echoOut ? MixMath.cutCost : 0.05 * stretch)
+                + (MixMath.keysClash(a.key, b.key) ? 1.2 : 0)
+        }
+        let last = min(songs.count, earliest + requestWindow - 1)
+        guard earliest <= last else { return min(earliest, songs.count) }
+        return (earliest...last).min { s, t in
+            func cost(_ k: Int) -> Double {
+                let before = k > 0 ? songs[k - 1] : nil, after = k < songs.count ? songs[k] : nil
+                return price(before, request) + price(request, after) - price(before, after) + 1.0 * Double(k - earliest)
+            }
+            return cost(s) < cost(t)
+        }!
     }
 
     /// The first place a requested song may go: after the song that's
@@ -356,7 +378,7 @@ final class SetSession: ObservableObject {
             return
         }
         let earliest = earliestRequestSlot()
-        let slot = (earliest...items.count).first { mixes(items[$0 - 1].analysis, loaded.analysis) } ?? earliest
+        let slot = Self.requestSlot(loaded.analysis, between: items.map(\.analysis), from: earliest)
         items.insert(item, at: slot)
         placing = (item.id, 2)
         requestNote = "“\(item.title)” plays after “\(items[slot - 1].title)”"
