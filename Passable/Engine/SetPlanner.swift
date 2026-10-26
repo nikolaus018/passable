@@ -49,11 +49,13 @@ enum MixMath {
     static let maxStretch = 0.10
 
     /// What a cut or Wash Out costs the set's order, against a blend's
-    /// roughly -2 (great) to +1 (weak): a last resort. (At 1.5 a 68-song
-    /// set took 4 cuts where 3 would do; at 3 it takes 3, with 3 fewer
-    /// blends where the two songs are hardly heard together; 5 gives the
-    /// same order of cuts.) Variable only for passable-render's trials.
-    nonisolated(unsafe) static var cutCost = 3.0
+    /// roughly -2 (great) to +1 (weak): a cut only where no order of the
+    /// songs carries a beat across, never to buy smoother blends elsewhere.
+    /// On a 66-song set: at 1.5, 4 cuts; at 3, 3; at 8, 2; at 15, 1 (the
+    /// one song with no steady tempo), the blends as good as at 8 (a few
+    /// more clashing-key swaps, fewer crowded bars). Variable only for
+    /// passable-render's trials.
+    nonisolated(unsafe) static var cutCost = 15.0
 
     /// Up to this (each song no more than 4 % off its own tempo) a blend
     /// may run long. Past it the blend is a quick one: both songs are off
