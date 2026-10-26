@@ -18,7 +18,7 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--limiter": break
     case "--order": ordered = true
     case "--detail": _ = args.removeFirst()
     case "--list":
@@ -202,6 +202,49 @@ if let k = CommandLine.arguments.firstIndex(of: "--detail"), let which = Int(Com
     for (side, i) in [("A", t.from), ("B", t.to)] {
         row(side) { k, _ in k == i }
         for stem in StemKind.laneOrder { row("  \(side) \(stem.rawValue)") { k, s in k == i && s == stem } }
+    }
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--limiter") {
+    // How hard the master limiter works: the set rendered 12 dB down (the
+    // limiter idle), then the limiter's own gain computed on it at full
+    // level. Share of time it pulls the level down, inside transitions and
+    // outside.
+    let n = Int(mix.length * sr)
+    let quiet = mix.snapshot(masterGain: 0.25)
+    let renderer = MixRenderer(snapshot: quiet)
+    renderer.setPositionImmediately(0)
+    let block = 1 << 16
+    var l = [Float](repeating: 0, count: block), r = l
+    let ceiling: Float = 0.966, release = Float(exp(-1 / (0.15 * sr)))
+    var envelope: Float = 0
+    var counts = [[Int]](repeating: [0, 0, 0, 0], count: 2)  // [inside/outside][total, >0.5 dB, >1 dB, >3 dB]
+    var worst = [0.0, 0.0]
+    var done = 0
+    var spans = mix.transitions.map { (Int(($0.begins - $0.barSeconds) * sr), Int(($0.end + $0.barSeconds) * sr)) }
+    spans.sort { $0.0 < $1.0 }
+    while done < n {
+        let count = min(block, n - done)
+        renderer.render(left: &l, right: &r, count: count)
+        for k in 0..<count {
+            let peak = 4 * max(abs(l[k]), abs(r[k]))
+            envelope = peak > envelope ? peak : envelope * release + peak * (1 - release)
+            let gr = envelope > ceiling ? 20 * log10(Double(envelope / ceiling)) : 0
+            let f = done + k
+            let side = spans.contains { f >= $0.0 && f < $0.1 } ? 0 : 1
+            counts[side][0] += 1
+            if gr > 0.5 { counts[side][1] += 1 }
+            if gr > 1 { counts[side][2] += 1 }
+            if gr > 3 { counts[side][3] += 1 }
+            worst[side] = max(worst[side], gr)
+        }
+        done += count
+    }
+    for (side, name) in [(0, "in transitions"), (1, "elsewhere")] {
+        let c = counts[side], t = Double(max(1, c[0]))
+        print(String(format: "%@: limiting over 0.5 dB %.1f %% of the time, over 1 dB %.1f %%, over 3 dB %.2f %%, most %.1f dB",
+                     name, 100 * Double(c[1]) / t, 100 * Double(c[2]) / t, 100 * Double(c[3]) / t, worst[side]))
     }
     exit(0)
 }
