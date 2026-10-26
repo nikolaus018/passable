@@ -49,6 +49,40 @@ final class MixTests: XCTestCase {
         XCTAssertLessThan(gains.map(\.1).min()!, 0.33)
     }
 
+    /// A tempo-matched copy saved as a clone of its song (sped up: the
+    /// copy is the song further on; slowed down: it starts before the
+    /// song's first frame) reads back exactly as it was rendered.
+    func testRenditionsShareTheSongsFile() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let n = 44_100 * 30
+        let song = StereoBuffer(left: (0..<n).map { Float(sin(Double($0) * 0.01)) }, right: (0..<n).map { Float(cos(Double($0) * 0.013)) })
+        try StemAudio.save(song, directory: dir, name: "other")
+        let source = try StemAudio.load(directory: dir, name: "other")
+        for offset in [12_345, -23_456] {
+            // Stretched head and tail around an untouched run, shifted.
+            let total = n - 30_000
+            var copy = StereoBuffer(count: total)
+            for y in 0..<total {
+                let x = y + offset
+                let untouched = y > 50_000 && y < total - 40_000 && x >= 0 && x < n
+                copy.left[y] = untouched ? song.left[x] : Float(y % 97) / 97
+                copy.right[y] = untouched ? song.right[x] : Float(y % 89) / 89
+            }
+            let out = dir.appendingPathComponent("r\(offset)")
+            try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+            let shared = try StemAudio.saveRendition(copy, source: source, sourceDirectory: dir, sourceName: "other",
+                                                     offset: offset, directory: out, name: "other")
+            XCTAssertTrue(shared)
+            let back = try StemAudio.load(directory: out, name: "other")
+            XCTAssertEqual(back.count, total)
+            for y in stride(from: 0, to: total, by: 1) where back.left.pointer[y] != copy.left[y] || back.right.pointer[y] != copy.right[y] {
+                XCTFail("offset \(offset): frame \(y) differs"); break
+            }
+        }
+    }
+
     func testEnvelopeKeepsPointsSorted() {
         var e = Envelope()
         let a = AutomationPoint(time: 1, value: 0.2)

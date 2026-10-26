@@ -18,7 +18,7 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry": break
     case "--order": ordered = true
     case "--detail", "--shakes", "--cut-cost": _ = args.removeFirst()
     case "--list":
@@ -377,6 +377,32 @@ if CommandLine.arguments.contains("--limiter") {
         print(String(format: "%@: limiting over 0.5 dB %.1f %% of the time, over 1 dB %.1f %%, over 3 dB %.2f %%, most %.1f dB",
                      name, 100 * Double(c[1]) / t, 100 * Double(c[2]) / t, 100 * Double(c[3]) / t, worst[side]))
     }
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--renditions") {
+    // Every tempo-matched copy as saved, against the stretcher run again in
+    // memory: they must be the same to the bit. And the room they take.
+    var same = 0, differ = 0, shared = 0, bytes = 0, full = 0
+    for t in mix.tracks {
+        guard let m = t.matched, !t.map.isIdentity else { continue }
+        for kind in StemKind.allCases {
+            let fresh = TimeStretcher.process(t.loaded.stems[kind]!.copyStereo(), map: m.plan.map,
+                                              semitones: kind == .drums ? 0 : m.plan.semitones, percussive: kind == .drums)
+            let saved = m.stems[kind]!
+            let ok = fresh.count == saved.count && (0..<fresh.count).allSatisfy {
+                fresh.left[$0].bitPattern == saved.left.pointer[$0].bitPattern && fresh.right[$0].bitPattern == saved.right.pointer[$0].bitPattern
+            }
+            if ok { same += 1 } else { differ += 1; print("DIFFERS: \(SongTitle.of(t.url)) \(kind.rawValue)") }
+            full += 2 * fresh.count * 4
+        }
+        let dir = t.loaded.directory.appendingPathComponent(TrackProcessor.renditionFolder).appendingPathComponent(m.plan.cacheName)
+        if FileManager.default.fileExists(atPath: dir.appendingPathComponent("drums.layout").path) { shared += 1 }
+        for case let f as URL in FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.totalFileAllocatedSizeKey]) ?? FileManager.DirectoryEnumerator() {
+            bytes += (try? f.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize ?? 0) ?? 0
+        }
+    }
+    print("renditions: \(same) stems identical, \(differ) differ; \(shared) songs share the song's file; on disk \(bytes / 1_000_000) MB of \(full / 1_000_000) MB written whole")
     exit(0)
 }
 

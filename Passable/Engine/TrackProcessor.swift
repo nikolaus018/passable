@@ -278,7 +278,10 @@ final class TrackProcessor: @unchecked Sendable {
                         let matched = TimeStretcher.process(loaded.stems[kind]!.copyStereo(), map: plan.map,
                                                             semitones: shift, percussive: kind == .drums)
                         if ticket.isCancelled { throw CancellationError() }
-                        try StemAudio.save(matched, directory: staging, name: kind.rawValue)
+                        // (Sharing the song's file where it plays unchanged.)
+                        try StemAudio.saveRendition(matched, source: loaded.stems[kind]!, sourceDirectory: loaded.directory,
+                                                    sourceName: kind.rawValue, offset: plan.semitones == 0 ? plan.map.tailOffset : nil,
+                                                    directory: staging, name: kind.rawValue)
                     } catch {
                         box.lock.lock(); box.error = box.error ?? error; box.lock.unlock()
                     }
