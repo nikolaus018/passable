@@ -404,8 +404,11 @@ struct PairPlan: Equatable {
 /// 3,306 of them. Keyed by each song's analysis, so a song analysed again
 /// (or a planner that prices differently: `version`) is priced again.
 enum PairCosts {
-    /// Bumped whenever planning or pricing changes.
-    static let version = "7"
+    /// Bumped whenever planning or pricing changes; the cut price is part
+    /// of it (0.1.5 raised it from 3 to 15 under the same version, and
+    /// Auto-Order went on reading prices made at 3).
+    static let planner = "8"
+    static var version: String { "\(planner)-cut\(MixMath.cutCost)" }
 
     /// One file per version: prices of another planner are dropped with
     /// it, not carried until the file fills up.
@@ -1025,7 +1028,7 @@ struct SetMix: @unchecked Sendable {
         /// time (and the second renditions replaced the first, so it all
         /// happened again next launch): ~50 s for a 66-song set.
         private static var url: URL {
-            StemCache.root.deletingLastPathComponent().appendingPathComponent("learned-pairs-\(PairCosts.version).json")
+            StemCache.root.deletingLastPathComponent().appendingPathComponent("learned-pairs-\(PairCosts.planner).json")
         }
         private static let lock = NSLock()
 
@@ -1046,6 +1049,12 @@ struct SetMix: @unchecked Sendable {
             let encoder = JSONEncoder()
             encoder.outputFormatting = .sortedKeys
             try? encoder.encode(all).write(to: url, options: .atomic)
+            // (What another planner learnt goes with it.)
+            let folder = url.deletingLastPathComponent()
+            for old in (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+            where old.lastPathComponent.hasPrefix("learned-pairs") && old.lastPathComponent != url.lastPathComponent {
+                try? FileManager.default.removeItem(at: old)
+            }
         }
     }
 
