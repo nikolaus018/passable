@@ -18,7 +18,7 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry": break
     case "--order": ordered = true
     case "--detail", "--shakes", "--cut-cost": _ = args.removeFirst()
     case "--list":
@@ -377,6 +377,24 @@ if CommandLine.arguments.contains("--limiter") {
         print(String(format: "%@: limiting over 0.5 dB %.1f %% of the time, over 1 dB %.1f %%, over 3 dB %.2f %%, most %.1f dB",
                      name, 100 * Double(c[1]) / t, 100 * Double(c[2]) / t, 100 * Double(c[3]) / t, worst[side]))
     }
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--aac-peaks") {
+    // The set as the phone gets it (AAC 256 kbps), decoded again: samples
+    // over full scale are clipped on playback.
+    let from = 0.0, seconds = min(mix.length, 900)
+    let url = outDir.appendingPathComponent("peaks.m4a")
+    try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+    try Exporter.render(snapshot: snapshot, range: Int(from * sr)..<Int((from + seconds) * sr), tail: 0, to: url) { _ in }
+    let back = try AudioIO.loadStereo(url: url)
+    var over = 0, top: Float = 0
+    for k in 0..<back.count {
+        let p = max(abs(back.left[k]), abs(back.right[k]))
+        top = max(top, p)
+        if p > 1 { over += 1 }
+    }
+    print(String(format: "AAC of %.0f s: peak %.2f dBFS, %d samples over full scale", seconds, 20 * log10(Double(top)), over))
     exit(0)
 }
 

@@ -71,7 +71,9 @@ enum Exporter {
     /// `tail` extra seconds so reverb and echo ring out instead of being cut.
     static func render(snapshot: MixSnapshot, range: Range<Int>, tail: Double, to url: URL,
                        progress: (Double) -> Void) throws {
-        let renderer = MixRenderer(snapshot: snapshot)
+        // (A lossy file keeps a margin under full scale: see `Limiter`.)
+        let lossy = url.pathExtension.lowercased() == "m4a"
+        let renderer = MixRenderer(snapshot: snapshot, ceiling: lossy ? Limiter.lossyCeiling : Limiter.playbackCeiling)
         renderer.setPositionImmediately(range.lowerBound)
         let block = 4096
         let writer = try AudioWriter(url: url, blockSize: block)

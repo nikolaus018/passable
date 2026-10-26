@@ -182,7 +182,13 @@ struct PingPongDelay {
 struct Limiter {
     static let lookahead = 88  // 2 ms
     private let release: Float
-    private let ceiling: Float = 0.966
+    private let ceiling: Float
+    /// -0.3 dBFS: for playback.
+    static let playbackCeiling: Float = 0.966
+    /// -1.2 dBFS: for a file coded lossily (AAC), whose decoder overshoots
+    /// the samples it was given (a set's AAC peaked at +0.4 dBFS from
+    /// -0.3), the usual -1 dB true-peak margin.
+    static let lossyCeiling: Float = 0.871
     private var delayL: [Float], delayR: [Float]
     /// Gain each input frame needs; the least over each window of them;
     /// those averaged (see `process`).
@@ -193,7 +199,8 @@ struct Limiter {
     private var leastSum: Float
     private var gain: Float = 1
 
-    init(sampleRate: Double) {
+    init(sampleRate: Double, ceiling: Float = Limiter.playbackCeiling) {
+        self.ceiling = ceiling
         release = Float(exp(-1 / (0.15 * sampleRate)))
         let n = Self.lookahead + 1
         delayL = [Float](repeating: 0, count: n)

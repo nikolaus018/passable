@@ -116,11 +116,11 @@ final class MixRenderer: @unchecked Sendable {
     private var publishedPosition = 0
     private var retired: [MixSnapshot] = []
 
-    init(snapshot: MixSnapshot = .empty) {
+    init(snapshot: MixSnapshot = .empty, ceiling: Float = Limiter.playbackCeiling) {
         self.snapshot = snapshot
         reverb = Reverb(sampleRate: sampleRate)
         delay = PingPongDelay(sampleRate: sampleRate)
-        limiter = Limiter(sampleRate: sampleRate)
+        limiter = Limiter(sampleRate: sampleRate, ceiling: ceiling)
         retired.reserveCapacity(256)
         // Sized up front (four lanes a song, sets of up to 128 songs) so no
         // real snapshot makes the render thread allocate.
