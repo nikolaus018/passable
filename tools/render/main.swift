@@ -18,7 +18,7 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry": break
     case "--order": ordered = true
     case "--detail", "--shakes", "--cut-cost": _ = args.removeFirst()
     case "--list":
@@ -30,6 +30,22 @@ while !args.isEmpty {
         exit(0)
     default: songs.append(URL(fileURLWithPath: a))
     }
+}
+if CommandLine.arguments.contains("--prune-dry") {
+    // What the app's launch would clear from the cache (nothing is deleted).
+    let paths = UserDefaults(suiteName: "com.nikolausmarek.Passable")?.stringArray(forKey: "setTracks") ?? []
+    let keeping = paths.map { URL(fileURLWithPath: $0) } + MusicTools.libraryFiles()
+    let gone = StemCache.prune(keeping: keeping, dryRun: true)
+    var bytes = 0
+    for dir in gone {
+        for case let f as URL in FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey]) ?? FileManager.DirectoryEnumerator() {
+            bytes += (try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) ?? 0
+        }
+    }
+    let kept = Set(keeping.compactMap { try? StemCache.folder(for: $0).lastPathComponent })
+    print("keeping \(keeping.count) songs' folders (\(kept.count) found); would clear \(gone.count) folders, \(bytes / 1_000_000_000) GB")
+    print("set songs whose folder would go: \(paths.filter { p in gone.contains { (try? StemCache.folder(for: URL(fileURLWithPath: p)).lastPathComponent) == $0.lastPathComponent } }.count)")
+    exit(0)
 }
 guard songs.count >= 2 else { fputs("need at least two songs\n", stderr); exit(2) }
 

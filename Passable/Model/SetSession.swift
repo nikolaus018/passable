@@ -85,7 +85,12 @@ final class SetSession: ObservableObject {
 
     /// Brings back the set from the last launch, in its saved order.
     func restore() {
-        guard persists, items.isEmpty, let paths = UserDefaults.standard.stringArray(forKey: Self.storageKey) else { return }
+        guard persists else { return }
+        let paths = UserDefaults.standard.stringArray(forKey: Self.storageKey) ?? []
+        // Songs long gone off the disk's cache, beside the music, once a launch.
+        let keeping = paths.map { URL(fileURLWithPath: $0) } + MusicTools.libraryFiles()
+        DispatchQueue.global(qos: .utility).async { StemCache.prune(keeping: keeping) }
+        guard items.isEmpty, !paths.isEmpty else { return }
         add(paths.map { URL(fileURLWithPath: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) })
         needsOrdering = false
         unplaced = []

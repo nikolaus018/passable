@@ -16,12 +16,49 @@ enum StemCache {
     }()
 
     static func directory(for url: URL) throws -> URL {
+        let dir = try folder(for: url)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// `directory(for:)` without making it.
+    static func folder(for url: URL) throws -> URL {
         let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         let identity = "\(version)|\(url.standardizedFileURL.path)|\(values.fileSize ?? 0)|\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)"
         let digest = SHA256.hash(data: Data(identity.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
-        let dir = root.appendingPathComponent(digest, isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+        return root.appendingPathComponent(digest, isDirectory: true)
+    }
+
+    /// A song's folder was just used (see `prune`).
+    static func markUsed(_ directory: URL) {
+        FileManager.default.createFile(atPath: directory.appendingPathComponent("used").path, contents: Data())
+    }
+
+    /// Days a song's folder is kept unused when its song isn't in `keeping`.
+    static let unusedDays = 14.0
+
+    /// Frees the disk of songs that are gone: every song ever loaded keeps
+    /// its four stems (~400 MB) and a tempo-matched copy of them, and
+    /// nothing ever removed them, so songs deleted long ago still held most
+    /// of 200 GB. A folder goes when its song isn't one of `keeping` (the
+    /// library and the set) and it hasn't been used for `unusedDays`; one
+    /// that comes back is separated again.
+    @discardableResult
+    static func prune(keeping: [URL], dryRun: Bool = false) -> [URL] {
+        var gone: [URL] = []
+        let fm = FileManager.default
+        let keep = Set(keeping.compactMap { try? folder(for: $0).lastPathComponent })
+        let cutoff = Date().addingTimeInterval(-unusedDays * 86_400)
+        for dir in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        where !keep.contains(dir.lastPathComponent) {
+            let marks = ["used", "exact.1", "analysis.json", ""].map { dir.appendingPathComponent($0) }
+            let last = marks.compactMap { (try? fm.attributesOfItem(atPath: $0.path))?[.modificationDate] as? Date }.max()
+            if let last, last < cutoff {
+                gone.append(dir)
+                if !dryRun { try? fm.removeItem(at: dir) }
+            }
+        }
+        return gone
     }
 
     static func hasStems(in directory: URL) -> Bool {

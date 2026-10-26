@@ -78,6 +78,7 @@ final class TrackProcessor: @unchecked Sendable {
         let song = Self.songLock(directory)
         song.lock()
         defer { song.unlock() }
+        StemCache.markUsed(directory)
         if !StemCache.hasStems(in: directory) {
             progress(.decoding)
             let mix = try AudioIO.loadStereo(url: url)
