@@ -891,6 +891,16 @@ final class PayoffTests: XCTestCase {
         XCTAssertEqual(Set(SetOrdering.order(big)), Set(0..<16))
     }
 
+    /// Two downloads of one record are the same song; songs that only
+    /// share a key, or the notes at another tempo, are not.
+    func testTheSameRecordIsOneSong() {
+        let c = MusicalKey(tonicPitchClass: 0, isMajor: true), g = MusicalKey(tonicPitchClass: 7, isMajor: true)
+        XCTAssertTrue(SetOrdering.sameRecording(song(scale: 0, key: c, bpm: 120), song(scale: 0, key: c, bpm: 120.2)))
+        XCTAssertFalse(SetOrdering.sameRecording(song(scale: 0, key: c, bpm: 120), song(scale: 0, key: c, bpm: 123)))
+        XCTAssertFalse(SetOrdering.sameRecording(song(scale: 0, key: c, bpm: 120), song(scale: 7, key: g, bpm: 120)))
+        XCTAssertFalse(SetOrdering.sameRecording(song(scale: 0, key: c, bpm: 120), song(scale: 2, key: c, bpm: 120)))
+    }
+
     /// A Wash Out's bridge comes in two lengths or a cut, and the plan says which.
     func testAWashOutPicksItsBridge() {
         let c = MusicalKey(tonicPitchClass: 0, isMajor: true)

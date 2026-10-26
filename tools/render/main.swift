@@ -18,7 +18,7 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--limiter", "--tempos", "--order-only", "--scores", "--measures": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins": break
     case "--order": ordered = true
     case "--detail", "--shakes", "--cut-cost": _ = args.removeFirst()
     case "--list":
@@ -52,6 +52,43 @@ for url in songs {
     if Date().timeIntervalSince(clock) > 5 { print("  \(tracks.count)/\(songs.count) \(SongTitle.of(url)) (\(seconds(clock)))") }
 }
 print("loaded \(tracks.count) songs in \(seconds(clock))")
+// As the app does: a second copy of a song in the set plays once.
+do {
+    var kept: [(url: URL, loaded: TrackProcessor.Loaded)] = []
+    for t in tracks {
+        if let twin = kept.first(where: { SetOrdering.sameRecording($0.loaded.analysis, t.loaded.analysis) }) {
+            print("left out \(SongTitle.of(t.url)): the same song as \(SongTitle.of(twin.url))")
+        } else {
+            kept.append(t)
+        }
+    }
+    tracks = kept
+}
+if CommandLine.arguments.contains("--twins") {
+    // Pairs of songs that may be the same recording: tempo, key and the
+    // song's chord colour over its whole length.
+    let a = tracks.map(\.loaded.analysis)
+    func profile(_ t: TrackAnalysis) -> [Float] {
+        guard let c = t.structure?.harmonyChroma ?? t.structure?.barChroma, !c.isEmpty else { return [] }
+        var p = [Float](repeating: 0, count: 12)
+        for bar in c { for k in 0..<min(12, bar.count) { p[k] += bar[k] } }
+        let norm = sqrt(p.reduce(0) { $0 + $1 * $1 })
+        return norm > 0 ? p.map { $0 / norm } : p
+    }
+    let profiles = a.map(profile)
+    var rows: [(Double, String)] = []
+    for i in a.indices { for j in a.indices where j > i {
+        guard profiles[i].count == 12, profiles[j].count == 12 else { continue }
+        let sim = Double(zip(profiles[i], profiles[j]).reduce(0) { $0 + $1.0 * $1.1 })
+        let tempo = abs(a[i].grid.bpm / a[j].grid.bpm - 1)
+        rows.append((sim, String(format: "chroma %.4f tempo %.1f%% key %@/%@ length %.0f/%.0f s  %@ | %@", sim, tempo * 100,
+                                 a[i].key.camelotCode, a[j].key.camelotCode, a[i].duration, a[j].duration,
+                                 SongTitle.of(tracks[i].url), SongTitle.of(tracks[j].url))))
+    } }
+    for r in rows.sorted(by: { $0.0 > $1.0 }).prefix(12) { print(r.1) }
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--measures") {
     // The per-bar measures placement scores with, largest value per song:
     // each should stay within about 0…1.
@@ -440,7 +477,7 @@ if CommandLine.arguments.contains("--steps") {
 if CommandLine.arguments.contains("--report") {
     // Everything that can be measured about each transition, and the set's
     // totals: what a change to the planner is judged by.
-    struct Row { var seam = 0.0, excess = 0.0, hole = 0.0, together = 0, bars = 0, dip = 0.0, busy = 0, moves = 0 }
+    struct Row { var dipAt = "", seam = 0.0, excess = 0.0, hole = 0.0, together = 0, bars = 0, dip = 0.0, busy = 0, moves = 0 }
     var rows: [Row] = []
     for (i, t) in mix.transitions.enumerated() {
         var row = Row()
@@ -486,6 +523,12 @@ if CommandLine.arguments.contains("--report") {
         // downbeat.)
         let around = barLevels(from: t.begins, bars: n + 2, barSeconds: t.barSeconds) { _, _ in true }
         row.dip = median - (around.min() ?? median)
+        // (Where: bars from B's entry, and whose: A alone, B alone, both.)
+        if let low = around.indices.min(by: { around[$0] < around[$1] }) {
+            let aa = barLevels(from: t.begins, bars: n + 2, barSeconds: t.barSeconds) { k, _ in k == t.from }
+            let bb = barLevels(from: t.begins, bars: n + 2, barSeconds: t.barSeconds) { k, _ in k == t.to }
+            row.dipAt = String(format: "bar %d (A %.0f, B %.0f, songs' median %.0f)", low, aa[low], bb[low], median)
+        }
         row.hole = zip(around, around.dropFirst()).map { $0 - $1 }.max() ?? 0
         // Busy: three or more of the two melodies and two voices heard
         // (within 12 dB of the loudest of them).
@@ -498,6 +541,7 @@ if CommandLine.arguments.contains("--report") {
         }.count
         row.moves = simultaneousMoves(t)
         rows.append(row)
+        if row.dip > 4 { print("   dip at " + row.dipAt) }
         let sw = TransitionBuilder.switchBar(t.edit.preset, bars: t.edit.bars, lowSwap: t.plan.placement.lowSwap)
         print(String(format: "%02d %@ → %@  %@ %d  excess %.1f dB  seam %.2f× at %.0f (switch %.0f)  together %d/%d  dip %.1f dB (drop %.1f)  busy %d  at once %d%@",
                      i + 1, SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url),

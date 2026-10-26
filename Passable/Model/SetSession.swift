@@ -336,6 +336,10 @@ final class SetSession: ObservableObject {
 
     private func place(_ url: URL, _ loaded: TrackProcessor.Loaded) {
         guard !isInSet(url) else { return }
+        if let twin = items.first(where: { $0.analysis.map { SetOrdering.sameRecording($0, loaded.analysis) } == true }) {
+            requestNote = "“\(SongTitle.of(url))” is “\(twin.title)”, already in the set."
+            return
+        }
         var item = Item(url: url)
         item.loaded = loaded
         item.status = .ready
@@ -431,6 +435,17 @@ final class SetSession: ObservableObject {
                 guard let self else { return }
                 switch result {
                 case .success(let loaded):
+                    // The same record a second time (another download of
+                    // it): played once, where it already is.
+                    if let twin = self.items.first(where: { $0.id != id && $0.analysis.map { SetOrdering.sameRecording($0, loaded.analysis) } == true }),
+                       let item = self.items.first(where: { $0.id == id }) {
+                        self.items.removeAll { $0.id == id }
+                        let note = "“\(item.title)” is the same song as “\(twin.title)”, already in the set: it plays once."
+                        self.alert = self.alert.map { $0 + "\n" + note } ?? note
+                        guard self.isReady else { return }
+                        if self.needsOrdering { self.autoOrder(keepingOrder: true) } else { self.rebuild() }
+                        return
+                    }
                     self.update(id) { $0.loaded = loaded; $0.status = .ready }
                     guard self.isReady else { return }
                     if self.needsOrdering { self.autoOrder(keepingOrder: true) } else { self.rebuild() }

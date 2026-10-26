@@ -442,6 +442,24 @@ enum PairCosts {
 }
 
 enum SetOrdering {
+    /// The same song twice: two downloads of one record (a video's audio
+    /// and the single, say), which a DJ never plays twice in a set. Same
+    /// key, tempo within 0.5 %, and the song's chords over its whole length
+    /// alike to 0.998 (two copies measured 0.9993 and 0.9995 on a 68-song
+    /// library; the closest two different songs, 0.9924 at 4 % apart).
+    static func sameRecording(_ a: TrackAnalysis, _ b: TrackAnalysis) -> Bool {
+        guard a.key == b.key, a.grid.bpm > 0, abs(a.grid.bpm / b.grid.bpm - 1) < 0.005 else { return false }
+        func profile(_ t: TrackAnalysis) -> [Float]? {
+            guard let bars = t.structure?.harmonyChroma ?? t.structure?.barChroma, !bars.isEmpty else { return nil }
+            var p = [Float](repeating: 0, count: 12)
+            for bar in bars { for k in 0..<min(12, bar.count) { p[k] += bar[k] } }
+            let norm = p.reduce(0) { $0 + $1 * $1 }.squareRoot()
+            return norm > 0 ? p.map { $0 / norm } : nil
+        }
+        guard let pa = profile(a), let pb = profile(b) else { return false }
+        return zip(pa, pb).reduce(0) { $0 + $1.0 * $1.1 } >= 0.998
+    }
+
     /// 0…1: how hard a track drives — tempo, and how much of it has a full
     /// beat and bass line going.
     static func energy(_ t: TrackAnalysis) -> Double {
