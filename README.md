@@ -107,9 +107,10 @@ swift build -c release
 .build/release/passable-render --moves song1.opus song2.opus                       # every automated move, bar by bar
 .build/release/passable-render --seams song1.opus song2.opus                       # biggest change in a blend vs the songs' own
 .build/release/passable-render --fidelity song1.opus song2.opus                    # set vs the original file where a song plays alone
+.build/release/passable-render --order --report --list songs.txt                    # Auto-Order, then every transition measured
 ```
 
-Songs play in the order given. `PassableTests/SetLab` builds a set from a list of songs and measures every transition (levels, both songs heard, doubled lows and voices, flams). Its measures come from Passable's own analysis, so a wrong beat grid looks fine to it. For a second opinion, have it write each transition out and run the audit, which tracks the songs and the rendered blends with Beat This! in PyTorch and says where two songs don't share a beat or a bar:
+Songs play in the order given (`--order` orders them as the app's Auto-Order does and writes `order.txt`). Other measures: `--detail N` (one transition, every part bar by bar), `--steps` (where parts switch against the hits), `--levels` (each song's loudness as heard), `--limiter`, `--aac-peaks` (the iPhone file decoded again), `--renditions` (tempo-matched copies against a fresh render, and their size), `--tempos`, `--scores`, `--twins` (the same song twice), `--prune-dry` (what a launch would clear from the cache). `--cut-cost` and `--clash-cost` try other ordering prices. Songs never loaded are separated with the installed app's models. `PassableTests/SetLab` builds a set from a list of songs and measures every transition (levels, both songs heard, doubled lows and voices, flams). Its measures come from Passable's own analysis, so a wrong beat grid looks fine to it. For a second opinion, have it write each transition out and run the audit, which tracks the songs and the rendered blends with Beat This! in PyTorch and says where two songs don't share a beat or a bar:
 
 ```sh
 TEST_RUNNER_PASSABLE_SET=songs.txt TEST_RUNNER_PASSABLE_SET_AUDIT=/tmp/audit \
