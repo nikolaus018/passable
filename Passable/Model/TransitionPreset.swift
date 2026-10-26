@@ -296,6 +296,10 @@ struct TransitionBuilder {
         }
     }
 
+    /// Bars over which a melody closes before a clashing swap, and the
+    /// next one opens after it.
+    static let clashSweep = 2.0
+
     /// Seconds ahead of the beat that a part is switched on or off.
     static let switchLead = 0.025
     /// Seconds a bass line or a low band is switched over.
@@ -551,11 +555,17 @@ struct TransitionBuilder {
             let out = min(vocalOut ?? min(vin, sw), keysClash ? sw : .infinity)
             echoOutVocal(at: out)
             if keysClash {
-                // A's melody washes out into a reverb tail as B's lands on
-                // the swap.
+                // Two keys never sound together, and the one changes into
+                // the other the way a DJ does it with the filters: A's
+                // melody closes down (a low-pass) over the two bars before
+                // the swap and is gone on it, B's opens up (a high-pass)
+                // over the two after. On one beat both melodies swapped
+                // whole, the swap was heard as a cut.
+                let out = max(0, sw - Self.clashSweep)
+                automate(.a, .other, .filter, [(out, 0.5, .sCurve), (sw, 0.2, .hold), (sw + 0.001, 0.5, .linear)])
                 automate(.a, .other, .reverb, [(sw - 1, 0, .linear), (sw, 0.8, .hold), (sw + 0.001, 0, .linear)])
                 automate(.a, .other, .volume, [(sw, 1, .hold), (sw + 0.001, 0, .linear)])
-                automate(.b, .other, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
+                bringIn(.other, at: sw, filter: 0.7, open: min(n + 2, sw + Self.clashSweep))
             } else if mashup {
                 // B's voice is the thing heard over A's beat: its melody
                 // waits for the swap, and A's dissolves under it, gone by

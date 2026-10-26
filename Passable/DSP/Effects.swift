@@ -172,26 +172,68 @@ struct PingPongDelay {
     }
 }
 
-/// Peak limiter at −0.3 dBFS: instant attack, 150 ms release, stereo-linked.
-/// A safety net for summing eight stems, not a mastering tool.
+/// Peak limiter at −0.3 dBFS with `lookahead` frames of look-ahead:
+/// it sees a peak coming and lowers the gain smoothly into it (over the
+/// look-ahead), instead of jumping the gain on the peak itself (which is
+/// heard as a crackle), then lets it back over 150 ms. Stereo-linked. The
+/// output runs `lookahead` frames behind the input; `MixRenderer` renders
+/// that far ahead, so what plays stays on time. A safety net for summing
+/// eight stems, not a mastering tool.
 struct Limiter {
-    private var envelope: Float = 0
+    static let lookahead = 88  // 2 ms
     private let release: Float
     private let ceiling: Float = 0.966
+    private var delayL: [Float], delayR: [Float]
+    /// Gain each input frame needs; the least over each window of them;
+    /// those averaged (see `process`).
+    private var needed: [Float], least: [Float]
+    private var index = 0
+    private var leastSum: Float
+    private var gain: Float = 1
 
     init(sampleRate: Double) {
         release = Float(exp(-1 / (0.15 * sampleRate)))
+        let n = Self.lookahead + 1
+        delayL = [Float](repeating: 0, count: n)
+        delayR = delayL
+        needed = [Float](repeating: 1, count: n)
+        least = needed
+        leastSum = Float(n)
     }
 
+    mutating func reset() {
+        let n = Self.lookahead + 1
+        for k in 0..<n { delayL[k] = 0; delayR[k] = 0; needed[k] = 1; least[k] = 1 }
+        leastSum = Float(n)
+        gain = 1
+        index = 0
+    }
+
+    /// In place: frame `i` out is frame `i - lookahead` in, limited. The
+    /// gain on an output frame is the mean, over the window ending there,
+    /// of the least gain each frame of the window needed over the window
+    /// after it: every term covers the frame itself, so the peak is never
+    /// over the ceiling, and the gain glides into it.
     mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>, count: Int) {
+        let n = Self.lookahead + 1
         for i in 0..<count {
             let peak = max(abs(left[i]), abs(right[i]))
-            envelope = peak > envelope ? peak : envelope * release + peak * (1 - release)
-            if envelope > ceiling {
-                let g = ceiling / envelope
-                left[i] *= g
-                right[i] *= g
-            }
+            needed[index] = peak > ceiling ? ceiling / peak : 1
+            var m: Float = 1
+            for k in 0..<n where needed[k] < m { m = needed[k] }
+            leastSum += m - least[index]
+            least[index] = m
+            let smooth = min(1, leastSum / Float(n))
+            gain = min(smooth, gain * release + (1 - release))
+            // Out: the oldest frame in the delay (the one about to be
+            // overwritten).
+            let next = (index + 1) % n
+            let outL = delayL[next], outR = delayR[next]
+            delayL[index] = left[i]
+            delayR[index] = right[i]
+            left[i] = outL * gain
+            right[i] = outR * gain
+            index = next
         }
     }
 }

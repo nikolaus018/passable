@@ -477,7 +477,7 @@ if CommandLine.arguments.contains("--steps") {
 if CommandLine.arguments.contains("--report") {
     // Everything that can be measured about each transition, and the set's
     // totals: what a change to the planner is judged by.
-    struct Row { var dipAt = "", seam = 0.0, excess = 0.0, hole = 0.0, together = 0, bars = 0, dip = 0.0, busy = 0, moves = 0 }
+    struct Row { var after = 0.0, dipAt = "", seam = 0.0, excess = 0.0, hole = 0.0, together = 0, bars = 0, dip = 0.0, busy = 0, moves = 0 }
     var rows: [Row] = []
     for (i, t) in mix.transitions.enumerated() {
         var row = Row()
@@ -540,21 +540,32 @@ if CommandLine.arguments.contains("--report") {
             return leads.filter { $0[g] > top - 12 && $0[g] > -70 }.count >= 3
         }.count
         row.moves = simultaneousMoves(t)
+        // B once A has gone: the 4 bars after the blend, against B's own
+        // loud level (both as the set plays B, trims in).
+        do {
+            let a = t.to == 0 ? 0 : mix.transitions[t.to - 1].end
+            let b = t.to < mix.transitions.count ? mix.transitions[t.to].begins : mix.length
+            var solo = barLevels(from: a, bars: max(1, Int((b - a) / t.barSeconds) - 1), barSeconds: t.barSeconds) { _, _ in true }
+            solo.sort()
+            let loud = solo[Int(Double(solo.count - 1) * 0.8)]
+            let after = barLevels(from: t.end, bars: 4, barSeconds: t.barSeconds) { _, _ in true }
+            row.after = loud - after.reduce(0, +) / Double(max(1, after.count))
+        }
         rows.append(row)
         if row.dip > 4 { print("   dip at " + row.dipAt) }
         let sw = TransitionBuilder.switchBar(t.edit.preset, bars: t.edit.bars, lowSwap: t.plan.placement.lowSwap)
-        print(String(format: "%02d %@ → %@  %@ %d  excess %.1f dB  seam %.2f× at %.0f (switch %.0f)  together %d/%d  dip %.1f dB (drop %.1f)  busy %d  at once %d%@",
+        print(String(format: "%02d %@ → %@  %@ %d  excess %.1f dB  seam %.2f× at %.0f (switch %.0f)  together %d/%d  dip %.1f dB (drop %.1f)  busy %d  at once %d  B after %.1f dB under  predicted together %d%@",
                      i + 1, SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url),
-                     t.edit.preset.displayName, t.edit.bars, row.excess, row.seam, seamAt, sw, row.together, n, row.dip, row.hole, row.busy, row.moves,
+                     t.edit.preset.displayName, t.edit.bars, row.excess, row.seam, seamAt, sw, row.together, n, row.dip, row.hole, row.busy, row.moves, row.after, t.plan.placement.together ?? -1,
                      t.melodiesClash ? "  clash" : ""))
     }
     let m = Double(max(1, rows.count))
-    print(String(format: "SET %d transitions: excess mean %.2f dB worst %.2f, over 2 dB: %d | seam mean %.2f× worst %.2f× | together mean %.1f, under 4: %d | dips over 4 dB: %d, bar-to-bar drops over 6 dB: %d | busy bars %d | at once max %d mean %.1f",
+    print(String(format: "SET %d transitions: excess mean %.2f dB worst %.2f, over 2 dB: %d | seam mean %.2f× worst %.2f× | together mean %.1f, under 4: %d | dips over 4 dB: %d, bar-to-bar drops over 6 dB: %d | busy bars %d | at once max %d mean %.1f | B after the blend under its loud level: mean %.1f dB, over 4 dB: %d",
                  rows.count, rows.map(\.excess).reduce(0, +) / m, rows.map(\.excess).max() ?? 0, rows.filter { $0.excess > 2 }.count,
                  rows.map(\.seam).reduce(0, +) / m, rows.map(\.seam).max() ?? 0,
                  Double(rows.map(\.together).reduce(0, +)) / m, rows.filter { $0.together < 4 }.count,
                  rows.filter { $0.dip > 4 }.count, rows.filter { $0.hole > 6 }.count, rows.map(\.busy).reduce(0, +), rows.map(\.moves).max() ?? 0,
-                 Double(rows.map(\.moves).reduce(0, +)) / m))
+                 Double(rows.map(\.moves).reduce(0, +)) / m, rows.map(\.after).reduce(0, +) / m, rows.filter { $0.after > 4 }.count))
     exit(0)
 }
 

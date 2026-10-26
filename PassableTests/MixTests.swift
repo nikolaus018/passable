@@ -21,6 +21,34 @@ final class MixTests: XCTestCase {
         XCTAssertGreaterThan(CurveShape.logarithmic.shape(0.5), 0.5)
     }
 
+    /// The limiter sees peaks coming: nothing goes over its ceiling, the
+    /// gain glides into a peak instead of jumping on it, quiet audio
+    /// passes untouched, and the output is the input `lookahead` frames on.
+    func testLimiterLooksAhead() {
+        var limiter = Limiter(sampleRate: 44_100)
+        let n = 8192
+        var l = (0..<n).map { Float(0.5 * sin(Double($0) * 0.05)) }
+        l[4000] = 3; l[4001] = -2.5
+        var r = l
+        let input = l
+        l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+            limiter.process(lp.baseAddress!, rp.baseAddress!, count: n)
+        } }
+        let d = Limiter.lookahead
+        XCTAssertLessThanOrEqual(l.map(abs).max()!, 0.9661)
+        // Untouched well before the peak.
+        for i in d..<3000 { XCTAssertEqual(l[i], input[i - d], accuracy: 1e-6) }
+        // No jump in gain: frame to frame it moves by a fraction of the
+        // whole reduction (3 → 0.966 is a gain of 0.32), over the look-ahead.
+        let gains = (d + 3000..<d + 4100).compactMap { i -> (Int, Float)? in
+            abs(input[i - d]) > 0.05 ? (i, l[i] / input[i - d]) : nil
+        }
+        // (Per frame: frames near a zero crossing are left out.)
+        let jumps = zip(gains, gains.dropFirst()).map { abs($0.1 - $1.1) / Float($1.0 - $0.0) }
+        XCTAssertLessThan(jumps.max()!, 0.01)
+        XCTAssertLessThan(gains.map(\.1).min()!, 0.33)
+    }
+
     func testEnvelopeKeepsPointsSorted() {
         var e = Envelope()
         let a = AutomationPoint(time: 1, value: 0.2)

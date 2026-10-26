@@ -90,8 +90,13 @@ final class MixRenderer: @unchecked Sendable {
     private var revL = [Float](repeating: 0, count: blockSize), revR = [Float](repeating: 0, count: blockSize)
     private var dlyL = [Float](repeating: 0, count: blockSize), dlyR = [Float](repeating: 0, count: blockSize)
 
-    /// Render-thread position in master frames.
+    /// Render-thread position in master frames: of the mix going into the
+    /// limiter, which plays it `Limiter.lookahead` frames later. After a
+    /// jump that far is rendered first (`preroll`), so what's heard is on
+    /// time.
     private var position = 0
+    private var needsPreroll = true
+    private var prerollL = [Float](repeating: 0, count: blockSize), prerollR = [Float](repeating: 0, count: blockSize)
 
     // Hand-off from the main thread. The render thread only ever *tries* the
     // lock, so it can never block behind the UI.
@@ -152,6 +157,7 @@ final class MixRenderer: @unchecked Sendable {
             }
             lock.unlock()
         }
+        if needsPreroll { preroll() }
 
         var done = 0
         while done < count {
@@ -162,7 +168,7 @@ final class MixRenderer: @unchecked Sendable {
         }
 
         if lock.lockIfAvailable() {
-            if pendingSeek == nil { publishedPosition = position }
+            if pendingSeek == nil { publishedPosition = position - Limiter.lookahead }
             lock.unlock()
         }
     }
@@ -171,6 +177,22 @@ final class MixRenderer: @unchecked Sendable {
     func setPositionImmediately(_ frame: Int) {
         position = frame
         resetTails()
+    }
+
+    /// The look-ahead's worth of the mix, into the limiter, nothing out.
+    private func preroll() {
+        needsPreroll = false
+        var left = Limiter.lookahead
+        prerollL.withUnsafeMutableBufferPointer { l in
+            prerollR.withUnsafeMutableBufferPointer { r in
+                while left > 0 {
+                    let n = min(Self.blockSize, left)
+                    renderBlock(left: l.baseAddress!, right: r.baseAddress!, count: n)
+                    position += n
+                    left -= n
+                }
+            }
+        }
     }
 
     private func prepare(for snapshot: MixSnapshot) {
@@ -188,6 +210,8 @@ final class MixRenderer: @unchecked Sendable {
     private func resetTails() {
         reverb.reset()
         delay.reset()
+        limiter.reset()
+        needsPreroll = true
         for i in lanes.indices { lanes[i] = LaneDSP() }
     }
 
