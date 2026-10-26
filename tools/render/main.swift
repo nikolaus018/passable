@@ -35,6 +35,9 @@ guard songs.count >= 2 else { fputs("need at least two songs\n", stderr); exit(2
 
 func seconds(_ since: Date) -> String { String(format: "%.1f s", Date().timeIntervalSince(since)) }
 
+// Songs not separated yet need the models: the installed app's.
+ModelLocation.directory = URL(fileURLWithPath: "/Applications/Passable.app/Contents/Resources")
+
 let clock = Date()
 let processor = TrackProcessor()
 var tracks: [(url: URL, loaded: TrackProcessor.Loaded)] = []
@@ -43,6 +46,7 @@ for url in songs {
         processor.load(url, ticket: .init(), progress: { _ in }) { c.resume(with: $0) }
     }
     tracks.append((url, loaded))
+    if Date().timeIntervalSince(clock) > 5 { print("  \(tracks.count)/\(songs.count) \(SongTitle.of(url)) (\(seconds(clock)))") }
 }
 print("loaded \(tracks.count) songs in \(seconds(clock))")
 if ordered {

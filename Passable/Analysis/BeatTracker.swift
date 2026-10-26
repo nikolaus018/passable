@@ -35,7 +35,8 @@ final class BeatTracker: @unchecked Sendable {
     private let lock = NSLock()
 
     init(model modelURL: URL? = nil, computeUnits: MLComputeUnits = .cpuAndGPU) throws {
-        guard let url = modelURL ?? Bundle.main.url(forResource: "BeatThis", withExtension: "mlmodelc") else {
+        guard let url = modelURL ?? Bundle.main.url(forResource: "BeatThis", withExtension: "mlmodelc")
+                ?? ModelLocation.fallback(named: "BeatThis") else {
             throw PassableError.message("BeatThis model is missing from the app bundle. Run tools/convert-beats/convert.py and rebuild.")
         }
         let config = MLModelConfiguration()

@@ -26,6 +26,18 @@ enum StemKind: String, CaseIterable, Codable, Identifiable {
 /// the track is normalised, cut into 7.8 s training-length segments with 25 %
 /// overlap, and the per-segment outputs are cross-faded with triangular
 /// weights so segment seams don't click.
+/// Where a tool without the models in its own bundle (passable-render)
+/// finds them: in this folder, as `<name>.mlmodelc`.
+enum ModelLocation {
+    nonisolated(unsafe) static var directory: URL?
+
+    static func fallback(named name: String) -> URL? {
+        guard let url = directory?.appendingPathComponent("\(name).mlmodelc"),
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
+}
+
 final class StemSeparator {
     private let model: MLModel
     private let segment: Int
@@ -36,7 +48,8 @@ final class StemSeparator {
     private static let overlap = 0.25
 
     init(model modelURL: URL? = nil) throws {
-        guard let url = modelURL ?? Bundle.main.url(forResource: "HTDemucs", withExtension: "mlmodelc") else {
+        guard let url = modelURL ?? Bundle.main.url(forResource: "HTDemucs", withExtension: "mlmodelc")
+                ?? ModelLocation.fallback(named: "HTDemucs") else {
             throw PassableError.message("HTDemucs model is missing from the app bundle. Run tools/convert-demucs/convert.py and rebuild.")
         }
         let config = MLModelConfiguration()
