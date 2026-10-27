@@ -1719,6 +1719,7 @@ enum VocalPhrasing {
     static func cut(opening: Bool, from: Int, through: Int, reference: Float, turns: ((Int) -> Bool)? = nil,
                     inside: ((Int) -> Bool)? = nil, level: (Int) -> Float) -> (slot: Int, kind: Cut)? {
         guard from <= through else { return nil }
+        let reference = local(reference, from: from, through: through, level: level)
         func silent(_ k: Int) -> Bool { quiet(level(k), reference) }
         var best: (slot: Int, kind: Cut, cost: Double)?, clean: (slot: Int, kind: Cut, cost: Double)?
         for k in from...through {
@@ -1747,6 +1748,48 @@ enum VocalPhrasing {
             if !within, cost < clean?.cost ?? .infinity { clean = (k, kind, cost) }
         }
         return (clean ?? best).map { ($0.slot, $0.kind) }
+    }
+
+    /// The level a voice sings at around a cut: its loud sixteenths (90th
+    /// percentile) from two bars before the window to two bars after,
+    /// within 12 dB under the song's `reference` and 6 over. Against the
+    /// song's alone, a verse sung softly under a loud chorus read its quiet
+    /// words as silence (cut through), and a dense chorus never breathed.
+    static func local(_ reference: Float, from: Int, through: Int, level: (Int) -> Float) -> Float {
+        let sung = ((from - 2 * slots)...(through + 2 * slots)).map(level).filter { $0 > reference - 40 }.sorted()
+        guard sung.count >= slots / 2 else { return reference }
+        return min(reference + 6, max(reference - 12, sung[(sung.count - 1) * 9 / 10]))
+    }
+
+    /// Seconds a gap is looked through for its quietest moment.
+    static let gapFrame = 0.002
+
+    /// Where in the gap around `time` (master seconds; the start of the
+    /// sixteenth `cut` chose) the voice really is quietest, to the
+    /// millisecond: a sixteenth is 120 ms at 125 BPM, and its start may be
+    /// the tail of the last word or the first consonant of the next.
+    /// Taken out, it shuts as soon as the voice is down there (with its
+    /// release over the quiet that follows, up to `TransitionBuilder.vocalRelease`);
+    /// let in, it opens as late as the voice is still down there, right
+    /// before the word. Within `earliest...latest`.
+    private static func refine(_ stem: StemAudio, offset: Double, at time: Double, slot: Double, opening: Bool,
+                               earliest: Double, latest: Double) -> Double {
+        let from = max(earliest, opening ? time - slot : time - slot / 2)
+        let to = min(latest, opening ? time + slot / 2 : time + slot)
+        let count = Int((to - from) / gapFrame)
+        guard count > 1 else { return time }
+        let levels = (0..<count).map { level(stem, at: from + Double($0) * gapFrame - offset, length: gapFrame) }
+        guard let low = levels.min() else { return time }
+        func down(_ i: Int) -> Bool { levels[i] <= low + 3 }
+        if opening {
+            guard let i = levels.indices.last(where: down) else { return time }
+            return from + Double(i) * gapFrame
+        }
+        guard let i = levels.indices.first(where: down) else { return time }
+        var j = i
+        let release = Int(TransitionBuilder.vocalRelease / gapFrame)
+        while j + 1 < count, j - i < release, down(j + 1) { j += 1 }
+        return min(latest, from + Double(j + 1) * gapFrame)
     }
 
     /// Mean square of `stem` over `length` seconds starting at `time`
@@ -1785,12 +1828,19 @@ enum VocalPhrasing {
         let inside: ((Int) -> Bool)? = lines.map { lines in
             opening ? { lines.song.midPart(at: lines.slot + $0) ?? false } : { lines.song.midSentence(at: lines.slot + $0) ?? false }
         }
+        var heard: [Int: Float] = [:]
         let found = cut(opening: opening, from: Int(((earliest - target) / slot).rounded(.up)),
                         through: Int(((latest - target) / slot).rounded(.down)), reference: reference, turns: turns,
                         inside: inside) { k in
-            level(stem, at: target + Double(k) * slot - offset, length: slot)
+            if let db = heard[k] { return db }
+            let db = level(stem, at: target + Double(k) * slot - offset, length: slot)
+            heard[k] = db
+            return db
         }
-        return found.map { (target + Double($0.slot) * slot, $0.kind) }
+        return found.map {
+            (refine(stem, offset: offset, at: target + Double($0.slot) * slot, slot: slot, opening: opening,
+                    earliest: earliest, latest: latest), $0.kind)
+        }
     }
 
     /// Whether the vocal is sounding in the beat starting at `time` (master

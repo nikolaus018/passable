@@ -304,6 +304,11 @@ struct TransitionBuilder {
     static let switchLead = 0.025
     /// Seconds a bass line or a low band is switched over.
     static let lowRamp = 0.008
+    /// Seconds A's voice is closed over as it's taken out. Shut in a
+    /// millisecond, whatever still rang there (a word's tail, its reverb,
+    /// the stem's bleed) was chopped into a click; over 30 ms it's still a
+    /// cut to the ear.
+    static let vocalRelease = 0.03
 
     /// A part switched on or off on a beat is switched `switchLead` ahead
     /// of it. The grid puts a beat where its kick peaks, and a hit starts
@@ -316,10 +321,7 @@ struct TransitionBuilder {
     private mutating func switchBeforeTheBeat() {
         let lead = Self.switchLead
         let tiny = 0.0015 * barSeconds + 1e-6
-        func onGrid(_ time: Double) -> Bool {
-            let sixteenths = (time - start) / barSeconds * 16
-            return abs(sixteenths - sixteenths.rounded()) * barSeconds / 16 < 0.003
-        }
+        func onGrid(_ time: Double) -> Bool { self.onGrid(time, within: 0.003) }
         for i in lanes.indices {
             for parameter in [LaneParameter.volume, .filter, .low, .mid, .high] {
                 var points = lanes[i][parameter].points
@@ -354,6 +356,13 @@ struct TransitionBuilder {
                 for p in points { lanes[i][parameter].insert(p) }
             }
         }
+    }
+
+    /// Whether master `time` is on a sixteenth of the blend, give or take
+    /// `within` seconds.
+    private func onGrid(_ time: Double, within: Double) -> Bool {
+        let sixteenths = (time - start) / barSeconds * 16
+        return abs(sixteenths - sixteenths.rounded()) * barSeconds / 16 < within
     }
 
     private mutating func clearAll() {
@@ -437,7 +446,12 @@ struct TransitionBuilder {
         if vocalOutFade > 0 {
             automate(.a, .vocals, .volume, [(out - vocalOutFade, 1, .logarithmic), (out, 0, .linear)])
         } else {
-            automate(.a, .vocals, .volume, [(out, 1, .hold), (out + 0.001, 0, .linear)])
+            // Closed over `vocalRelease`, shut by `out`: nothing of what
+            // follows gets through. Cut on the beat (nothing to cut on was
+            // found), it shuts ahead of it like every switch (see
+            // `switchBeforeTheBeat`, which leaves a ramp this long alone).
+            let end = onGrid(start + out * barSeconds, within: 0.0005) ? out - Self.switchLead / barSeconds : out
+            automate(.a, .vocals, .volume, [(end - Self.vocalRelease / barSeconds, 1, .linear), (end, 0, .linear)])
         }
     }
 

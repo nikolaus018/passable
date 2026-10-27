@@ -143,6 +143,34 @@ final class SetLab: XCTestCase {
         var lyricCuts: [String: Int] = [:]
         var midParts = 0
         var exitWords: [String: Int] = [:]
+        // The gates as they play, on the vocal stems at 5 ms: how loud A's
+        // voice still is right before its channel shuts, how long after
+        // its last word and before its next one; how loud B's already is
+        // right before its channel opens, and how soon its first word comes.
+        var gates: [(chop: Float, since: Double, next: Double, open: Float, lead: Double)] = []
+        /// Level (dB) of a track's vocal stem over `length` seconds from master `time`.
+        func vocalDB(_ track: Int, _ time: Double, _ length: Double) -> Float {
+            let tr = mix.tracks[track]
+            guard let stem = tr.stems[.vocals] else { return -90 }
+            let i = Int((time - tr.stemOffset(at: time)) * sr), n = max(1, Int(length * sr))
+            guard i >= 0, i + n <= stem.count else { return -90 }
+            var l: Float = 0, r: Float = 0
+            vDSP_measqv(stem.left.pointer + i, 1, &l, vDSP_Length(n))
+            vDSP_measqv(stem.right.pointer + i, 1, &r, vDSP_Length(n))
+            return 10 * log10(max((l + r) / 2, 1e-9))
+        }
+        /// Where a track's vocal volume crosses half-way near master `time`
+        /// (the switch may sit ahead of the beat): shutting, or opening.
+        func gate(_ track: Int, near time: Double, shutting: Bool) -> Double {
+            guard let volume = mix.tracks[track].envelopes[.vocals]?[LaneParameter.volume.rawValue] else { return time }
+            var s = time - 0.1
+            while s < time + 0.1 {
+                let v = volume.value(at: s, default: 1)
+                if shutting ? v < 0.5 : v >= 0.5 { return s }
+                s += 0.00025
+            }
+            return time
+        }
         for t in mix.transitions {
             let bar = t.barSeconds
             // B as the blend counts it (see `Metre`): at half or double A's
@@ -437,6 +465,31 @@ final class SetLab: XCTestCase {
                 lyricCuts[wb, default: 0] += 1
                 print(note)
             }
+            if !t.isEdited, let out = t.vocalOut, let vin = t.vocalIn,
+               let ra = VocalPhrasing.reference(mix.tracks[t.from].loaded.analysis.structure),
+               let rb = VocalPhrasing.reference(mix.tracks[t.to].loaded.analysis.structure) {
+                let frame = 0.005, words = Float(20)
+                let ga = gate(t.from, near: out, shutting: true), gb = gate(t.to, near: vin, shutting: false)
+                let chop = vocalDB(t.from, ga - 0.01, 0.01) - ra
+                var since = 0.0
+                while since < 1, vocalDB(t.from, ga - since - frame, frame) < ra - words { since += frame }
+                var next = 0.0
+                while next < 2, vocalDB(t.from, ga + next, frame) < ra - words { next += frame }
+                let open = vocalDB(t.to, gb - 0.01, 0.01) - rb
+                var lead = 0.0
+                while lead < 2, vocalDB(t.to, gb + lead, frame) < rb - words { lead += frame }
+                gates.append((chop, since, next, open, lead))
+                print(String(format: "      gates: A shuts %.1f dB under its singing, %.0f ms after its last word, %.0f ms before its next;"
+                             + " B opens %.1f dB under, %.0f ms before its first word", -chop, since * 1000, next * 1000,
+                             -open, lead * 1000))
+                // Shut on sound: the voice around it, 20 ms a step, from
+                // 300 ms before to 300 ms after (dB under its singing).
+                if chop > -30 {
+                    print("      A's voice around its gate: " + stride(from: -0.3, to: 0.3, by: 0.02).map {
+                        String(format: $0.magnitude < 0.01 ? "[%.0f]" : "%.0f", ra - vocalDB(t.from, ga + $0, 0.02))
+                    }.joined(separator: " "))
+                }
+            }
             vocalCuts["B in on \(t.vocalInKind ?? "-")", default: 0] += 1
             vocalCuts["A out on \(t.vocalOutKind ?? "-")", default: 0] += 1
             held.append(heldBack)
@@ -509,6 +562,14 @@ final class SetLab: XCTestCase {
         print(String(format: "Songs pitch-shifted: %d of %d;  stretch over 4%%: %d, largest %.1f%%", shifted,
                      mix.transitions.count, stretches.filter { $0 > 4 }.count, stretches.max() ?? 0))
         print("Vocals: " + vocalCuts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+        if !gates.isEmpty {
+            func med(_ x: [Double]) -> Double { x.sorted()[x.count / 2] }
+            print(String(format: "Gates (%d): A shut on sound (within 30 dB of its singing) %d, within 20 ms of its last word %d;"
+                         + " median %.1f dB under, %.0f ms after its last word.  B opened on sound %d; median %.0f ms before its first word",
+                         gates.count, gates.filter { $0.chop > -30 }.count, gates.filter { $0.since < 0.02 }.count,
+                         med(gates.map { Double(-$0.chop) }), med(gates.map(\.since)) * 1000,
+                         gates.filter { $0.open > -30 }.count, med(gates.map(\.lead)) * 1000))
+        }
         print("B's voice let in mid-part (in a verse it sings through): \(midParts) of \(mix.transitions.count)")
         print("A's voice leaves, while singing, by its words: " + exitWords.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
         print("How much of a part's end A's voice leaves on, and of a part's start B's comes in on (0…1): "
