@@ -1867,27 +1867,19 @@ enum VocalPhrasing {
             return db
         }
         let from = Int(((earliest - target) / slot).rounded(.up)), through = Int(((latest - target) / slot).rounded(.down))
-        var found = cut(opening: opening, from: from, through: through, reference: reference, turns: turns,
+        // (Only in reach: the window is the caller's to keep. A word edge
+        // up to a bar outside it let A's voice sing past the blend's end or
+        // over B's landing on a cut, and B's open before its floor.)
+        let found = cut(opening: opening, from: from, through: through, reference: reference, turns: turns,
                         inside: inside, sung: sung, between: between, level: sixteenth)
-        // Nothing to cut on in reach, where the words were heard: on the
-        // edge of a word nearest it, up to a bar further (the caller would
-        // cut on the downbeat, through whatever is sung there).
-        if found == nil, let sung, let between, from - slots <= through + slots {
-            let near = ((from - slots)...(through + slots)).filter { k in
-                between(k) && !sung(k)
-            }.min { (abs($0 - max(from, min(through, $0))), abs($0)) < (abs($1 - max(from, min(through, $1))), abs($1)) }
-            found = near.map { ($0, .word) }
-        }
         let local = from <= through ? Self.local(reference, from: from, through: through, level: sixteenth) : reference
         // (A moment of the song, in its sixteenths: where its words are.)
         let sungAt: ((Double) -> Bool)? = lines.map { lines in
             { lines.song.inWord(at: Double(lines.slot) + lines.past + ($0 - target) / slot) ?? false }
         }
         return found.map {
-            let at = target + Double($0.slot) * slot
-            let t = refine(stem, offset: offset, at: at, slot: slot, opening: opening,
-                           earliest: min(earliest, at - slot), latest: max(latest, at + slot),
-                           quiet: min(local, reference) - wordSilence, sung: sungAt)
+            let t = refine(stem, offset: offset, at: target + Double($0.slot) * slot, slot: slot, opening: opening,
+                           earliest: earliest, latest: latest, quiet: min(local, reference) - wordSilence, sung: sungAt)
             return (t, $0.kind)
         }
     }
