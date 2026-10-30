@@ -148,6 +148,9 @@ final class SetLab: XCTestCase {
         // its last word and before its next one; how loud B's already is
         // right before its channel opens, and how soon its first word comes.
         var gates: [(chop: Float, since: Double, next: Double, open: Float, lead: Double)] = []
+        // Gates inside a word as the recogniser heard it: A's, B's; and
+        // how many could be judged (the song's word times were heard).
+        var inWords = (a: 0, b: 0, judged: 0)
         /// Level (dB) of a track's vocal stem over `length` seconds from master `time`.
         func vocalDB(_ track: Int, _ time: Double, _ length: Double) -> Float {
             let tr = mix.tracks[track]
@@ -479,6 +482,25 @@ final class SetLab: XCTestCase {
                 var lead = 0.0
                 while lead < 2, vocalDB(t.to, gb + lead, frame) < rb - words { lead += frame }
                 gates.append((chop, since, next, open, lead))
+                let wa = mix.tracks[t.from].loaded.analysis.structure?.inWord(at: Double(16 * t.edit.entryBar) + (ga - t.start) / bar * 16)
+                let wb = structureB?.inWord(at: Double(16 * cueB) + (gb - t.start) / barB * 16)
+                // (Only where the voice sounds: the recogniser stretches a
+                // word over the silence after it.)
+                if var wa, var wb {
+                    wa = wa && chop > -30
+                    wb = wb && open > -30
+                    inWords.judged += 1
+                    if wa { inWords.a += 1 }
+                    if wb { inWords.b += 1 }
+                    if wa, let w = mix.tracks[t.from].loaded.analysis.structure?.wordSpans {
+                        // A's words around its gate: start…end, ms from it.
+                        let at = Double(16 * t.edit.entryBar) + (ga - t.start) / bar * 16, ms = bar / 16 * 1000
+                        print("      A's words around its gate (ms): " + stride(from: 0, to: w.count - 1, by: 2).filter {
+                            w[$0 + 1] > at - 8 && w[$0] < at + 8
+                        }.map { String(format: "%.0f…%.0f", (w[$0] - at) * ms, (w[$0 + 1] - at) * ms) }.joined(separator: "  "))
+                    }
+                    if wa || wb { print("      gate inside a heard word: \(wa ? "A's" : "")\(wa && wb ? ", " : "")\(wb ? "B's" : "")") }
+                }
                 print(String(format: "      gates: A shuts %.1f dB under its singing, %.0f ms after its last word, %.0f ms before its next;"
                              + " B opens %.1f dB under, %.0f ms before its first word", -chop, since * 1000, next * 1000,
                              -open, lead * 1000))
@@ -570,6 +592,7 @@ final class SetLab: XCTestCase {
                          med(gates.map { Double(-$0.chop) }), med(gates.map(\.since)) * 1000,
                          gates.filter { $0.open > -30 }.count, med(gates.map(\.lead)) * 1000))
         }
+        print("Gates inside a heard word, sounding (of \(inWords.judged) with word times): A \(inWords.a), B \(inWords.b)")
         print("B's voice let in mid-part (in a verse it sings through): \(midParts) of \(mix.transitions.count)")
         print("A's voice leaves, while singing, by its words: " + exitWords.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
         print("How much of a part's end A's voice leaves on, and of a part's start B's comes in on (0…1): "

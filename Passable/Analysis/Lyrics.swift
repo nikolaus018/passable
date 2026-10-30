@@ -18,6 +18,10 @@ struct VocalLine: Codable, Equatable {
     /// writes two lines of a lyric as one sentence as often as not; a
     /// voice can be cut at these as well as at the line's ends.
     var breaks: [Double] = []
+    /// When each of its words is sung, as the recogniser heard it: start
+    /// and end of the first, of the second, and so on (seconds). A voice
+    /// is never cut inside one.
+    var wordTimes: [Double] = []
 }
 
 extension VocalLine {
@@ -29,6 +33,7 @@ extension VocalLine {
         words = try c.decode(Int.self, forKey: .words)
         repeats = try c.decode(Int.self, forKey: .repeats)
         breaks = try c.decodeIfPresent([Double].self, forKey: .breaks) ?? []
+        wordTimes = try c.decodeIfPresent([Double].self, forKey: .wordTimes) ?? []
     }
 }
 
@@ -66,7 +71,7 @@ enum Lyrics {
     }
 
     /// Bumped when lines are made differently, so songs are heard again.
-    private static let version = 13
+    private static let version = 14
 
     /// The song's lines; nil if no installed language hears words in it
     /// (an instrumental, a language without its model) or there's no
@@ -162,7 +167,7 @@ enum Lyrics {
     /// voice stops for a moment, and never runs longer than a couple of
     /// bars' worth of words. Each then counts the lines that say the same.
     static func lines(from words: [Word]) -> [VocalLine] {
-        var lines: [(start: Double, end: Double, tokens: [String], breaks: [Double])] = []
+        var lines: [(start: Double, end: Double, tokens: [String], breaks: [Double], times: [Double])] = []
         var current: [Word] = [], breaks: [Double] = []
         for (i, word) in words.enumerated() {
             current.append(word)
@@ -172,7 +177,8 @@ enum Lyrics {
             let comma = word.text.last.map { ",;:".contains($0) } ?? false
             let long = current.count >= 14 && comma
             if ended || paused || long {
-                lines.append((current[0].start, word.end, current.flatMap { tokens($0.text) }, breaks))
+                lines.append((current[0].start, word.end, current.flatMap { tokens($0.text) }, breaks,
+                              current.flatMap { [$0.start, $0.end] }))
                 (current, breaks) = ([], [])
             } else if comma {
                 breaks.append(word.end)
@@ -198,7 +204,7 @@ enum Lyrics {
                 repeats = max(repeats, again[again.count / 2])
             }
             return VocalLine(start: lines[i].start, end: lines[i].end, words: lines[i].tokens.count, repeats: repeats,
-                             breaks: lines[i].breaks)
+                             breaks: lines[i].breaks, wordTimes: lines[i].times)
         }
     }
 

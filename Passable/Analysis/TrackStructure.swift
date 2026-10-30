@@ -73,10 +73,14 @@ struct TrackStructure: Codable, Equatable {
     /// a sentence ends and 32 a clause at a comma (`clauseEnd`), 64 inside
     /// a sentence (`midSentence`).
     var lineMarks: [UInt8]?
+    /// The words as sung, on the grid: start and end of each in turn, in
+    /// sixteenths from the first downbeat (fractions kept). nil: no word
+    /// times heard.
+    var wordSpans: [Double]?
     /// How the marks were made: structures whose marks were made another
     /// way have their lines put on the grid again on load.
     var linesVersion: Int?
-    static let linesVersion = 5
+    static let linesVersion = 6
 
     /// How loud the track is when it's going: the level of its loud bars
     /// (80th percentile), which is what a DJ matches with the trim knob.
@@ -476,9 +480,11 @@ extension TrackStructure {
         // hooks into worse handovers.)
         if let chroma = barChroma { hookStart = Self.hookStarts(chroma: chroma, structure: self) }
         guard let lines, !lines.isEmpty else {
-            (lineStarts, lineEnds, lyricRepeat, lineMarks) = (lines == nil ? nil : [], lines == nil ? nil : [], nil, nil)
+            (lineStarts, lineEnds, lyricRepeat, lineMarks, wordSpans) = (lines == nil ? nil : [], lines == nil ? nil : [], nil, nil, nil)
             return
         }
+        let times = lines.flatMap(\.wordTimes)
+        wordSpans = times.isEmpty ? nil : times.map { grid.bars(at: $0) * Double(VocalPhrasing.slots) }
         // (Each stretch between two pauses of a line counts as one: see
         // `VocalLine.breaks`.)
         func slot(_ t: Double) -> Int { Int((grid.bars(at: t) * Double(VocalPhrasing.slots)).rounded()) }
@@ -622,6 +628,39 @@ extension TrackStructure {
     func midSentence(at slot: Int) -> Bool? {
         guard linesVersion == Self.linesVersion, let starts = lineStarts, !starts.isEmpty, let marks = lineMarks else { return nil }
         return slot >= 0 && slot < marks.count && marks[slot] & 64 != 0
+    }
+
+    /// Sixteenths a word's heard start and end are trusted to: the
+    /// recogniser's times are close, not exact (the audio then says where
+    /// in a gap the voice is quietest).
+    static let wordMargin = 0.3
+
+    /// Whether a word is being sung at sixteenth `at` (a fraction of one
+    /// is a moment inside it), by the recogniser's word times: well past
+    /// its start and short of its end. nil: no word times heard.
+    func inWord(at s: Double) -> Bool? {
+        guard linesVersion == Self.linesVersion, let w = wordSpans, !w.isEmpty else { return nil }
+        let m = Self.wordMargin
+        return words(near: s).contains { w[2 * $0] + m < s && s < w[2 * $0 + 1] - m }
+    }
+
+    /// Whether a word starts or ends within half a sixteenth of `at`: a
+    /// gap between two words as heard, where a voice may be cut.
+    func wordEdge(at s: Double) -> Bool {
+        guard linesVersion == Self.linesVersion, let w = wordSpans, !w.isEmpty else { return false }
+        return words(near: s).contains { abs(w[2 * $0] - s) <= 0.5 || abs(w[2 * $0 + 1] - s) <= 0.5 }
+    }
+
+    /// The words that may be sung around sixteenth `s` (they're in order):
+    /// the two that start last before it, and the one after.
+    private func words(near s: Double) -> Range<Int> {
+        guard let w = wordSpans else { return 0..<0 }
+        var lo = 0, hi = w.count / 2
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if w[2 * mid] <= s { lo = mid + 1 } else { hi = mid }
+        }
+        return max(0, lo - 2)..<min(w.count / 2, lo + 1)
     }
 
     /// Sixteenths the voice has to rest for, at the least, for what it
@@ -1246,7 +1285,7 @@ enum AutoPlacement {
         // An instrumental has nothing to cut in two.
         guard let reference = s.vocalReference, s.vocalSixteenthLevel ?? s.vocalBeatLevel != nil else { return (target, .line) }
         let slots = Double(VocalPhrasing.slots), base = VocalPhrasing.slots * bar0
-        let t = Int((target * slots).rounded())
+        let t = Int((target * slots).rounded()), past = target * slots - Double(t)
         /// (From the beats, each counted four times, for structures
         /// measured before per-sixteenth levels existed.)
         func level(_ j: Int) -> Float {
@@ -1259,7 +1298,9 @@ enum AutoPlacement {
         let found = VocalPhrasing.cut(opening: opening, from: Int((earliest * slots).rounded(.up)) - t,
                                       through: Int((latest * slots).rounded(.down)) - t, reference: reference,
                                       turns: { opening ? s.partStart(at: base + t + $0) : s.clauseEnd(at: base + t + $0) },
-                                      inside: { (opening ? s.midPart(at: base + t + $0) : s.midSentence(at: base + t + $0)) ?? false }) {
+                                      inside: { (opening ? s.midPart(at: base + t + $0) : s.midSentence(at: base + t + $0)) ?? false },
+                                      sung: { s.inWord(at: Double(base + t + $0) + past) ?? false },
+                                      between: { s.wordEdge(at: Double(base + t + $0) + past) }) {
             level(base + t + $0)
         }
         return found.map { (Double(t + $0.slot) / slots, $0.kind) } ?? (target, nil)
