@@ -168,7 +168,7 @@ final class PairProbe: XCTestCase {
                     let p = AutoPlacement.place(a: a, b: b, bars: bars, preset: preset, trimA: Float(MixMath.trimDB(a)),
                                                 trimB: Float(MixMath.trimDB(b)),
                                                 entryRange: (soloFrom + SetBuilder.minimumSoloBars(a.grid))...Int.max, keysClash: clash,
-                                                mashup: !clash && abs(rate - 1) < MixMath.mashupStretch, soloFrom: soloFrom,
+                                                mashup: !clash && MixMath.stretch(rate) < MixMath.mashupStretch, soloFrom: soloFrom,
                                                 drumsLock: lock, glide: MixMath.glideBars(rate: rate))
                     print(String(format: "   %@ %2d %@  score %6.2f  together %@  entry %3d cue %3d  switch %@ handoff %2d  clash %@  %@",
                                  preset.rawValue.padding(toLength: 8, withPad: " ", startingAt: 0), bars,

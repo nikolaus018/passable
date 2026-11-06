@@ -1033,7 +1033,7 @@ final class PayoffTests: XCTestCase {
             let energies = (0..<n).map { _ in random() }
             let washOuts = (0..<n).map { i in (0..<n).map { j in i != j && random() < 0.15 } }
             let exact = SetOrdering.order(costs, washOuts: washOuts, energies: energies)
-            let searched = SetOrdering.search(costs, washOuts, energies)
+            let searched = SetOrdering.search(costs, washOuts, SetOrdering.EnergyArc(energies))
             XCTAssertEqual(Set(searched), Set(0..<n))
             let best = SetOrdering.total(exact, costs, washOuts, energies)
             let got = SetOrdering.total(searched, costs, washOuts, energies)

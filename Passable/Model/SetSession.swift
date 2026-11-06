@@ -333,7 +333,7 @@ final class SetSession: ObservableObject {
     nonisolated static func requestSlot(_ request: TrackAnalysis, between songs: [TrackAnalysis?], from earliest: Int) -> Int {
         func price(_ a: TrackAnalysis?, _ b: TrackAnalysis?) -> Double {
             guard let a, let b else { return 0 }
-            let stretch = abs(MixMath.rate(a: a.grid.bpm, b: b.grid.bpm) - 1) * 100
+            let stretch = MixMath.stretch(MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)) * 100
             return (MixMath.preset(a, b) == .echoOut ? MixMath.cutCost : 0.05 * stretch)
                 + (MixMath.keysClash(a.key, b.key) ? MixMath.clashCost : 0)
         }

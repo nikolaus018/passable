@@ -18,9 +18,9 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--as-listed", "--energy", "--vocals": break
     case "--order": ordered = true
-    case "--detail", "--shakes", "--cut-cost", "--clash-cost": _ = args.removeFirst()
+    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc": _ = args.removeFirst()
     case "--list":
         let text = try String(contentsOfFile: args.removeFirst(), encoding: .utf8)
         songs += text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -53,6 +53,7 @@ func seconds(_ since: Date) -> String { String(format: "%.1f s", Date().timeInte
 
 if let k = CommandLine.arguments.firstIndex(of: "--cut-cost") { MixMath.cutCost = Double(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--clash-cost") { MixMath.clashCost = Double(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--arc") { SetOrdering.arcPenalty = Double(CommandLine.arguments[k + 1])! }
 
 // Songs not separated yet need the models: the installed app's.
 ModelLocation.directory = URL(fileURLWithPath: "/Applications/Passable.app/Contents/Resources")
@@ -106,6 +107,20 @@ if CommandLine.arguments.contains("--twins") {
     exit(0)
 }
 
+if CommandLine.arguments.contains("--energy") {
+    // Each song's `SetOrdering.energy` and what it's made of: share of bars
+    // with drums and bass both going (activity > 0.5), each alone, tempo.
+    for t in tracks.sorted(by: { SetOrdering.energy($0.loaded.analysis) < SetOrdering.energy($1.loaded.analysis) }) {
+        let a = t.loaded.analysis
+        guard let s = a.structure else { continue }
+        let d = s.activity(.drums), b = s.activity(.bass), n = Double(max(1, min(d.count, b.count)))
+        func share(_ x: [Double]) -> Double { Double(x.filter { $0 > 0.5 }.count) / Double(max(1, x.count)) }
+        let both = Double((0..<Int(n)).filter { d[$0] > 0.5 && b[$0] > 0.5 }.count) / n
+        print(String(format: "%.2f  both %.2f drums %.2f bass %.2f  %5.1f BPM  %@", SetOrdering.energy(a), both,
+                     share(d.map(Double.init)), share(b.map(Double.init)), a.grid.bpm, SongTitle.of(t.url)))
+    }
+    exit(0)
+}
 if CommandLine.arguments.contains("--measures") {
     // The per-bar measures placement scores with, largest value per song:
     // each should stay within about 0…1.
@@ -166,18 +181,20 @@ if ordered {
     let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: tracks.map(\.loaded)), remembered: true)
     let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
     let shakes = CommandLine.arguments.firstIndex(of: "--shakes").map { Int(CommandLine.arguments[$0 + 1])! }
-    let order = SetOrdering.order(costs, washOuts: washOuts, energies: energies, shakes: shakes)
+    // --as-listed: price the list's own order instead of searching one.
+    let order = CommandLine.arguments.contains("--as-listed") ? Array(analyses.indices)
+        : SetOrdering.order(costs, washOuts: washOuts, energies: energies, shakes: shakes)
     let pairs = zip(order, order.dropFirst())
     print(String(format: "order cost %.2f (transitions %.2f, Wash Outs/cuts %d, clashing keys %d)",
                  SetOrdering.total(order, costs, washOuts, energies), pairs.reduce(0) { $0 + costs[$1.0][$1.1] },
                  pairs.filter { washOuts[$0][$1] }.count,
                  pairs.filter { MixMath.keysClash(analyses[$0].key, analyses[$1].key) }.count))
     if CommandLine.arguments.contains("-v") {
-        var peak = 0.0
+        let arc = SetOrdering.EnergyArc(energies)
         for (k, i) in order.enumerated() {
-            peak = max(peak, energies[i])
             let next = k + 1 < order.count ? order[k + 1] : nil
-            print(String(format: "%2d  energy %.2f (lost %.2f)  → next %+.2f%@  %@", k + 1, energies[i], peak - energies[i],
+            print(String(format: "%2d  energy %.2f (off arc cost %.2f)  → next %+.2f%@  %@", k + 1, energies[i],
+                         arc.cost(i, place: k, count: order.count),
                          next.map { costs[i][$0] } ?? 0, next.map { washOuts[i][$0] ? " CUT" : "" } ?? "", SongTitle.of(tracks[i].url)))
         }
     }
@@ -273,10 +290,16 @@ func jumps(_ s: [[Double]]) -> [Double] {
 
 /// Power per bar above 150 Hz (dB) of what `including` lets through.
 func barLevels(from: Double, bars: Int, barSeconds: Double, including: @escaping (Int, StemKind) -> Bool) -> [Double] {
+    barLevels(from: from, bars: bars, barSeconds: barSeconds, of: mix.snapshot(masterGain: 1, including: including))
+}
+
+/// The same of a snapshot of any mix (another mix's, or one with its
+/// automation cleared).
+func barLevels(from: Double, bars: Int, barSeconds: Double, of snapshot: MixSnapshot) -> [Double] {
     let n = 4096, fft = RealFFT(size: n)
     let window = (0..<n).map { Float(0.5 - 0.5 * cos(2 * Double.pi * Double($0) / Double(n))) }
     let lo = Int(150 / sr * Double(n)), hi = Int(16_000 / sr * Double(n))
-    let renderer = MixRenderer(snapshot: mix.snapshot(masterGain: 1, including: including))
+    let renderer = MixRenderer(snapshot: snapshot)
     renderer.setPositionImmediately(Int(from * sr))
     var out: [Double] = []
     for _ in 0..<bars {
@@ -324,8 +347,9 @@ if let k = CommandLine.arguments.firstIndex(of: "--detail"), let which = Int(Com
         let v = barLevels(from: from, bars: n, barSeconds: t.barSeconds, including: f)
         print(name.padding(toLength: 10, withPad: " ", startingAt: 0) + v.map { $0 < -90 ? "   ." : String(format: "%4.0f", $0) }.joined())
     }
-    print(String(format: "%@ → %@  %@ %d bars, switch %.0f, voice out %@ in %@", SongTitle.of(mix.tracks[t.from].url),
+    print(String(format: "%@ → %@  %@ %d bars%@, switch %.0f, voice out %@ in %@", SongTitle.of(mix.tracks[t.from].url),
                  SongTitle.of(mix.tracks[t.to].url), t.edit.preset.displayName, t.edit.bars,
+                 t.plan.placement.loopBars > 0 ? String(format: " (A's beat looped, %d bars)", t.plan.placement.loopBars) : "",
                  TransitionBuilder.switchBar(t.edit.preset, bars: t.edit.bars, lowSwap: t.plan.placement.lowSwap),
                  t.vocalOut.map { String(format: "%.1f", ($0 - t.start) / t.barSeconds) } ?? "-",
                  t.vocalIn.map { String(format: "%.1f", ($0 - t.start) / t.barSeconds) } ?? "-"))
@@ -535,6 +559,79 @@ if CommandLine.arguments.contains("--steps") {
     exit(0)
 }
 
+if CommandLine.arguments.contains("--vocals") {
+    // How each pair of voices changed hands, as heard: beats both sang at
+    // once, the longest silence between them, and where in each song's
+    // words the cut fell (mid-sentence for A, mid-part for B).
+    func slot(_ k: Int, _ t: Double) -> Int? {
+        let track = mix.tracks[k]
+        let own = track.map.source((t - track.offset) * sr) / sr
+        return Int((track.loaded.analysis.grid.bars(at: own) * Double(VocalPhrasing.slots)).rounded())
+    }
+    var overlapSum = 0, gapWorst = 0, gaps4 = 0, aMid = 0, bMid = 0, both = 0, steps: [Double] = []
+    for (i, t) in mix.transitions.enumerated() {
+        guard let out = t.vocalOut, let inn = t.vocalIn else { continue }
+        both += 1
+        let beat = t.barSeconds / 4
+        let from = min(out, inn) - 4 * t.barSeconds, beats = Int((abs(out - inn) + 8 * t.barSeconds) / beat)
+        let la = barLevels(from: from, bars: beats, barSeconds: beat) { k, s in k == t.from && s == .vocals }
+        let lb = barLevels(from: from, bars: beats, barSeconds: beat) { k, s in k == t.to && s == .vocals }
+        func ref(_ l: [Double]) -> Double { let s = l.sorted(); return s[Int(Double(s.count - 1) * 0.9)] }
+        let ra = ref(la), rb = ref(lb)
+        let ha = la.map { $0 > ra - 15 }, hb = lb.map { $0 > rb - 15 }
+        let overlap = ha.indices.filter { ha[$0] && hb[$0] }.count
+        // Longest run with neither voice heard where one of the songs,
+        // played untouched, would be singing: a hole the transition made
+        // (a song's own bars without words are no hole).
+        var raw = mix
+        for k in raw.tracks.indices { raw.tracks[k].envelopes = [:]; raw.tracks[k].rolls = [] }
+        func untouched(_ k: Int) -> [Double] {
+            barLevels(from: from, bars: beats, barSeconds: beat, of: raw.snapshot(masterGain: 1, including: { i, s in i == k && s == .vocals }))
+        }
+        let ua = untouched(t.from).map { $0 > ra - 15 }, ub = untouched(t.to).map { $0 > rb - 15 }
+        var gap = 0, run = 0
+        for k in 0..<beats {
+            let hole = !ha[k] && !hb[k] && (ua[k] || ub[k])
+            run = hole ? run + 1 : 0; gap = max(gap, run)
+        }
+        // (Inside on both neighbouring sixteenths too: a cut made to the
+        // millisecond on a sentence's end rounds to either side of it.)
+        // (A comma's clause ending is a way out the planner means to take.
+        // Not judged where the song jumps or is counted at half or double
+        // time: its own grid isn't the blend's count there.)
+        let plain = mix.tracks[t.from].skip == nil && mix.tracks[t.to].skip == nil
+            && MixMath.tempoMultiplier(a: mix.tracks[t.from].loaded.analysis.grid.bpm, b: mix.tracks[t.to].loaded.analysis.grid.bpm) == 1
+        let sa = plain && (slot(t.from, out).map { k in (k - 1...k + 1).allSatisfy {
+            (mix.tracks[t.from].loaded.analysis.structure?.midSentence(at: $0) ?? false)
+                && !(mix.tracks[t.from].loaded.analysis.structure?.clauseEnd(at: $0) ?? false) } } ?? false)
+        let sb = plain && slot(t.to, inn).map { k in (k - 1...k + 1).allSatisfy {
+            mix.tracks[t.to].loaded.analysis.structure?.midPart(at: $0) ?? false } } ?? false
+        if sa, CommandLine.arguments.contains("-v"), let k = slot(t.from, out) {
+            let planned = Double(VocalPhrasing.slots) * (Double(t.edit.entryBar) + (out - t.start) / t.barSeconds)
+            print(String(format: "   A cut at sixteenth %d by its grid, %.2f as planned", k, planned))
+        }
+        // The singer's level as heard, A's last 8 sung beats against B's
+        // first 8 (median of each, beats where it's heard).
+        let aSung = ha.indices.filter { ha[$0] }.suffix(8).map { la[$0] }.sorted()
+        let bSung = hb.indices.filter { hb[$0] }.prefix(8).map { lb[$0] }.sorted()
+        // (A voice that never really sings here, its loud beats down in the
+        // noise, has no level to match.)
+        let sings = ra > 25 && rb > 25 && !aSung.isEmpty && !bSung.isEmpty
+        let step = sings ? bSung[bSung.count / 2] - aSung[aSung.count / 2] : 0
+        if sings { steps.append(step) }
+        overlapSum += overlap; gapWorst = max(gapWorst, gap); if gap > 4 { gaps4 += 1 }
+        if sa { aMid += 1 }; if sb { bMid += 1 }
+        print(String(format: "%02d voice %+5.1f dB  overlap %2d beats  gap %2d beats  A out %@%@  B in %@%@  %@ → %@", i + 1, step, overlap, gap,
+                     t.vocalOutKind ?? "-", sa ? " MID-SENTENCE" : "", t.vocalInKind ?? "-", sb ? " MID-PART" : "",
+                     SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url)))
+    }
+    let absSteps = steps.map(abs).sorted()
+    print(String(format: "VOICE LEVEL B against A: mean |step| %.1f dB, median %.1f, worst %.1f, over 4 dB: %d",
+                 absSteps.reduce(0, +) / Double(max(1, absSteps.count)), absSteps.isEmpty ? 0 : absSteps[absSteps.count / 2],
+                 absSteps.last ?? 0, absSteps.filter { $0 > 4 }.count))
+    print("VOCALS \(both) handovers: overlap \(overlapSum) beats, longest gap \(gapWorst) beats, gaps over a bar \(gaps4), A cut mid-sentence \(aMid), B in mid-part \(bMid)")
+    exit(0)
+}
 if CommandLine.arguments.contains("--report") {
     // Everything that can be measured about each transition, and the set's
     // totals: what a change to the planner is judged by.
@@ -624,6 +721,11 @@ if CommandLine.arguments.contains("--report") {
     // between words ("word") or on the downbeat while singing ("bar");
     // B's came in likewise.
     var outKinds: [String: Int] = [:], inKinds: [String: Int] = [:]
+    for (i, t) in mix.transitions.enumerated() where CommandLine.arguments.contains("-v")
+        && (t.vocalInKind == "word" || t.vocalOutKind == "word" || t.vocalOutKind == "bar") {
+        print(String(format: "VOICE %02d out %@ in %@  %@ → %@", i + 1, t.vocalOutKind ?? "none", t.vocalInKind ?? "none",
+                     SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url)))
+    }
     for t in mix.transitions {
         outKinds[t.vocalOutKind ?? "none", default: 0] += 1
         inKinds[t.vocalInKind ?? "none", default: 0] += 1

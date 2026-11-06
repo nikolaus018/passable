@@ -352,3 +352,29 @@ final class PlaybackRecoveryTests: XCTestCase {
         playback.pause()
     }
 }
+
+final class SetShapeTests: XCTestCase {
+    /// Two songs blend or cut the same whichever plays first: the stretch
+    /// each is heard at is the same both ways round.
+    func testStretchIsTheSameEitherWayRound() {
+        for (a, b) in [(153.6, 170.0), (120.0, 132.0), (128.0, 117.0), (146.0, 135.0)] {
+            XCTAssertEqual(MixMath.stretch(MixMath.rate(a: a, b: b)), MixMath.stretch(MixMath.rate(a: b, b: a)), accuracy: 1e-12)
+            XCTAssertEqual(MixMath.recommendedPreset(a: a, b: b), MixMath.recommendedPreset(a: b, b: a), "\(a) ↔ \(b)")
+        }
+    }
+
+    /// With every transition priced alike, a set opens with its gentlest
+    /// songs, has its hardest about four fifths in, and doesn't end on its
+    /// gentlest; the search finds that as the exact order does.
+    func testSetFollowsTheArc() {
+        let n = 14
+        let energies = (0..<n).map { Double($0) / Double(n - 1) }
+        let costs = (0..<n).map { i in (0..<n).map { j in i == j ? 0.0 : -1 } }
+        for order in [SetOrdering.order(costs, energies: energies), SetOrdering.search(costs, nil, SetOrdering.EnergyArc(energies))] {
+            XCTAssertLessThan(energies[order[0]], 0.25, "opens gently")
+            let peak = order.firstIndex(of: n - 1)!
+            XCTAssertEqual(Double(peak) / Double(n - 1), 0.8, accuracy: 0.1, "peaks four fifths in")
+            XCTAssertGreaterThan(energies[order.last!], 0.5, "doesn't end on its gentlest")
+        }
+    }
+}

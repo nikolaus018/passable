@@ -60,11 +60,11 @@ struct TransitionPanel: View {
                 } else if share.a != 1 {
                     Text(String(format: "A %.2f and B %.2f meet at %.2f BPM", a.grid.bpm, own, a.grid.bpm * share.a))
                     Text(String(format: "A %+.1f%%, B %+.1f%%", (share.a - 1) * 100, (share.b - 1) * 100))
-                        .foregroundStyle(abs(percent) > 8 ? .orange : .secondary)
+                        .foregroundStyle(MixMath.stretch(session.matchRate) > MixMath.easyStretch ? .orange : .secondary)
                 } else {
                     Text(String(format: "B %.2f → %.2f BPM", own, a.grid.bpm))
                     Text(String(format: "%+.1f%%", percent))
-                        .foregroundStyle(abs(percent) > 8 ? .orange : .secondary)
+                        .foregroundStyle(MixMath.stretch(session.matchRate) > MixMath.easyStretch ? .orange : .secondary)
                 }
                 Spacer()
             }
@@ -73,7 +73,7 @@ struct TransitionPanel: View {
                   : (share.a != 1
                      ? "The two meet at a tempo between theirs, so neither is heard far off its own: A glides there over its last bars alone, B glides back to its own after the blend and plays untouched."
                      : "B matches A's tempo only while they overlap, then glides back to its own over \(session.glideBars) bars and plays untouched.")
-                    + (abs(percent) > 100 * MixMath.easyStretch ? " That's a big stretch, so the blend is a quick one." : ""))
+                    + (MixMath.stretch(session.matchRate) > MixMath.easyStretch ? " That's a big stretch, so the blend is a quick one." : ""))
             HStack(spacing: 6) {
                 Image(systemName: "tuningfork").frame(width: 16)
                 if session.semitones == 0 {

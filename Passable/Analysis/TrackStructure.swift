@@ -950,12 +950,29 @@ struct TransitionShape {
         }
         return 10 * log10(max(power, 1e-9))
     }
+
+    /// `mixLevel` of the two songs' drums alone: the beat as heard.
+    func beatLevel(_ k: Int, a: [StemKind: [Gains]], e: Int, b: [StemKind: [Gains]], c: Int) -> Float {
+        var power: Float = 0
+        for (side, p, bar) in [(DeckSide.a, a, e + k), (.b, b, c + k)] {
+            guard let levels = p[.drums], bar >= 0, bar < levels.count else { continue }
+            let g: Gains = k < first ? (side == .a ? (1, 1) : (0, 0))
+                : k >= last ? (side == .a ? (0, 0) : (1, 1))
+                : gains[side]?[.drums]?[k - first] ?? (1, 1)
+            power += g.low * levels[bar].low + g.high * levels[bar].high
+        }
+        return 10 * log10(max(power, 1e-9))
+    }
 }
 
 extension TransitionShape {
     /// Whether three or more of the four tonal parts (each song's melody
-    /// and voice) are clearly heard in bar `k`, each within 10 dB of all
-    /// that plays above 150 Hz: too much at once (as SetLab measures it).
+    /// and voice) are clearly heard in bar `k`, each within 12 dB of the
+    /// loudest of them (and not lost under everything, 20 dB down): too
+    /// much at once, as passable-render's report measures it. (Within 10 dB
+    /// of all that plays above 150 Hz, as this was, let loud drums hide
+    /// the clutter: two melodies and a voice fighting each other under a
+    /// big beat counted as two, and the report found 5 such bars a blend.)
     func busy(_ k: Int, a: [StemKind: [Gains]], e: Int, b: [StemKind: [Gains]], c: Int) -> Bool {
         guard k >= first, k < last else { return false }
         var total: Float = 0, parts: [Float] = []
@@ -966,7 +983,8 @@ extension TransitionShape {
                 if stem == .other || stem == .vocals { parts.append(heard) }
             }
         }
-        return parts.filter { $0 > 0.1 * total }.count >= 3
+        let top = parts.max() ?? 0
+        return parts.filter { $0 > 0.063 * top && $0 > 0.01 * total }.count >= 3
     }
 
     /// Whether both songs are clearly heard in bar `k`: drums, melody and
@@ -1103,6 +1121,9 @@ enum AutoPlacement {
             switch cut {
             case .line?: return 0
             case .word?: return word
+            // (A sentence cut off on its breath: nearly as bad as no cut
+            // at all; heard as the words stopping, not the line ending.)
+            case .mid?: return 0.8 * none
             case nil: return none
             }
         }
@@ -1273,6 +1294,10 @@ enum AutoPlacement {
     /// part of it (see `TrackStructure.midPart`), on top of the part's edge
     /// it doesn't get: more than waiting a few bars for the next part.
     static let midPartCost: Float = 2.0
+
+    /// What each bar past the first costs a spot where nobody sings though
+    /// a song has words there (A's voice gone before B's has come).
+    static let voicelessBar: Float = 0.3
 
     /// Where the builder will cut a vocal in or out (bars from the
     /// transition's start, with the song at its bar `bar0` there), found
@@ -2004,6 +2029,21 @@ enum AutoPlacement {
                                 }.count
                                 penalty += 0.4 * Float(max(0, busy - 2))
                                 busiest = max(busiest, busy)
+                                // The beat gone for a bar while the blend runs:
+                                // nothing keeps time (A's own drum break, its
+                                // voice and melody that covered it already
+                                // handed over, over B's thin intro beat). The
+                                // level hardly moves, B's voice fills it, so
+                                // the holes above miss it. (The drop moment's
+                                // silence before the switch is meant.)
+                                if !echo, shape.first < shape.last {
+                                    let beat = (shape.first..<shape.last).map {
+                                        shape.beatLevel($0, a: powerA, e: e, b: powerB, c: c)
+                                    }
+                                    let usual = beat.sorted()[beat.count / 2]
+                                    let meant = drop ? (sw ?? -1) - 1 - shape.first : -1
+                                    penalty += 0.4 * Float(beat.indices.filter { $0 != meant && beat[$0] < usual - 12 }.count)
+                                }
                                 worstPenalty = max(worstPenalty, penalty * 24 / Float(bars.count))
                                 // A transition, not two songs in a row: both
                                 // clearly heard for a while.
@@ -2098,12 +2138,20 @@ enum AutoPlacement {
                     // And nobody singing where a song has words: A's voice
                     // gone before B's has come (or B's held back where A
                     // has nothing to sing) is a hole in the blend's middle.
+                    // (Where A's record sings, not its loop: a loop has no
+                    // voice, so its bars read as nothing missing, and a
+                    // blend looped A's beat from its first bar with B's
+                    // voice 14 bars off: 14 bars of nobody singing, priced
+                    // as none.)
                     let from = heardOut ?? Double(out), to = heardVocal ?? Double(handoff)
                     let silent = (0..<n).filter { k in
-                        let a = sa.isActive(.vocals, bar: e + k), b = sb.isActive(.vocals, bar: c + k)
+                        let a = whole.isActive(.vocals, bar: e + k), b = sb.isActive(.vocals, bar: c + k)
                         return (a || b) && !(a && Double(k) < from) && !(b && Double(k + 1) > to)
                     }.count
-                    s -= 0.3 * Float(max(0, silent - 1))
+                    // (At 0.6 a bar, the holes stayed as they were, 21 of
+                    // 57 handovers on a 58-song set with more than a bar,
+                    // and voices were cut between words half as often again.)
+                    s -= voicelessBar * Float(max(0, silent - 1))
                     // Where the grooves aren't known to lock, the voices may
                     // hand over as the cautious plan has them instead (B's
                     // waiting for the swap): the bars nobody would sing
@@ -2111,13 +2159,13 @@ enum AutoPlacement {
                     if let cautious {
                         let from = cautious.out ?? Double(out), to = cautious.vin
                         let risk = (0..<n).filter { k in
-                            let a = sa.isActive(.vocals, bar: e + k), b = sb.isActive(.vocals, bar: c + k)
+                            let a = whole.isActive(.vocals, bar: e + k), b = sb.isActive(.vocals, bar: c + k)
                             return (a || b) && !(a && Double(k) < from) && !(b && Double(k + 1) > to)
                         }.count
                         // (In full over a loop: A's voice is gone from the
                         // first bar, so those bars are nobody singing for
                         // certain if B's waits.)
-                        s -= (loop > 0 ? 0.3 : 0.15) * Float(max(0, risk - silent))
+                        s -= (loop > 0 ? 1 : 0.5) * voicelessBar * Float(max(0, risk - silent))
                     }
                     if s > best.score { best = (e, c, handoff, sw, s); bestHeard = heard; bestVocal = heardVocal; bestCarry = heardCarry }
                 }

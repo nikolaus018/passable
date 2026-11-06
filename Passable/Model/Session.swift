@@ -602,7 +602,7 @@ final class Session: ObservableObject {
         let metre = preset == .echoOut ? Metre() : Metre(a: a.grid, b: b.grid)
         var result = AutoPlacement.place(a: a, b: b.counted(metre), bars: transitionBars, preset: preset,
                                          trimA: Float(trimDB(.a)), trimB: Float(trimDB(.b)), keysClash: keysIncompatible,
-                                         mashup: !keysIncompatible && abs(matchRate - 1) < MixMath.mashupStretch,
+                                         mashup: !keysIncompatible && MixMath.stretch(matchRate) < MixMath.mashupStretch,
                                          bShift: semitones)
         result.cueBar = metre.own(result.cueBar)
         placedFor = Placed(preset: preset, bars: transitionBars, entryBar: result.entryBar, cueBar: result.cueBar,

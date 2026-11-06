@@ -30,23 +30,36 @@ enum MixMath {
     /// neither is heard far off its own: A glides there over its last
     /// bars alone, B glides home from there afterwards.
     static func shared(_ rate: Double) -> (a: Double, b: Double) {
-        guard abs(rate - 1) > shareAbove else { return (1, rate) }
+        guard stretch(rate) > shareAbove else { return (1, rate) }
         let b = rate.squareRoot()
         return (b / rate, b)
     }
 
-    /// Stretches up to this are the incoming song's alone.
-    static let shareAbove = 0.03
+    /// How far apart two tempos are, the same whichever song is faster:
+    /// the faster one's over the slower one's, less one. (`abs(rate - 1)`,
+    /// as this was, called B 10 % slower than A a stretch of 0.10 but B
+    /// 10 % faster one of 0.11: the same pair blended one way round and
+    /// cut the other, which locked a set's slow songs onto its end, the
+    /// only place they could be reached without a cut.)
+    static func stretch(_ rate: Double) -> Double {
+        guard rate > 0 else { return 0 }
+        return max(rate, 1 / rate) - 1
+    }
+
+    /// Stretches up to this (B up to 3 % slower or faster than A) are the
+    /// incoming song's alone.
+    static let shareAbove = 1 / 0.97 - 1
 
     /// Beyond this (B's rate to A), the two aren't beat-matched: B comes in
     /// on a cut, each song at its own tempo (see `TransitionPreset.echoOut`
-    /// at one bar). Up to it they meet half-way (see `shared`), each no
-    /// more than 5 % off its own tempo: what a club DJ's pitch fader does
+    /// at one bar). Up to it (B up to 10 % slower or faster: see
+    /// `stretch`) they meet half-way (see `shared`), each no more than
+    /// about 5 % off its own tempo: what a club DJ's pitch fader does
     /// with key lock on before a record everyone knows sounds too fast or
     /// too slow. (At 42 %, as this was, every steady pair was blended, and
     /// songs played up to 19 % off their own tempo: heard as wrong at once.
     /// 146 into 135 BPM, 8 %, still blends.)
-    static let maxStretch = 0.10
+    static let maxStretch = 1 / 0.90 - 1
 
     /// What a cut or Wash Out costs the set's order, against a blend's
     /// roughly -2 (great) to +1 (weak): a cut only where no order of the
@@ -67,10 +80,10 @@ enum MixMath {
     /// Up to this (each song no more than 4 % off its own tempo) a blend
     /// may run long. Past it the blend is a quick one: both songs are off
     /// their own tempo through it, which is heard the longer it lasts.
-    static let easyStretch = 0.08
+    static let easyStretch = 1 / 0.92 - 1
 
     static func recommendedPreset(rate: Double) -> TransitionPreset {
-        abs(rate - 1) > maxStretch ? .echoOut : .stemSwap
+        stretch(rate) > maxStretch ? .echoOut : .stemSwap
     }
 
     /// As above, from the two tempos. (Songs detected at half or double
@@ -137,7 +150,7 @@ enum MixMath {
 
     /// Tempos this close layer a vocal over the other song's beat without
     /// the stretch being heard.
-    static let mashupStretch = 0.05
+    static let mashupStretch = 1 / 0.95 - 1
 
     /// Bars to a loop of the outgoing song's beat: one four-bar phrase,
     /// which is what a DJ loops (shorter is a stutter, longer goes round
@@ -236,7 +249,7 @@ struct PairPlan: Equatable {
                                 // (Heard to clash on the audio, wherever placed: see
                                 // `SetBuilder.build(clashed:)`.)
                                 clashAbove: clashing ? -.infinity : Harmony.tolerance(aKey, b.key.transposed(by: shift)),
-                                mashup: !clash(shift) && abs(rate - 1) < MixMath.mashupStretch, soloFrom: soloFrom,
+                                mashup: !clash(shift) && MixMath.stretch(rate) < MixMath.mashupStretch, soloFrom: soloFrom,
                                 skip: skip, aShift: aShift, bShift: shift, drumsLock: drumsLock, drumsLinger: drumsLinger,
                                 at: fixed.map { ($0.entryBar, $0.cueBar) },
                                 glide: preset == .echoOut ? 0 : MixMath.glideBars(rate: MixMath.shared(rate).b),
@@ -303,7 +316,7 @@ struct PairPlan: Equatable {
             || $0.bars <= 8 }
         // Tempos far apart: a quick blend. Both songs are well off their
         // own tempo through it, which is heard the longer it lasts.
-        if abs(rate - 1) > MixMath.easyStretch { options = options.filter { $0.preset == .echoOut || $0.bars <= 8 } }
+        if MixMath.stretch(rate) > MixMath.easyStretch { options = options.filter { $0.preset == .echoOut || $0.bars <= 8 } }
         if let fixed {
             options = [(fixed.preset, fixed.bars, 0, 0)]
             if fixed.preset == .stemSwap { options.append((fixed.preset, fixed.bars, 0, MixMath.loopBars)) }
@@ -372,7 +385,7 @@ struct PairPlan: Equatable {
     /// whether the energy keeps going, and how well the two songs' sections
     /// line up for a blend.
     func cost(a: TrackAnalysis, b: TrackAnalysis) -> Double {
-        let stretch = abs(MixMath.rate(a: a.grid.bpm, b: b.grid.bpm) - 1) * 100
+        let stretch = MixMath.stretch(MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)) * 100
         var cost: Double
         // A Wash Out or a cut is priced as one whatever the tempos say:
         // it's a jump in tempo, fine once, not all night. A blend costs as
@@ -414,7 +427,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "8"
+    static let planner = "18"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -473,15 +486,33 @@ enum SetOrdering {
     }
 
     /// 0…1: how hard a track drives — tempo, and how much of it has a full
-    /// beat and bass line going.
+    /// beat and low end going.
     static func energy(_ t: TrackAnalysis) -> Double {
         let tempo = min(1, max(0, (t.grid.bpm * foldToClubRange(t.grid.bpm) - 95) / 40))
         guard let s = t.structure else { return tempo }
-        let drums = s.activity(.drums), bass = s.activity(.bass)
-        let n = min(drums.count, bass.count)
+        let drums = s.activity(.drums)
+        let low = lowEndGoing(s) ?? s.activity(.bass).map { $0 > 0.5 }
+        let n = min(drums.count, low.count)
         guard n > 0 else { return tempo }
-        let full = (0..<n).filter { drums[$0] > 0.5 && bass[$0] > 0.5 }.count
+        let full = (0..<n).filter { drums[$0] > 0.5 && low[$0] }.count
         return 0.45 * tempo + 0.55 * Double(full) / Double(n)
+    }
+
+    /// Per bar: the song's low end is going, from whichever parts carry it
+    /// (all of them below the low split, within 6 dB of the song's full
+    /// low end, its 80th-percentile bar). By the bass stem alone, as this
+    /// was, a low end in the kick (an 808) or in a synth the separation
+    /// calls melody read as none: Yeah! went 21 % of its bars with a bass,
+    /// SexyBack 17 %, Give Me Everything 9 %, and they were rated a set's
+    /// gentlest records.
+    static func lowEndGoing(_ s: TrackStructure) -> [Bool]? {
+        guard let lows = s.stemLowLevel else { return nil }
+        let stems = lows.values.filter { !$0.isEmpty }
+        guard let n = stems.map(\.count).min(), n > 0 else { return nil }
+        let power = (0..<n).map { k in stems.reduce(Float(0)) { $0 + pow(10, $1[k] / 10) } }
+        let full = power.sorted()[Int(Double(n - 1) * 0.8)]
+        guard full > 0 else { return nil }
+        return power.map { $0 >= full * 0.25 }
     }
 
     /// Every ordered pair's transition cost.
@@ -544,24 +575,61 @@ enum SetOrdering {
     /// range belong next to each other, not each behind a bridge of its own.
     static let extraWashOutPenalty = 0.75
 
-    /// A set builds. Each transition is priced for the energy it drops,
-    /// but a set that peaks and then winds down song by song in small
-    /// steps pays little of that: the songs with the least drive belong
-    /// before the peak, not after it.
-    static let lostEnergyPenalty = 1.0
+    /// A night has a shape: it opens with the set's gentler records,
+    /// builds to its hardest about four fifths of the way in, and winds
+    /// down a little for the last few (see `EnergyArc`). Each song is
+    /// priced for how far its energy is from what its place in the set
+    /// asks for, squared: a little off is nearly free (the blends decide),
+    /// a song far from its place costs (0.5 off: 1.0, a fair blend's
+    /// worth). Squared, too, because by the distance alone two songs both
+    /// below their places cost the same either way round, and a set could
+    /// end on its gentlest song as cheaply as open with it. (This was a
+    /// price on energy lost against the set's peak so far: after the peak
+    /// every song paid for it, so the cheapest set held its peak back and
+    /// then dropped everything left after it. On a 58-song set the last
+    /// ten songs were its ten gentlest, energy 0.22–0.55 after a 0.90
+    /// peak, and its worst blends with them.)
+    nonisolated(unsafe) static var arcPenalty = 4.0
+
+    /// What each place in a set's order asks for: the energy of the set's
+    /// own song at that rank (so any set has an arc it can follow,
+    /// whatever its songs), at a place `x` of 0…1 through the set: the
+    /// 10 % mark at the start, rising to the hardest at 0.8, back to the
+    /// 70 % mark at the end.
+    struct EnergyArc {
+        let energies: [Double]
+        private let sorted: [Double]
+        /// How much each step off the arc costs (`arcPenalty`).
+        var weight = arcPenalty
+        init(_ energies: [Double]) { self.energies = energies; sorted = energies.sorted() }
+
+        static func shape(_ x: Double) -> Double {
+            x <= 0.8 ? 0.1 + 0.9 * x / 0.8 : 1 - 0.3 * (x - 0.8) / 0.2
+        }
+
+        /// The song's price for playing `place`th (from 0) of `count`.
+        @inline(__always) func cost(_ song: Int, place: Int, count: Int) -> Double {
+            guard count > 1, !sorted.isEmpty else { return 0 }
+            let q = Self.shape(Double(place) / Double(count - 1)) * Double(sorted.count - 1)
+            let lo = Int(q), hi = min(lo + 1, sorted.count - 1), f = q - Double(lo)
+            let off = energies[song] - (sorted[lo] * (1 - f) + sorted[hi] * f)
+            return weight * off * off
+        }
+    }
 
     /// The order with the lowest total cost: every transition's own, and
     /// what the set as a whole pays for (Wash Outs after the first, a song
-    /// wedged between two, energy lost and not won back; see `total`).
-    /// Exact for sets of up to twelve songs, local search beyond.
-    /// - Parameter energies: each song's `energy`, so the set builds: see
-    ///   `lostEnergyPenalty`.
+    /// wedged between two, each song's distance from the set's arc; see
+    /// `total`). Exact for sets of up to twelve songs, local search beyond.
+    /// - Parameter energies: each song's `energy`, so the set has a shape:
+    ///   see `arcPenalty`.
     static func order(_ costs: [[Double]], washOuts: [[Bool]]? = nil, energies: [Double]? = nil, shakes: Int? = nil) -> [Int] {
         let n = costs.count
         // Two songs have an order too: whichever leads into the other best.
         guard n > 1 else { return Array(0..<n) }
-        if n <= 12 { return exact(costs, washOuts, energies) }
-        return search(costs, washOuts, energies, shakes: shakes)
+        let arc = energies.map(EnergyArc.init)
+        if n <= 12 { return exact(costs, washOuts, arc) }
+        return search(costs, washOuts, arc, shakes: shakes)
     }
 
     /// `order` for a set too long to try every order of: the best of a
@@ -569,8 +637,9 @@ enum SetOrdering {
     /// then, from there, shaken and settled again and again (runs of songs
     /// moved or turned round as one, and a few runs swapped at random to
     /// get out of an order no single move improves), keeping what's
-    /// better. Always the same for the same songs.
-    static func search(_ costs: [[Double]], _ washOuts: [[Bool]]? = nil, _ energies: [Double]? = nil,
+    /// better; before and after that, the set's end tried at its start
+    /// (see `rotate`). Always the same for the same songs.
+    static func search(_ costs: [[Double]], _ washOuts: [[Bool]]? = nil, _ energies: EnergyArc? = nil,
                        shakes: Int? = nil) -> [Int] {
         let n = costs.count
         guard n > 2 else { return Array(0..<n) }
@@ -585,6 +654,7 @@ enum SetOrdering {
         improve(&best, costs, washOuts, energies, blocks: 3)
         bestCost = settle(&best, costs, washOuts, energies)
         guard n >= 8 else { return best }
+        rotate(&best, &bestCost, costs, washOuts, energies)
         var random = SplitMix(state: 0x9E37_79B9_7F4A_7C15)
         // About as much work whatever the set's length (each settle costs
         // ~n³): ~500 rounds at 68 songs, a few seconds, where more search
@@ -600,7 +670,32 @@ enum SetOrdering {
             let cost = settle(&path, costs, washOuts, energies)
             if cost < bestCost - 1e-9 { (best, bestCost) = (path, cost) }
         }
+        rotate(&best, &bestCost, costs, washOuts, energies)
         return best
+    }
+
+    /// The set's end moved to its start, either way round, at every split,
+    /// each settled, while that finds a better order: a block of songs in a
+    /// tempo of their own (a set's slow hip-hop) sits at one end, the only
+    /// place it's reached without a cut, and moving it to the other end is
+    /// one move of many songs no other step makes. Which end it takes is
+    /// the prices' to say. (A 58-song set ordered without this kept its
+    /// slow block at the end where opening with it, rising through double
+    /// time into the main block, was 1.7 cheaper at the prices of then.)
+    private static func rotate(_ best: inout [Int], _ bestCost: inout Double, _ costs: [[Double]],
+                               _ washOuts: [[Bool]]?, _ energies: EnergyArc?) {
+        let n = best.count
+        var rotated = true
+        while rotated {
+            rotated = false
+            for k in 1..<n {
+                for reversed in [false, true] {
+                    var path = (reversed ? Array(best[k...].reversed()) : Array(best[k...])) + best[..<k]
+                    let cost = settle(&path, costs, washOuts, energies)
+                    if cost < bestCost - 1e-9 { (best, bestCost, rotated) = (path, cost, true) }
+                }
+            }
+        }
     }
 
     /// A small, fixed random sequence (the same set always gets the same
@@ -620,7 +715,7 @@ enum SetOrdering {
     /// moved elsewhere, either way round, or any run turned round where
     /// it is) until none improves the order; returns its cost.
     private static func settle(_ path: inout [Int], _ costs: [[Double]], _ washOuts: [[Bool]]?,
-                               _ energies: [Double]?) -> Double {
+                               _ energies: EnergyArc?) -> Double {
         let n = path.count
         var current = total(path, costs, washOuts, energies)
         // Every move, priced on all cores: (block start, length; 0 = turn
@@ -687,6 +782,7 @@ enum SetOrdering {
     static func insert(_ new: [Int], into path: [Int], _ costs: [[Double]], washOuts: [[Bool]]? = nil,
                        energies: [Double]? = nil) -> [Int] {
         var path = path, left = new
+        let energies = energies.map(EnergyArc.init)
         while !left.isEmpty {
             var best: (cost: Double, song: Int, at: Int)?
             for (k, song) in left.enumerated() {
@@ -705,24 +801,25 @@ enum SetOrdering {
 
     static func total(_ path: [Int], _ costs: [[Double]], _ washOuts: [[Bool]]? = nil,
                       _ energies: [Double]? = nil) -> Double {
+        total(path, costs, washOuts, energies.map(EnergyArc.init))
+    }
+
+    static func total(_ path: [Int], _ costs: [[Double]], _ washOuts: [[Bool]]?, _ energies: EnergyArc?) -> Double {
         path.withUnsafeBufferPointer { p in total(count: p.count, costs, washOuts, energies) { p[$0] } }
     }
 
     /// `total` of the order whose song at each place `song` gives.
     @inline(__always)
-    static func total(count n: Int, _ costs: [[Double]], _ washOuts: [[Bool]]?, _ energies: [Double]?,
+    static func total(count n: Int, _ costs: [[Double]], _ washOuts: [[Bool]]?, _ energies: EnergyArc?,
                       song: (Int) -> Int) -> Double {
         guard n > 0 else { return 0 }
-        var sum = 0.0, peak = 0.0, washOutCount = 0, previousWashOut = false
+        var sum = 0.0, washOutCount = 0, previousWashOut = false
         var last = song(0)
-        if let energies { peak = energies[last] }
+        if let energies { sum += energies.cost(last, place: 0, count: n) }
         for k in 1..<max(1, n) {
             let next = song(k)
             sum += costs[last][next]
-            if let energies {
-                peak = max(peak, energies[next])
-                sum += lostEnergyPenalty * (peak - energies[next])
-            }
+            if let energies { sum += energies.cost(next, place: k, count: n) }
             if let washOuts {
                 let w = washOuts[last][next]
                 if w {
@@ -741,21 +838,14 @@ enum SetOrdering {
     /// programming over (songs played, last song, Wash Outs so far): what
     /// a path has cost depends on no more than that (its hardest song so
     /// far is that of the songs played).
-    private static func exact(_ costs: [[Double]], _ washOuts: [[Bool]]?, _ energies: [Double]?) -> [Int] {
+    private static func exact(_ costs: [[Double]], _ washOuts: [[Bool]]?, _ energies: EnergyArc?) -> [Int] {
         let n = costs.count, full = 1 << n
         // 0: no Wash Out yet; 1: one before, the last transition wasn't; 2: the last transition was one.
         let flags = 3
-        var peak = [Double](repeating: 0, count: full)
-        if let energies {
-            for mask in 1..<full {
-                let low = mask.trailingZeroBitCount
-                peak[mask] = max(peak[mask & (mask - 1)], energies[low])
-            }
-        }
         func index(_ mask: Int, _ last: Int, _ flag: Int) -> Int { (mask * n + last) * flags + flag }
         var dp = [Double](repeating: .infinity, count: full * n * flags)
         var parent = [Int32](repeating: -1, count: full * n * flags)
-        for i in 0..<n { dp[index(1 << i, i, 0)] = 0 }
+        for i in 0..<n { dp[index(1 << i, i, 0)] = energies?.cost(i, place: 0, count: n) ?? 0 }
         for mask in 1..<full {
             for last in 0..<n where mask & (1 << last) != 0 {
                 for flag in 0..<flags {
@@ -770,7 +860,7 @@ enum SetOrdering {
                             if flag == 2 { c += washOutPairPenalty }
                             f = 2
                         }
-                        if let energies { c += lostEnergyPenalty * (peak[m] - energies[next]) }
+                        if let energies { c += energies.cost(next, place: mask.nonzeroBitCount, count: n) }
                         if c < dp[index(m, next, f)] {
                             dp[index(m, next, f)] = c
                             parent[index(m, next, f)] = Int32(last * flags + flag)
@@ -812,7 +902,7 @@ enum SetOrdering {
     /// Or-opt: move single songs, or runs of up to `blocks` songs, to a
     /// better spot until nothing improves.
     private static func improve(_ path: inout [Int], _ costs: [[Double]], _ washOuts: [[Bool]]? = nil,
-                                _ energies: [Double]? = nil, blocks: Int = 1) {
+                                _ energies: EnergyArc? = nil, blocks: Int = 1) {
         var improved = true
         while improved {
             improved = false
@@ -1683,6 +1773,10 @@ enum VocalPhrasing {
         /// over, but no word is cut in two (and taken out here, its last
         /// word rings on in the echo).
         case word
+        /// A breath inside a sentence (for a voice let in, inside a part):
+        /// silent, but what's sung goes on across it ("I gotta get my body
+        /// | moving"), so the words are cut short all the same.
+        case mid
     }
 
     /// Sixteenths to a bar.
@@ -1731,7 +1825,7 @@ enum VocalPhrasing {
         let song = reference
         let reference = local(reference, from: from, through: through, level: level)
         func silent(_ k: Int) -> Bool { quiet(level(k), reference) }
-        var best: (slot: Int, kind: Cut, cost: Double)?, clean: (slot: Int, kind: Cut, cost: Double)?
+        var best: (slot: Int, kind: Cut, cost: Double, within: Bool)?, clean: (slot: Int, kind: Cut, cost: Double, within: Bool)?
         for k in from...through {
             let gap = opening ? k - 1 : k
             var kind: Cut?, extra = 0.0
@@ -1759,11 +1853,21 @@ enum VocalPhrasing {
             // Taken out late, it sings over the song that has taken over;
             // let in early, over the one that hasn't left.
             let wrongSide = opening ? k < 0 : k > 0
-            let cost = 2 * Double(abs(k)) / Double(slots) + (kind == .word ? 0.25 : 0) + extra / 2 + (wrongSide ? 0.1 : 0)
-            if cost < best?.cost ?? .infinity { best = (k, kind, cost) }
-            if !within, cost < clean?.cost ?? .infinity { clean = (k, kind, cost) }
+            // (Between two words of a line costs half a bar of waiting: a
+            // DJ lets a singer in on the start of a line and out on its end
+            // a beat or two off the bar rather than mid-sentence on it. At
+            // an eighth of a bar, as this was, a gap between words on the
+            // bar beat a line starting half a beat later: 14 of 57 voices
+            // came in mid-line on a 58-song set.)
+            let cost = 2 * Double(abs(k)) / Double(slots) + (kind == .word ? wordCost : 0) + extra / 2 + (wrongSide ? 0.1 : 0)
+            if cost < best?.cost ?? .infinity { best = (k, kind, cost, within) }
+            if !within, cost < clean?.cost ?? .infinity { clean = (k, kind, cost, within) }
         }
-        return (clean ?? best).map { ($0.slot, $0.kind) }
+        // A breath inside a sentence (a part, for a voice let in) is no
+        // line's end: it's priced and told as what it is. (Told as a
+        // line, placement took it for free: 10 of 57 voices on a 58-song
+        // set were taken out on a breath mid-sentence.)
+        return (clean ?? best).map { ($0.slot, $0.within ? .mid : $0.kind) }
     }
 
     /// The level a voice sings at around a cut: its loud sixteenths (90th
@@ -1776,6 +1880,10 @@ enum VocalPhrasing {
         guard sung.count >= slots / 2 else { return reference }
         return min(reference + 6, max(reference - 12, sung[(sung.count - 1) * 9 / 10]))
     }
+
+    /// What a cut between two words of a line costs against one between
+    /// lines, in `cut`'s units (2 a bar away from the target).
+    static let wordCost = 1.0
 
     /// dB under what a voice sings at (locally, and in the song) that it
     /// has to fall to for a word the recogniser heard there to be over
@@ -2452,7 +2560,7 @@ enum SetBuilder {
                                                earliest: start - AutoPlacement.pickup * blendBar, latest: start,
                                                bar: blendBar, lines: linesB(start)) {
                     vocalIn = (cut.time - start) / blendBar
-                    vocalInKind = cut.kind == .line ? "breath" : "word"
+                    vocalInKind = cut.kind == .line ? "breath" : cut.kind.rawValue
                 }
             }
             if !byHand, span > 0, let vocalsA = a.stems[.vocals], let vocalsB = matched.stems[.vocals] {
@@ -2589,7 +2697,7 @@ enum SetBuilder {
                                                        latest: start + AutoPlacement.entryLatest(bCounted.structure, aim: aim, bars: edit.bars) * bar,
                                                        bar: bar, lines: linesB(start + aim * bar)) {
                             vocalIn = (cut.time - start) / bar
-                            vocalInKind = cut.kind == .line ? "breath" : "word"
+                            vocalInKind = cut.kind == .line ? "breath" : cut.kind.rawValue
                         } else {
                             vocalIn = aim
                         }
