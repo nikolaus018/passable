@@ -351,3 +351,26 @@ final class OrderPricerTests: XCTestCase {
         mutating func next() -> UInt64 { state = state &* 6364136223846793005 &+ 1442695040888963407; return state }
     }
 }
+
+final class HandoverPriceTests: XCTestCase {
+    /// A breath between singers costs what it did; a lost phrase more than
+    /// its bars one by one.
+    func testLongSilencesCostMoreThanTheirBars() {
+        XCTAssertEqual(AutoPlacement.voiceless(0), 0)
+        XCTAssertEqual(AutoPlacement.voiceless(1), 0)
+        XCTAssertEqual(AutoPlacement.voiceless(4), 3 * AutoPlacement.voicelessBar, accuracy: 1e-6)
+        XCTAssertGreaterThan(AutoPlacement.voiceless(16), 4 * AutoPlacement.voiceless(4) + 3 * AutoPlacement.voicelessBar)
+        for bars in 1..<24 { XCTAssertGreaterThan(AutoPlacement.voiceless(bars + 1), AutoPlacement.voiceless(bars)) }
+    }
+
+    /// Carried, A's melody is still going down as B's comes in: no bar
+    /// with neither.
+    func testCarriedMelodiesOverlapByABar() {
+        for bars in [8, 16] {
+            let q = Double(bars) / 4
+            let from = TransitionBuilder.melodyDissolve(.stemSwap, bars: bars, switchAt: Double(bars), carry: true)
+            XCTAssertEqual(from, q - 1)
+            XCTAssertGreaterThan(from + 2, q, "A's melody gone before B's arrives at \(bars) bars")
+        }
+    }
+}

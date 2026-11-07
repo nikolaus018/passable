@@ -1299,6 +1299,21 @@ enum AutoPlacement {
     /// a song has words there (A's voice gone before B's has come).
     static let voicelessBar: Float = 0.3
 
+    /// What `bars` bars in a row of nobody singing cost (where a song has
+    /// words there): `voicelessBar` each past the first, and more for each
+    /// bar past `longHole`, growing with it. A breath of a bar or two
+    /// between two singers is a handover; a whole phrase of both songs'
+    /// words gone is a chorus the floor doesn't get. (Priced bar for bar,
+    /// sixteen silent bars cost what four holes of four did, and a blend
+    /// looped A's beat for sixteen bars with B's voice held to the end,
+    /// chosen knowing it.)
+    static func voiceless(_ bars: Int) -> Float {
+        let long = Float(max(0, bars - longHole))
+        return voicelessBar * Float(max(0, bars - 1)) + longHoleBar * long * long
+    }
+    static let longHole = 4
+    static let longHoleBar: Float = 0.05
+
     /// Where the builder will cut a vocal in or out (bars from the
     /// transition's start, with the song at its bar `bar0` there), found
     /// from the per-sixteenth levels the way `VocalPhrasing.cut` finds it
@@ -2160,7 +2175,7 @@ enum AutoPlacement {
                     // (At 0.6 a bar, the holes stayed as they were, 21 of
                     // 57 handovers on a 58-song set with more than a bar,
                     // and voices were cut between words half as often again.)
-                    s -= voicelessBar * Float(max(0, silent - 1))
+                    s -= AutoPlacement.voiceless(silent)
                     // Where the grooves aren't known to lock, the voices may
                     // hand over as the cautious plan has them instead (B's
                     // waiting for the swap): the bars nobody would sing
@@ -2174,7 +2189,7 @@ enum AutoPlacement {
                         // (In full over a loop: A's voice is gone from the
                         // first bar, so those bars are nobody singing for
                         // certain if B's waits.)
-                        s -= (loop > 0 ? 1 : 0.5) * voicelessBar * Float(max(0, risk - silent))
+                        s -= (loop > 0 ? 1 : 0.5) * (AutoPlacement.voiceless(risk) - AutoPlacement.voiceless(silent))
                     }
                     if s > best.score { best = (e, c, handoff, sw, s); bestHeard = heard; bestVocal = heardVocal; bestCarry = heardCarry }
                 }

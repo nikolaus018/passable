@@ -18,8 +18,16 @@ enum StemCache {
     static func directory(for url: URL) throws -> URL {
         let dir = try folder(for: url)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Whose it is (see `prune`).
+        let source = dir.appendingPathComponent(sourceFile)
+        if !FileManager.default.fileExists(atPath: source.path) {
+            try? url.standardizedFileURL.path.write(to: source, atomically: true, encoding: .utf8)
+        }
         return dir
     }
+
+    /// The file in a song's folder naming the song's path.
+    private static let sourceFile = "source.txt"
 
     /// `directory(for:)` without making it.
     static func folder(for url: URL) throws -> URL {
@@ -42,15 +50,29 @@ enum StemCache {
     /// nothing ever removed them, so songs deleted long ago still held most
     /// of 200 GB. A folder goes when its song isn't one of `keeping` (the
     /// library and the set) and it hasn't been used for `unusedDays`; one
-    /// that comes back is separated again.
+    /// that comes back is separated again. A folder of a song that is kept,
+    /// but made from an older copy of its file (downloaded again, or
+    /// changed), goes at once: that copy is never read again. (Those, and
+    /// songs gone for less than two weeks, came to 150 folders and 25 GB on
+    /// a 120-song library.)
     @discardableResult
-    static func prune(keeping: [URL], dryRun: Bool = false) -> [URL] {
+    static func prune(keeping: [URL], dryRun: Bool = false, days: Double = unusedDays) -> [URL] {
         var gone: [URL] = []
         let fm = FileManager.default
-        let keep = Set(keeping.compactMap { try? folder(for: $0).lastPathComponent })
-        let cutoff = Date().addingTimeInterval(-unusedDays * 86_400)
+        let present = keeping.compactMap { url in (try? folder(for: url)).map { (url, $0) } }
+        let keep = Set(present.map(\.1.lastPathComponent))
+        // (Songs whose file is there to say which folder is theirs: one on
+        // a drive that isn't mounted keeps its folder as before.)
+        let kept = Set(present.map(\.0.standardizedFileURL.path))
+        let cutoff = Date().addingTimeInterval(-days * 86_400)
         for dir in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
         where !keep.contains(dir.lastPathComponent) {
+            if let source = try? String(contentsOf: dir.appendingPathComponent(sourceFile), encoding: .utf8),
+               kept.contains(source) {
+                gone.append(dir)
+                if !dryRun { try? fm.removeItem(at: dir) }
+                continue
+            }
             let marks = ["used", "exact.1", "analysis.json", ""].map { dir.appendingPathComponent($0) }
             let last = marks.compactMap { (try? fm.attributesOfItem(atPath: $0.path))?[.modificationDate] as? Date }.max()
             if let last, last < cutoff {

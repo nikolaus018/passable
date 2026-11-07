@@ -18,7 +18,7 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts": break
     case "--dump-vocals", "--models", "--vocal-step": _ = args.removeFirst()
     case "--order": ordered = true
     case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot": _ = args.removeFirst()
@@ -32,11 +32,14 @@ while !args.isEmpty {
     default: songs.append(URL(fileURLWithPath: a))
     }
 }
-if CommandLine.arguments.contains("--prune-dry") {
-    // What the app's launch would clear from the cache (nothing is deleted).
+if CommandLine.arguments.contains("--prune-dry") || CommandLine.arguments.contains("--prune-now") {
+    // What the app's launch would clear from the cache (nothing is deleted),
+    // or, with --prune-now, every folder of a song that's neither in the
+    // set nor in the library, however recently used (deleted).
+    let now = CommandLine.arguments.contains("--prune-now")
     let paths = UserDefaults(suiteName: "com.nikolausmarek.Passable")?.stringArray(forKey: "setTracks") ?? []
     let keeping = paths.map { URL(fileURLWithPath: $0) } + MusicTools.libraryFiles()
-    let gone = StemCache.prune(keeping: keeping, dryRun: true)
+    let gone = StemCache.prune(keeping: keeping, dryRun: true, days: now ? 0 : StemCache.unusedDays)
     var bytes = 0
     for dir in gone {
         for case let f as URL in FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey]) ?? FileManager.DirectoryEnumerator() {
@@ -46,6 +49,10 @@ if CommandLine.arguments.contains("--prune-dry") {
     let kept = Set(keeping.compactMap { try? StemCache.folder(for: $0).lastPathComponent })
     print("keeping \(keeping.count) songs' folders (\(kept.count) found); would clear \(gone.count) folders, \(bytes / 1_000_000_000) GB")
     print("set songs whose folder would go: \(paths.filter { p in gone.contains { (try? StemCache.folder(for: URL(fileURLWithPath: p)).lastPathComponent) == $0.lastPathComponent } }.count)")
+    if now, !CommandLine.arguments.contains("--dry") {
+        for dir in gone { try? FileManager.default.removeItem(at: dir) }
+        print("cleared \(gone.count) folders")
+    }
     exit(0)
 }
 guard songs.count >= 2 else { fputs("need at least two songs\n", stderr); exit(2) }
@@ -63,6 +70,20 @@ if let k = CommandLine.arguments.firstIndex(of: "--vocal-step") { VocalSeparator
 ModelLocation.directory = URL(fileURLWithPath: CommandLine.arguments.firstIndex(of: "--models").map { CommandLine.arguments[$0 + 1] }
                                  ?? "/Applications/Passable.app/Contents/Resources")
 TrackProcessor.renditionFolder = "render-matched"
+// The tool's renditions are for runs of the same set close together: a
+// day after it last made one for a song, they go (they were 39 GB of a
+// 134 GB cache, never read by the app).
+do {
+    let fm = FileManager.default, dayAgo = Date().addingTimeInterval(-86_400)
+    for song in (try? fm.contentsOfDirectory(at: StemCache.root, includingPropertiesForKeys: nil)) ?? [] {
+        for folder in [song, song.appendingPathComponent(Steadying.folderName)] {
+            let renditions = folder.appendingPathComponent(TrackProcessor.renditionFolder)
+            let made = ((try? fm.contentsOfDirectory(at: renditions, includingPropertiesForKeys: nil)) ?? [renditions])
+                .compactMap { (try? fm.attributesOfItem(atPath: $0.path))?[.modificationDate] as? Date }.max()
+            if let made, made < dayAgo { try? fm.removeItem(at: renditions) }
+        }
+    }
+}
 
 let clock = Date()
 let processor = TrackProcessor()
@@ -396,6 +417,9 @@ if let k = CommandLine.arguments.firstIndex(of: "--detail"), let which = Int(Com
                  TransitionBuilder.switchBar(t.edit.preset, bars: t.edit.bars, lowSwap: t.plan.placement.lowSwap),
                  t.vocalOut.map { String(format: "%.1f", ($0 - t.start) / t.barSeconds) } ?? "-",
                  t.vocalIn.map { String(format: "%.1f", ($0 - t.start) / t.barSeconds) } ?? "-"))
+    print(String(format: "planned: voice in %@ (handoff %d), grooves lock %@, together %d, score %.2f  %@",
+                 t.plan.placement.expectedVocalIn.map { String(format: "%.1f", $0) } ?? "-", t.plan.placement.vocalHandoff,
+                 t.plan.drumsLock ? "yes" : "no", t.plan.placement.together ?? -1, t.plan.placement.score, t.plan.placement.reason))
     print("bar       " + (0..<n).map { String(format: "%4d", $0 - 4 + Int(((t.begins - t.start) / t.barSeconds).rounded())) }.joined())
     row("mix") { _, _ in true }
     for (side, i) in [("A", t.from), ("B", t.to)] {
@@ -659,7 +683,12 @@ if CommandLine.arguments.contains("--vocals") {
             barLevels(from: from, bars: beats, barSeconds: beat, of: raw.snapshot(masterGain: 1, including: { i, s in i == k && s == .vocals }))
         }
         let rawA = untouched(t.from), rawB = untouched(t.to)
-        let ua = rawA.map { $0 > max(ra - 15, voiceFloor) }, ub = rawB.map { $0 > max(rb - 15, voiceFloor) }
+        // (A would sing only while it plays: after the blend it's gone, and
+        // its voice with it; B only once it has come in. Counted there, a
+        // song's own bars on after A had left, B instrumental, read as a
+        // hole: ten of 37 on a 117-song set.)
+        let ua = rawA.indices.map { rawA[$0] > max(ra - 15, voiceFloor) && from + Double($0) * beat < t.end }
+        let ub = rawB.indices.map { rawB[$0] > max(rb - 15, voiceFloor) && from + Double($0 + 1) * beat > t.begins }
         var gap = 0, run = 0, silencedA = 0, heldB = 0
         for k in 0..<beats {
             let hole = !ha[k] && !hb[k] && (ua[k] || ub[k])
@@ -804,7 +833,8 @@ if CommandLine.arguments.contains("--report") {
         print(String(format: "%02d %@ → %@  %@ %d  excess %.1f dB  seam %.2f× at %.0f (switch %.0f)  together %d/%d  dip %.1f dB (drop %.1f)  busy %d  at once %d  B after %.1f dB under  predicted together %d%@",
                      i + 1, SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url),
                      t.edit.preset.displayName, t.edit.bars, row.excess, row.seam, seamAt, sw, row.together, n, row.dip, row.hole, row.busy, row.moves, row.after, t.plan.placement.together ?? -1,
-                     (t.melodiesClash ? "  clash" : "") + (t.dropAt != nil ? "  drop moment" : "")))
+                     (t.melodiesClash ? "  clash" : "") + (t.dropAt != nil ? "  drop moment" : "")
+                        + (t.loopBars > 0 ? "  loop" : t.plan.placement.carry ? "  carry" : "")))
     }
     // How the voices changed hands: A's left on a line end ("line"),
     // between words ("word") or on the downbeat while singing ("bar");

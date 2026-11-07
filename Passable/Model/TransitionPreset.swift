@@ -251,13 +251,18 @@ struct TransitionBuilder {
     /// In a mashup B's melody waits for the switch, so A's goes there (two
     /// bars before a switch on the blend's last bar: nothing of A's sounds
     /// past the end).
-    /// Carried (see `carry`), A's is gone as B's comes in a quarter in.
+    /// Carried (see `carry`), A's closes down over the bar before B's
+    /// comes in a quarter in and is gone a bar after: A's melody low-passed
+    /// as B's opens up high-passed, the swap a DJ makes with the filters.
+    /// (Gone as B's came in, as this was, the blend went two bars with
+    /// neither melody: the deepest dips of a 117-song set, 6 to 10 dB, at
+    /// bar 3 of a 16-bar blend.)
     static func melodyDissolve(_ preset: TransitionPreset, bars: Int, switchAt sw: Double, mashup: Bool = false,
                                carry: Bool = false) -> Double {
         guard preset == .stemSwap else { return sw }
         let n = Double(bars), q = n / 4
         if mashup { return min(sw, max(q, n - 2)) }
-        if carry { return max(0, q - 2) }
+        if carry { return max(0, q - 1) }
         return min(max(sw, q + 2), max(q + 2, 2 * q))
     }
 
