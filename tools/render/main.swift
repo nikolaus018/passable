@@ -597,7 +597,11 @@ if CommandLine.arguments.contains("--vocals") {
         let lb = barLevels(from: from, bars: beats, barSeconds: beat) { k, s in k == t.to && s == .vocals }
         func ref(_ l: [Double]) -> Double { let s = l.sorted(); return s[Int(Double(s.count - 1) * 0.9)] }
         let ra = ref(la), rb = ref(lb)
-        let ha = la.map { $0 > ra - 15 }, hb = lb.map { $0 > rb - 15 }
+        // (And above `voiceFloor`: a channel open on a voice that isn't
+        // singing yet has a loudest beat too, its noise, and read as
+        // bars of both singing at once.)
+        let voiceFloor = 25.0
+        let ha = la.map { $0 > max(ra - 15, voiceFloor) }, hb = lb.map { $0 > max(rb - 15, voiceFloor) }
         let overlap = ha.indices.filter { ha[$0] && hb[$0] }.count
         // Longest run with neither voice heard where one of the songs,
         // played untouched, would be singing: a hole the transition made
@@ -608,7 +612,7 @@ if CommandLine.arguments.contains("--vocals") {
             barLevels(from: from, bars: beats, barSeconds: beat, of: raw.snapshot(masterGain: 1, including: { i, s in i == k && s == .vocals }))
         }
         let rawA = untouched(t.from), rawB = untouched(t.to)
-        let ua = rawA.map { $0 > ra - 15 }, ub = rawB.map { $0 > rb - 15 }
+        let ua = rawA.map { $0 > max(ra - 15, voiceFloor) }, ub = rawB.map { $0 > max(rb - 15, voiceFloor) }
         var gap = 0, run = 0, silencedA = 0, heldB = 0
         for k in 0..<beats {
             let hole = !ha[k] && !hb[k] && (ua[k] || ub[k])
