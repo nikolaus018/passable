@@ -81,3 +81,41 @@ final class SeparationTests: XCTestCase {
         }
     }
 }
+
+final class VocalSeparatorTests: XCTestCase {
+    /// The vocal model's STFT and its inverse give the chunk back with a
+    /// mask of one (torch.stft / torch.istft, centred, Hann at hop 441).
+    func testRoformerSTFTReconstructs() {
+        let n = RoformerSTFT.chunk
+        let x = (0..<n).map { Float(sin(Double($0) * 0.013) * 0.5 + sin(Double($0) * 0.37) * 0.2) }
+        let stft = RoformerSTFT()
+        let rows = 2 * RoformerSTFT.bins, frames = RoformerSTFT.frames
+        var spec = [Float](repeating: 0, count: rows * frames * 2)
+        var mask = [Float](repeating: 0, count: rows * frames * 2)
+        for i in stride(from: 0, to: mask.count, by: 2) { mask[i] = 1 }
+        var y = [Float](repeating: 0, count: n)
+        spec.withUnsafeMutableBufferPointer { s in
+            stft.forward(x, channel: 1, into: s.baseAddress!)
+            stft.inverse(spec: s.baseAddress!, mask: mask, channel: 1, into: &y)
+        }
+        let error = zip(x, y).map { ($0 - $1) * ($0 - $1) }.reduce(0, +) / x.map { $0 * $0 }.reduce(0, +)
+        XCTAssertLessThan(10 * log10(error), -100)
+    }
+
+    /// A DC-free sine's spectrum as torch.stft has it: unnormalised, so a
+    /// bin-centred sine of amplitude a peaks at a · Σwindow / 2.
+    func testRoformerSTFTScale() {
+        let n = RoformerSTFT.chunk, k = 64
+        let x = (0..<n).map { Float(cos(2 * Double.pi * Double(k) * Double($0) / Double(RoformerSTFT.nfft))) }
+        let rows = 2 * RoformerSTFT.bins, frames = RoformerSTFT.frames
+        var spec = [Float](repeating: 0, count: rows * frames * 2)
+        spec.withUnsafeMutableBufferPointer { RoformerSTFT().forward(x, channel: 0, into: $0.baseAddress!) }
+        let at = ((k * 2) * frames + frames / 2) * 2
+        XCTAssertEqual(hypot(spec[at], spec[at + 1]), Float(RoformerSTFT.nfft) / 4, accuracy: 1)
+    }
+
+    /// torch's 'reflect' padding: the end samples aren't repeated.
+    func testReflect() {
+        XCTAssertEqual(VocalSeparator.reflect([1, 2, 3, 4], by: 2), [3, 2, 1, 2, 3, 4, 3, 2])
+    }
+}

@@ -427,7 +427,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "18"
+    static let planner = "19"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -1939,6 +1939,28 @@ enum VocalPhrasing {
         return 10 * log10(max((l + r) / 2, 1e-9))
     }
 
+    /// dB B's voice sings above A's where they change hands, as heard:
+    /// A's last eight sung beats before it leaves at `out` against B's
+    /// first eight after it opens at `vin` (master seconds), the median of
+    /// each, each song at its set level (`trimA`, `trimB`). A beat counts
+    /// as sung within 15 dB of the voice's loud beats around there. nil
+    /// where either hardly sings there.
+    static func step(a: StemAudio, offsetA: Double, out: Double, trimA: Double, referenceA: Float,
+                     b: StemAudio, offsetB: Double, vin: Double, trimB: Double, referenceB: Float,
+                     beat: Double) -> Double? {
+        func sung(_ stem: StemAudio, _ offset: Double, _ reference: Float, from: Double, last: Bool) -> Float? {
+            let heard = (0..<16).map { level(stem, at: from + Double($0) * beat - offset, length: beat) }
+            let loud = heard.sorted()[13]
+            guard !quiet(loud, reference) else { return nil }
+            let beats = heard.filter { $0 > loud - 15 }
+            let eight = (last ? Array(beats.suffix(8)) : Array(beats.prefix(8))).sorted()
+            return eight[eight.count / 2]
+        }
+        guard let la = sung(a, offsetA, referenceA, from: out - 16 * beat, last: true),
+              let lb = sung(b, offsetB, referenceB, from: vin, last: false) else { return nil }
+        return Double(lb - la) + trimB - trimA
+    }
+
     /// The level a vocal sings at: its loud bars (90th percentile).
     static func reference(_ structure: TrackStructure?) -> Float? { structure?.vocalReference }
 
@@ -2762,7 +2784,7 @@ enum SetBuilder {
                                         beat: blendBar / 4)
                 } : nil
                 func make(outFade: Double, inFade: Double, room: Double, start: Double? = nil,
-                          barSeconds: Double? = nil) -> TransitionBuilder.Made {
+                          barSeconds: Double? = nil, voiceStep: Double = 0) -> TransitionBuilder.Made {
                     TransitionBuilder.make(edit.preset, lanes: Lane.allLanes(), start: start ?? ga.downbeat(edit.entryBar),
                                            barSeconds: barSeconds ?? blendBar, bars: edit.bars,
                                            vocalBar: mashup ? plan.placement.vocalHandoff
@@ -2773,7 +2795,7 @@ enum SetBuilder {
                                            mashup: mashup, dropMoment: dropMoment, rollBeat: rollBeat,
                                            vocalOutFade: outFade, vocalInFade: inFade, room: room,
                                            carry: (plan.placement.carry || loop > 0) && !keysClash && !mashup, under: under,
-                                           loop: loop, loopBack: loopBack, hats: hats)
+                                           loop: loop, loopBack: loopBack, hats: hats, voiceStep: voiceStep)
                 }
                 // B's melody plays under A's voice for as long as A sings,
                 // from the two songs' levels there, and steps up as the
@@ -2806,7 +2828,23 @@ enum SetBuilder {
                 // faded down through a sentence is a crossfade; a cut on the
                 // beat is a decision.
                 let bar = blendBar, beat = bar / 4
-                let made = make(outFade: 0, inFade: 0, room: room)
+                var made = make(outFade: 0, inFade: 0, room: room)
+                // The two voices met at one level where they change hands
+                // (see `TransitionBuilder.voiceStep`), judged where the
+                // builder put them.
+                if let out = made.vocalExit, let vin = made.vocalEntry,
+                   let vocalsA = a.stems[.vocals], let vocalsB = matched.stems[.vocals],
+                   let refA = VocalPhrasing.reference(a.loaded.analysis.structure),
+                   let refB = VocalPhrasing.reference(bCounted.structure),
+                   let step = VocalPhrasing.step(a: vocalsA, offsetA: aOffset, out: start + out * blendBar,
+                                                 trimA: MixMath.trimDB(a.loaded.analysis), referenceA: refA,
+                                                 b: vocalsB, offsetB: offset + nudge, vin: start + vin * blendBar,
+                                                 trimB: MixMath.trimDB(b.analysis), referenceB: refB,
+                                                 beat: blendBar / 4) {
+                    if TransitionBuilder.voiceMatch(abs(step)) != nil {
+                        made = make(outFade: 0, inFade: 0, room: room, voiceStep: step)
+                    }
+                }
                 // (The builder may have moved the exit off the cut found: then
                 // it's judged where it ended up.)
                 let onCut = vocalOutKind != nil && made.vocalExit.map { abs($0 - (vocalOut ?? .infinity)) < 1e-6 } ?? false

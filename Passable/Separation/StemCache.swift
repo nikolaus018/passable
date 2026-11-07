@@ -74,6 +74,16 @@ enum StemCache {
         FileManager.default.createFile(atPath: directory.appendingPathComponent("exact.1").path, contents: Data())
     }
 
+    /// Whether the vocal stem is the vocal model's (see `VocalSeparator`),
+    /// not HTDemucs'.
+    static func hasModelVocals(_ directory: URL) -> Bool {
+        FileManager.default.fileExists(atPath: directory.appendingPathComponent("vocals.roformer.1").path)
+    }
+
+    static func markModelVocals(_ directory: URL) {
+        FileManager.default.createFile(atPath: directory.appendingPathComponent("vocals.roformer.1").path, contents: Data())
+    }
+
     /// Renditions and waveform overviews made from the stems as they were.
     static func forgetDerivedAudio(in directory: URL) {
         let fm = FileManager.default

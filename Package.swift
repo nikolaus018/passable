@@ -15,7 +15,7 @@ let package = Package(
             exclude: [
                 "Passable/App", "Passable/UI", "Passable/Resources",
                 "Passable/Model/Session.swift", "Passable/Model/SetSession.swift", "Passable/Model/PassableFile.swift",
-                "PassableTests", "ios", "tools/audit", "tools/convert-beats", "tools/convert-demucs", "tools/icon",
+                "PassableTests", "ios", "tools/audit", "tools/convert-beats", "tools/convert-demucs", "tools/convert-roformer", "tools/icon",
                 "Passable.xcodeproj", "README.md", "LICENSE", "project.yml", "docs",
             ],
             sources: [

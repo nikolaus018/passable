@@ -1,3 +1,4 @@
+import Accelerate
 import Foundation
 import os
 
@@ -84,11 +85,35 @@ final class TrackProcessor: @unchecked Sendable {
             let mix = try AudioIO.loadStereo(url: url)
             if ticket.isCancelled { throw CancellationError() }
             var stems = try Self.separate(mix, progress: progress, isCancelled: { ticket.isCancelled })
-            StemResidual.redistribute(mix: mix, stems: &stems)
+            let modelVocals = try Self.replaceVocals(mix: mix, stems: &stems, progress: progress,
+                                                     isCancelled: { ticket.isCancelled })
+            if !modelVocals { StemResidual.redistribute(mix: mix, stems: &stems) }
             for (kind, buffer) in stems {
                 try StemAudio.save(buffer, directory: directory, name: kind.rawValue)
             }
             StemCache.markExact(directory)
+            if modelVocals { StemCache.markModelVocals(directory) }
+        } else if VocalSeparator.isAvailable, !StemCache.hasModelVocals(directory) {
+            // Separated before the vocal model: its voice from the model
+            // once (the other stems kept, and made to add up again), what
+            // was derived from the old stems dropped, and the measures of
+            // the voice and its words taken again; the beat grid and key
+            // stay, so hand edits still sit where they were made.
+            progress(.decoding)
+            let mix = try AudioIO.loadStereo(url: url)
+            var stems = try StemCache.loadStems(from: directory).mapValues { $0.copyStereo() }
+            if try Self.replaceVocals(mix: mix, stems: &stems, progress: progress, isCancelled: { ticket.isCancelled }) {
+                for (kind, buffer) in stems {
+                    try StemAudio.save(buffer, directory: directory, name: kind.rawValue)
+                }
+                StemCache.forgetDerivedAudio(in: directory)
+                if var analysis = StemCache.loadAnalysis(from: directory) {
+                    analysis.structure = nil
+                    StemCache.saveAnalysis(analysis, to: directory)
+                }
+                StemCache.markExact(directory)
+                StemCache.markModelVocals(directory)
+            }
         } else if !StemCache.isExact(directory) {
             // Separated before the stems were made to add up to the song:
             // once, and what was derived from the old stems goes.
@@ -188,6 +213,33 @@ final class TrackProcessor: @unchecked Sendable {
     private static let gpu = DispatchSemaphore(value: 1)
     nonisolated(unsafe) private static var separator: StemSeparator?
 
+    nonisolated(unsafe) private static var vocalSeparator: VocalSeparator?
+
+    /// The vocal model's voice in place of HTDemucs', and what the mix
+    /// holds beyond it and the other three stems handed to those three by
+    /// their power per bin (`StemResidual`): the four add up to the song,
+    /// and what the vocal model doesn't call voice goes where it sounds.
+    /// False (stems untouched) where the app has no vocal model.
+    private static func replaceVocals(mix: StereoBuffer, stems: inout [StemKind: StereoBuffer],
+                                      progress: @escaping @Sendable (Progress) -> Void,
+                                      isCancelled: @escaping () -> Bool) throws -> Bool {
+        guard VocalSeparator.isAvailable else { return false }
+        gpu.wait()
+        defer { gpu.signal() }
+        if isCancelled() { throw CancellationError() }
+        if vocalSeparator == nil { vocalSeparator = try VocalSeparator() }
+        let vocals = try vocalSeparator!.vocals(mix, progress: { progress(.separating(0.3 + 0.7 * $0)) },
+                                                isCancelled: isCancelled)
+        var rest = mix
+        vDSP_vsub(vocals.left, 1, mix.left, 1, &rest.left, 1, vDSP_Length(mix.count))
+        vDSP_vsub(vocals.right, 1, mix.right, 1, &rest.right, 1, vDSP_Length(mix.count))
+        var others = stems.filter { $0.key != .vocals }
+        StemResidual.redistribute(mix: rest, stems: &others)
+        stems = others
+        stems[.vocals] = vocals
+        return true
+    }
+
     private static func separate(_ mix: StereoBuffer, progress: @escaping @Sendable (Progress) -> Void,
                                  isCancelled: @escaping () -> Bool) throws -> [StemKind: StereoBuffer] {
         progress(.separating(0))
@@ -195,7 +247,9 @@ final class TrackProcessor: @unchecked Sendable {
         defer { gpu.signal() }
         if isCancelled() { throw CancellationError() }
         if separator == nil { separator = try StemSeparator() }
-        return try separator!.separate(mix, progress: { progress(.separating($0)) }, isCancelled: isCancelled)
+        // (Most of the time is the vocal model's, where there is one.)
+        let share = VocalSeparator.isAvailable ? 0.3 : 1
+        return try separator!.separate(mix, progress: { progress(.separating($0 * share)) }, isCancelled: isCancelled)
     }
 
     /// One load of a song at a time, for any processor: two (the editor and

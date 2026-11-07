@@ -5,7 +5,9 @@ import XCTest
 /// The whole app pipeline, headless: two WAVs in, a rendered transition out.
 @MainActor
 final class EndToEndTests: XCTestCase {
-    private func wait(_ what: String, timeout: TimeInterval = 180, until condition: () -> Bool) async throws {
+    // (Ten minutes: two songs separated from scratch, the vocal model's
+    // pass included, take a few on a laptop.)
+    private func wait(_ what: String, timeout: TimeInterval = 600, until condition: () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition() {
             if Date() > deadline { XCTFail("Timed out waiting for \(what)"); throw CancellationError() }

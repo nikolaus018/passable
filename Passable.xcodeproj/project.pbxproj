@@ -36,6 +36,7 @@
 		47D6C330665303CF2A8FA78B /* PassableApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE6C44F5546EC863B0C936DF /* PassableApp.swift */; };
 		4C63F614F9CEAE87D30892BD /* TransitionPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E1FA045141AEACB4C04FDF3 /* TransitionPanel.swift */; };
 		573288BB14DF37B676355955 /* PayoffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EEC2588B36CA71986AC14E9 /* PayoffTests.swift */; };
+		5894E1F6B6567D636B5C9275 /* VocalRoformer.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 9FD780F5F4601C971D62D762 /* VocalRoformer.mlpackage */; };
 		5A6238B318AA288716F24F77 /* LibraryFetch.swift in Sources */ = {isa = PBXBuildFile; fileRef = E437400E644FE3BB9ABE4583 /* LibraryFetch.swift */; };
 		5CEBC7F1363F1AA1A2532877 /* RequestLab.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1612B817C97CD12331F2300 /* RequestLab.swift */; };
 		5E0484FA52AD89AFD03BE96C /* PassableFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFA185FD99CE45F4F53A78AA /* PassableFile.swift */; };
@@ -43,6 +44,7 @@
 		6A87BFA23CB053EBC96C6F40 /* RealTrackProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 683C023C0AB1CCF3B368AA0D /* RealTrackProbe.swift */; };
 		70AEDFD1E7AA84FDBBBD1398 /* PhoneLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = E07BEBDED33508CE79DD54D0 /* PhoneLink.swift */; };
 		7BC1E725829A8BFA8D01C4F8 /* SearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7DA88A707CD72420E5A9DB5 /* SearchSheet.swift */; };
+		7C385436A18087A5F3B93FE8 /* VocalSeparator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82CC4B0F3AB3FBA38703D9B9 /* VocalSeparator.swift */; };
 		7D0B7A4AF805BA12C5326835 /* PassableMix.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E8CB9308B9A71993472F30C /* PassableMix.swift */; };
 		832B279B4D7E3B07CB6DBF5E /* PerfLab.swift in Sources */ = {isa = PBXBuildFile; fileRef = E498312F53D40FD534860992 /* PerfLab.swift */; };
 		85BAC09155E2470EB2093ECB /* SetEditingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E892F9005FB98FACDDF2B72 /* SetEditingTests.swift */; };
@@ -123,6 +125,7 @@
 		777B23CF1A9F99E25407BA94 /* BeatThis.mlpackage */ = {isa = PBXFileReference; path = BeatThis.mlpackage; sourceTree = "<group>"; };
 		7D1E4B99E816199B410C51BC /* TempoEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TempoEstimator.swift; sourceTree = "<group>"; };
 		7F821B079B57658FCAB28125 /* BeatTrackerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BeatTrackerTests.swift; sourceTree = "<group>"; };
+		82CC4B0F3AB3FBA38703D9B9 /* VocalSeparator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VocalSeparator.swift; sourceTree = "<group>"; };
 		88CFD7909668537DE5CD4DC4 /* BeatLamp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BeatLamp.swift; sourceTree = "<group>"; };
 		89FBE76BD00B59CFC56A844E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		8D473E11FD02BC9A9CE22BEC /* MusicSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicSearch.swift; sourceTree = "<group>"; };
@@ -130,6 +133,7 @@
 		8FB901899286FC7C54821A07 /* Passable.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Passable.entitlements; sourceTree = "<group>"; };
 		977700D9FDD4CAB06C13E6D9 /* StemSeparator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StemSeparator.swift; sourceTree = "<group>"; };
 		9E1B704DA053ABB65522FC89 /* SetPack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetPack.swift; sourceTree = "<group>"; };
+		9FD780F5F4601C971D62D762 /* VocalRoformer.mlpackage */ = {isa = PBXFileReference; path = VocalRoformer.mlpackage; sourceTree = "<group>"; };
 		A0C18BC3252B580A2A6B73C3 /* StemResidual.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StemResidual.swift; sourceTree = "<group>"; };
 		A85F3A2C18D4CEA7EE7B1E6D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B00E4246EF6CEFCC25E06269 /* Passable.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Passable.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -187,6 +191,7 @@
 				A85F3A2C18D4CEA7EE7B1E6D /* Assets.xcassets */,
 				777B23CF1A9F99E25407BA94 /* BeatThis.mlpackage */,
 				64A942CAB48C8DD5ED1A7DAE /* HTDemucs.mlpackage */,
+				9FD780F5F4601C971D62D762 /* VocalRoformer.mlpackage */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -283,6 +288,7 @@
 				33A00403D498E07789E76097 /* StemCache.swift */,
 				A0C18BC3252B580A2A6B73C3 /* StemResidual.swift */,
 				977700D9FDD4CAB06C13E6D9 /* StemSeparator.swift */,
+				82CC4B0F3AB3FBA38703D9B9 /* VocalSeparator.swift */,
 			);
 			path = Separation;
 			sourceTree = "<group>";
@@ -501,6 +507,8 @@
 				CC4B190179A272A371E58974 /* TrackStructure.swift in Sources */,
 				4C63F614F9CEAE87D30892BD /* TransitionPanel.swift in Sources */,
 				8E662C3F480F3359D00AE471 /* TransitionPreset.swift in Sources */,
+				5894E1F6B6567D636B5C9275 /* VocalRoformer.mlpackage in Sources */,
+				7C385436A18087A5F3B93FE8 /* VocalSeparator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

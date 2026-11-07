@@ -109,6 +109,26 @@ struct TransitionBuilder {
     /// swap. What a DJ does with the filter when two kicks and snares
     /// won't sit.
     let hats: Bool
+    /// dB B's voice sings above A's where they change hands (as heard,
+    /// each song at its set level; see `VocalPhrasing.step`). Two
+    /// singers a few dB apart are heard as a jump in level the moment one
+    /// takes over, which a DJ rides on the channel's trim: the louder of
+    /// the two is met at the quieter one's level and eased back to its own
+    /// over bars, slowly enough not to be heard as a fade. Only ever down
+    /// (unity is the top of a volume lane).
+    let voiceStep: Double
+    /// Below this (dB) two voices sit level enough; past `voiceMatchMost`
+    /// the difference is the songs' own, and only that much is taken off.
+    static let voiceMatchLeast = 1.5, voiceMatchMost = 8.0
+    /// The handover itself (A's last two bars, B's first two) is sung at
+    /// the matched level; B's voice then eases back to its own over
+    /// `voiceSettle` bars, and A's eases down over `voiceYield` bars before.
+    static let voiceHold = 2.0, voiceSettle = 8.0, voiceYield = 4.0
+    /// Linear gain a voice `step` dB louder than the other is met at.
+    static func voiceMatch(_ step: Double) -> Double? {
+        guard step >= voiceMatchLeast else { return nil }
+        return pow(10, -min(step, voiceMatchMost) / 20)
+    }
     /// The DJ filter that leaves a kit's hats and cymbals: a high-pass
     /// around 6 kHz.
     static let hatsFilter = 0.96
@@ -125,8 +145,9 @@ struct TransitionBuilder {
          lowSwap: Int? = nil, drumsLayer: Bool = true, drumsLinger: Bool = true, vocalIn: Double? = nil,
          vocalOut: Double? = nil, mashup: Bool = false, dropMoment: Bool = false, rollBeat: Int? = nil,
          vocalOutFade: Double = 0, vocalInFade: Double = 0, room: Double = 0, carry: Bool = false, under: Double = 0,
-         loop: Int = 0, loopBack: Int = 0, hats: Bool = false) {
+         loop: Int = 0, loopBack: Int = 0, hats: Bool = false, voiceStep: Double = 0) {
         self.hats = hats
+        self.voiceStep = voiceStep
         self.loop = loop
         self.loopBack = max(loop, loopBack)
         self.room = room
@@ -168,7 +189,8 @@ struct TransitionBuilder {
                      drumsLayer: Bool = true, drumsLinger: Bool = true, vocalIn: Double? = nil,
                      vocalOut: Double? = nil, mashup: Bool = false, dropMoment: Bool = false, rollBeat: Int? = nil,
                      vocalOutFade: Double = 0, vocalInFade: Double = 0, room: Double = 0, carry: Bool = false,
-                     under: Double = 0, loop: Int = 0, loopBack: Int = 0, hats: Bool = false) -> Made {
+                     under: Double = 0, loop: Int = 0, loopBack: Int = 0, hats: Bool = false,
+                     voiceStep: Double = 0) -> Made {
         var builder = TransitionBuilder(lanes: lanes, start: start, barSeconds: barSeconds, bars: bars,
                                         vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap,
                                         drumsLayer: drumsLayer, drumsLinger: drumsLinger,
@@ -176,7 +198,7 @@ struct TransitionBuilder {
                                         mashup: mashup, dropMoment: dropMoment, rollBeat: rollBeat,
                                         vocalOutFade: vocalOutFade, vocalInFade: vocalInFade, room: room, carry: carry,
                                         under: under, loop: preset == .stemSwap ? loop : 0, loopBack: loopBack,
-                                        hats: hats && !drumsLayer)
+                                        hats: hats && !drumsLayer, voiceStep: voiceStep)
         builder.clearAll()
         builder.write(preset)
         builder.writeLoop()
@@ -388,6 +410,9 @@ struct TransitionBuilder {
         vocalEntry = vin
         if vocalInFade > 0 {
             automate(.b, .vocals, .volume, [(vin, 0, .sCurve), (vin + vocalInFade, 1, .linear)])
+        } else if let g = Self.voiceMatch(voiceStep) {
+            automate(.b, .vocals, .volume, [(vin, 0, .hold), (vin + 0.001, g, .linear), (vin + Self.voiceHold, g, .sCurve),
+                                            (vin + Self.voiceHold + Self.voiceSettle, 1, .linear)])
         } else {
             automate(.b, .vocals, .volume, [(vin, 0, .hold), (vin + 0.001, 1, .linear)])
         }
@@ -451,7 +476,17 @@ struct TransitionBuilder {
             // found), it shuts ahead of it like every switch (see
             // `switchBeforeTheBeat`, which leaves a ramp this long alone).
             let end = onGrid(start + out * barSeconds, within: 0.0005) ? out - Self.switchLead / barSeconds : out
-            automate(.a, .vocals, .volume, [(end - Self.vocalRelease / barSeconds, 1, .linear), (end, 0, .linear)])
+            let close = end - Self.vocalRelease / barSeconds
+            // (A louder voice eases down to B's over its last bars, before
+            // B's entry if that's where it leaves: A has played on its own
+            // for 45 s by then, the last blend's automation long done.)
+            if let g = Self.voiceMatch(-voiceStep) {
+                let held = close - Self.voiceHold
+                automate(.a, .vocals, .volume, [(held - Self.voiceYield, 1, .sCurve), (held, g, .linear),
+                                                (close, g, .linear), (end, 0, .linear)])
+            } else {
+                automate(.a, .vocals, .volume, [(close, 1, .linear), (end, 0, .linear)])
+            }
         }
     }
 

@@ -381,6 +381,33 @@ final class PayoffTests: XCTestCase {
         XCTAssertEqual(value(blend.lanes, .a, .vocals, bar: 8.01), 0)
     }
 
+    /// Two singers a few dB apart meet at one level where they change
+    /// hands: the louder one is down by the difference over the handover
+    /// (at most `voiceMatchMost`), eased back over bars, never pushed up.
+    func testVoicesMeetAtOneLevel() {
+        func make(_ step: Double) -> TransitionBuilder.Made {
+            TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16, lowSwap: 8,
+                                   voiceStep: step)
+        }
+        let db = { (v: Double) in 20 * log10(v) }
+        // B 4 dB louder: opens 4 dB down, holds through its first two
+        // bars, back to its own level eight bars on; A untouched.
+        let louder = make(4)
+        let vin = louder.vocalEntry!
+        XCTAssertEqual(db(value(louder.lanes, .b, .vocals, bar: vin + 0.5)), -4, accuracy: 0.05)
+        XCTAssertEqual(db(value(louder.lanes, .b, .vocals, bar: vin + 1.9)), -4, accuracy: 0.05)
+        XCTAssertEqual(value(louder.lanes, .b, .vocals, bar: vin + 10.5), 1)
+        XCTAssertEqual(value(louder.lanes, .a, .vocals, bar: louder.vocalExit! - 0.5), 1)
+        // A 12 dB louder: A eases down (at most 8 dB) over its last bars.
+        let softer = make(-12)
+        let out = softer.vocalExit!
+        XCTAssertEqual(value(softer.lanes, .a, .vocals, bar: out - 7), 1)
+        XCTAssertEqual(db(value(softer.lanes, .a, .vocals, bar: out - 1)), -8, accuracy: 0.05)
+        XCTAssertEqual(value(softer.lanes, .b, .vocals, bar: softer.vocalEntry! + 0.5), 1)
+        // Within 1.5 dB: nothing to match.
+        XCTAssertEqual(value(make(1).lanes, .b, .vocals, bar: vin + 0.5), 1)
+    }
+
     /// Intro, verse, chorus, verse, chorus, outro; the second verse is
     /// what a club edit leaves out.
     private func popSong() -> TrackStructure {

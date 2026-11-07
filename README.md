@@ -10,7 +10,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/nikolaus018/passable" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/macOS-14%2B-blue" alt="macOS 14+">
   <img src="https://img.shields.io/badge/Swift-SwiftUI-orange" alt="Swift, SwiftUI">
-  <img src="https://img.shields.io/badge/Core%20ML-HTDemucs-purple" alt="Core ML, HTDemucs">
+  <img src="https://img.shields.io/badge/Core%20ML-HTDemucs%20%2B%20Mel--RoFormer-purple" alt="Core ML, HTDemucs and Mel-Band RoFormer">
 </p>
 
 <p align="center">
@@ -25,7 +25,7 @@
 
 ## Highlights
 
-- **Stem separation** into vocals, melody, drums and bass with HTDemucs v4 on Core ML (about 5 s for a 4-minute track on an M5)
+- **Stem separation** into vocals, melody, drums and bass on Core ML: drums, bass and melody from HTDemucs v4, the voice from Mel-Band RoFormer, 2.9 dB closer to the true vocal (about 45 s for a 4-minute track the first time; cached after)
 - **Analysis**: neural beat tracking, per-bar grids for songs with a drifting tempo, key detection, song structure and vocal line timing
 - **Automatic set ordering and transitions** based on tempo, key, energy and section alignment
 - **Hand-editable automation**: volume, filter, EQ, reverb and delay lanes for every stem
@@ -38,11 +38,11 @@ A native macOS app that mixes songs like a DJ, stem by stem. Add songs to a set,
 
 1. Add songs: drop files onto the window, **Add Files…** (⌘O), or **Find Online…**, which downloads to `~/Music/Passable`. The sheet stays open, so you can add several. It searches YouTube Music and YouTube:
    - **YouTube** (via `yt-dlp` and `ffmpeg`): downloads keep YouTube's own Opus stream (AAC if Opus is refused), without re-encoding. It's lossy, so a WAV would be bigger and no better.
-2. Each song is split into **vocals, melody, drums and bass** by HTDemucs v4, running locally through Core ML. Passable then finds its tempo, beat 1, key, and bar-by-bar structure and loudness. On macOS 26 it also listens to the words: the vocal stem goes through the system's on-device speech recogniser (in the languages installed on the Mac; English and German are tried), which gets many sung words wrong but not where a line starts and ends or that it comes back. Only those times are kept, not the text. A song played by a drummer, whose tempo breathes, gets its bars one by one instead of a constant grid.
+2. Each song is split into **vocals, melody, drums and bass**, locally through Core ML: HTDemucs v4 for the band, Mel-Band RoFormer for the voice. Passable then finds its tempo, beat 1, key, and bar-by-bar structure and loudness. On macOS 26 it also listens to the words: the vocal stem goes through the system's on-device speech recogniser (in the languages installed on the Mac; English and German are tried), which gets many sung words wrong but not where a line starts and ends or that it comes back. Only those times are kept, not the text. A song played by a drummer, whose tempo breathes, gets its bars one by one instead of a constant grid.
 3. When all songs are ready, Passable orders them. It minimises tempo stretch, prefers compatible keys, keeps the energy building towards the set's hardest song, and favours pairs whose sections line up. Songs added to a set that already has its order are fitted in where they go best, and the others stay where they are. **Auto-Order** orders everything from scratch; drag rows to override.
 4. Every transition is planned from the two songs alone:
    - **Where:** B's next section (ideally its chorus or drop) lands as A leaves. Energy stays level, with no chorus into a quiet intro and no breakdown or fade-out inside the blend. Vocals hand over instead of clashing, on the edges of parts: where a voice starts or stops, where the song goes from lines it comes back to (a chorus) to lines it sings once (a verse), and never where a line is sung through the bar. The new voice comes in only where a part of it starts (after a rest, or where its verse turns into its chorus), never on a line in the middle of a verse, even if that means a few bars of the two beats alone; the old one leaves between two sentences, never on a breath in the middle of one.
-   - **How:** the blend fits the music: 8 or 16 bars (never longer than 45 seconds), or a **Drop Swap** (A rides its build, everything flips on B's drop) where B really drops at the switch. Big switches get a build-up (A's beat thins and throws into an echo). Vocals hand over between lines; when the keys fit, the grooves lock and A is instrumental, B's vocal can sing over A's beat early in the blend (a mashup). Where A's own bars don't carry a blend (its voice sings on, a breakdown follows, the song is over), **A's beat loops**: from the end of a part its drums, bass line and melody repeat their last full four bars as a bed, its voice leaves on its last word, and B comes in over that. Exactly one kick and one bass line at a time. B enters with its low end killed, and the lows swap on one downbeat, as late as B's drop when B is still building. Clashing keys swap melodies instead of layering them. Where B would hardly be heard under all of A, A's melody makes way early and A's beat carries B's parts in. Tempos more than 10 % apart never share a beat: A plays whole to the end of its phrase, its last beat goes into an echo, and B lands whole on its downbeat at its own tempo (a **Cut**), so no song is ever played far off its own speed. A song without a steady tempo gets a cut too, or a DJ's bridge (four or eight bars, whichever leaves less of a hole): A's beat leaves first, its melody and vocal float on beatless into a reverb wash, and B drops in whole on its downbeat. The kick and bass change hands only where B has a low end of its own to take them.
+   - **How:** the blend fits the music: 8 or 16 bars (never longer than 45 seconds), or a **Drop Swap** (A rides its build, everything flips on B's drop) where B really drops at the switch. Big switches get a build-up (A's beat thins and throws into an echo). Vocals hand over between lines, and two singers meet at one level: the louder is brought down to the quieter for the handover (by up to 8 dB) and eased back to its own level over the next bars, so a new voice never jumps out or drops away; when the keys fit, the grooves lock and A is instrumental, B's vocal can sing over A's beat early in the blend (a mashup). Where A's own bars don't carry a blend (its voice sings on, a breakdown follows, the song is over), **A's beat loops**: from the end of a part its drums, bass line and melody repeat their last full four bars as a bed, its voice leaves on its last word, and B comes in over that. Exactly one kick and one bass line at a time. B enters with its low end killed, and the lows swap on one downbeat, as late as B's drop when B is still building. Clashing keys swap melodies instead of layering them. Where B would hardly be heard under all of A, A's melody makes way early and A's beat carries B's parts in. Tempos more than 10 % apart never share a beat: A plays whole to the end of its phrase, its last beat goes into an echo, and B lands whole on its downbeat at its own tempo (a **Cut**), so no song is ever played far off its own speed. A song without a steady tempo gets a cut too, or a DJ's bridge (four or eight bars, whichever leaves less of a hole): A's beat leaves first, its melody and vocal float on beatless into a reverb wash, and B drops in whole on its downbeat. The kick and bass change hands only where B has a low end of its own to take them.
    - **Levels:** every song's loud sections are matched (trim), so nothing jumps.
    - **Tempo:** a small tempo difference is B's alone: it is matched to A only while they overlap, then glides home and plays untouched. A bigger one (over 3 %) the two share: A glides to a tempo between theirs over its last bars alone, the blend plays there, and B glides home afterwards, so neither song is heard more than 5 % off its own. Glides ride the tempo at about 0.5 % a bar, as a DJ eases the pitch fader, so no one hears a song speed up or slow down. Stretching is sample-exact: a phase-locked vocoder for tonal stems, with the original drum hits copied onto their new positions.
 5. **Listen** plays from four bars before a transition. **Edit** opens it in the Transition tab.
@@ -82,6 +82,16 @@ cd tools/convert-demucs && uv venv --python 3.12 .venv && \
 cd tools/convert-beats && uv venv --python 3.12 .venv && \
   uv pip install --python .venv/bin/python torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 beat-this soundfile && \
   .venv/bin/python convert.py && cd ../..
+# The vocal model (~440 MB): weights (913 MB, MIT) and its upstream code, then the export
+cd tools/convert-roformer && uv venv --python 3.12 .venv && \
+  uv pip install --python .venv/bin/python torch==2.7.0 coremltools==9.0 numpy==2.2.6 einops==0.8.1 \
+    rotary_embedding_torch==0.3.5 beartype librosa soundfile pyyaml && \
+  curl -L -o MelBandRoformer.ckpt https://huggingface.co/KimberleyJSN/melbandroformer/resolve/main/MelBandRoformer.ckpt && \
+  for f in configs/config_vocals_mel_band_roformer.yaml models/mel_band_roformer/__init__.py \
+           models/mel_band_roformer/attend.py models/mel_band_roformer/mel_band_roformer.py; do \
+    mkdir -p upstream/$(dirname $f) && curl -sL -o upstream/$f \
+      https://raw.githubusercontent.com/KimberleyJensen/Mel-Band-Roformer-Vocal-Model/main/$f; done && \
+  .venv/bin/python convert.py && cd ../..
 xcodegen generate && open Passable.xcodeproj
 ```
 
@@ -90,6 +100,8 @@ The iPhone app needs no models: `cd ios && xcodegen generate && open PassableIos
 ## How the model runs
 
 Core ML has no complex tensors, so `convert.py` exports HTDemucs **without** its STFT/iSTFT. `Separation/DemucsSTFT.swift` reimplements those in Accelerate to match torch exactly. `StemSeparator` also reproduces `demucs.apply_model` chunking: 7.8 s segments, 25 % overlap, triangular cross-fades, and context padding for the last chunk.
+
+The voice comes from a third model, Kim's [Mel-Band RoFormer](https://huggingface.co/KimberleyJSN/melbandroformer) (MIT), exported by `tools/convert-roformer/convert.py` with its STFT and its mask averaging (a complex scatter) left out; `Separation/VocalSeparator.swift` does those and upstream's chunking (8 s chunks, half overlapping, faded). Its vocal replaces HTDemucs', and what the mix holds beyond it and the other three stems goes back to those three by their power per bin (`StemResidual`), so the four still add up to the song. On the MUSDB18 test excerpts its vocal is 11.5 dB SDR against HTDemucs' 8.9 (better on 49 of 50; `tools/convert-roformer/evaluate.py`, with `passable-render --dump-vocals` giving Passable's own). Songs separated before it get the new voice once, on their next load; their beat grids and keys are kept.
 
 Beat grids start from a second model, [Beat This!](https://github.com/CPJKU/beat_this) (MIT), exported by `tools/convert-beats/convert.py` with its mel filterbank inside the graph; `Analysis/BeatTracker.swift` does the STFT and the 30-second chunking. It says which tempo, which hits the beat is on and which beat is the one; `TempoEstimator` then fits the grid to the drum hits to the millisecond. Without the model in the bundle, analysis falls back to onsets alone.
 
@@ -126,7 +138,7 @@ With `TEST_RUNNER_PASSABLE_SET_FIXED=1`, SetLab plays the songs in the order lis
 
 | Folder | Contents |
 |---|---|
-| `Passable/Separation` | Core ML HTDemucs, STFT, stem cache |
+| `Passable/Separation` | Core ML HTDemucs and Mel-Band RoFormer, STFTs, stem cache |
 | `Passable/Analysis` | beat grid (Beat This! tracker for the metre, onset comb search for the fit; per-bar grids for songs without a steady tempo), key (Krumhansl chroma), lyrics (line times from on-device speech recognition) |
 | `Passable/Audio` | decoding/resampling, mmap'd stems, time map + sample-exact stretcher (phase vocoder, transient copy, sinc resampler) |
 | `Passable/DSP` | mixer, biquads, Freeverb, ping-pong delay, limiter: shared by preview and render |
@@ -146,4 +158,4 @@ Measurement harnesses (skipped unless their variable is set; `xcodebuild` only p
 
 ## License
 
-MIT, see [`LICENSE`](LICENSE). [Beat This!](https://github.com/CPJKU/beat_this) (MIT) and HTDemucs (MIT) are used under their own licenses.
+MIT, see [`LICENSE`](LICENSE). [Beat This!](https://github.com/CPJKU/beat_this) (MIT), HTDemucs (MIT) and Mel-Band RoFormer (Kim's vocal model, MIT) are used under their own licenses.

@@ -19,6 +19,7 @@ while !args.isEmpty {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
     case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--as-listed", "--energy", "--vocals": break
+    case "--dump-vocals", "--models", "--vocal-step": _ = args.removeFirst()
     case "--order": ordered = true
     case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc": _ = args.removeFirst()
     case "--list":
@@ -54,9 +55,11 @@ func seconds(_ since: Date) -> String { String(format: "%.1f s", Date().timeInte
 if let k = CommandLine.arguments.firstIndex(of: "--cut-cost") { MixMath.cutCost = Double(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--clash-cost") { MixMath.clashCost = Double(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--arc") { SetOrdering.arcPenalty = Double(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--vocal-step") { VocalSeparator.step = Int(CommandLine.arguments[k + 1])! }
 
 // Songs not separated yet need the models: the installed app's.
-ModelLocation.directory = URL(fileURLWithPath: "/Applications/Passable.app/Contents/Resources")
+ModelLocation.directory = URL(fileURLWithPath: CommandLine.arguments.firstIndex(of: "--models").map { CommandLine.arguments[$0 + 1] }
+                                 ?? "/Applications/Passable.app/Contents/Resources")
 TrackProcessor.renditionFolder = "render-matched"
 
 let clock = Date()
@@ -70,6 +73,22 @@ for url in songs {
     if Date().timeIntervalSince(clock) > 5 { print("  \(tracks.count)/\(songs.count) \(SongTitle.of(url)) (\(seconds(clock)))") }
 }
 print("loaded \(tracks.count) songs in \(seconds(clock))")
+if let k = CommandLine.arguments.firstIndex(of: "--dump-vocals") {
+    // Each song's vocal stem as Passable separates it, raw 32-bit floats
+    // per channel, in a folder named after the song's own folder: what
+    // tools/convert-roformer/evaluate.py scores against true stems.
+    let out = URL(fileURLWithPath: CommandLine.arguments[k + 1])
+    for t in tracks {
+        guard let v = t.loaded.stems[.vocals] else { continue }
+        let dir = out.appendingPathComponent(t.url.deletingLastPathComponent().lastPathComponent)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for (name, ch) in [("L", v.left), ("R", v.right)] {
+            let data = Data(bytes: ch.pointer, count: v.count * MemoryLayout<Float>.size)
+            try data.write(to: dir.appendingPathComponent("vocals.\(name).f32"))
+        }
+    }
+    exit(0)
+}
 // As the app does: a second copy of a song in the set plays once.
 do {
     var kept: [(url: URL, loaded: TrackProcessor.Loaded)] = []

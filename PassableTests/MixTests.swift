@@ -363,6 +363,57 @@ final class SetShapeTests: XCTestCase {
         }
     }
 
+    /// A breath in the middle of a sentence is no line's end: it's told
+    /// and priced as a sentence cut short, between a gap between words and
+    /// no cut at all; at a clause's end the same breath is a line.
+    func testBreathInsideASentenceIsNoLineEnd() {
+        // Loud singing, one sixteenth of breath at 0 between loud ones.
+        let level: (Int) -> Float = { $0 == 0 ? -40 : 0 }
+        let inside = VocalPhrasing.cut(opening: false, from: -4, through: 4, reference: 0,
+                                       inside: { _ in true }, level: level)
+        XCTAssertEqual(inside?.kind, .mid)
+        let ending = VocalPhrasing.cut(opening: false, from: -4, through: 4, reference: 0, turns: { $0 == 0 },
+                                       inside: { _ in true }, level: level)
+        XCTAssertEqual(ending?.kind, .line)
+        let mid = AutoPlacement.cutCost(in: .line, out: .mid)
+        XCTAssertGreaterThan(mid, AutoPlacement.cutCost(in: .line, out: .word))
+        XCTAssertLessThan(mid, AutoPlacement.cutCost(in: .line, out: nil))
+    }
+
+    /// A low end carried by the kick (an 808) or a synth counts as much as
+    /// a bass line: a song with its beat and low end going all through is
+    /// a hard one, whatever stem the separation put the low end in.
+    func testEnergyHearsTheLowEndInAnyPart() {
+        let bars = 32
+        func song(lowIn stem: StemKind) -> TrackAnalysis {
+            var s = TrackStructure(activity: ["drums": [Float](repeating: 1, count: bars),
+                                              "bass": [Float](repeating: stem == .bass ? 1 : 0, count: bars)],
+                                   loudness: [Float](repeating: -10, count: bars))
+            s.stemLowLevel = Dictionary(uniqueKeysWithValues: StemKind.allCases.map {
+                ($0.rawValue, [Float](repeating: $0 == stem ? -10 : -60, count: bars))
+            })
+            return TrackAnalysis(grid: BeatGrid(bpm: 128, firstDownbeat: 0), key: MusicalKey(tonicPitchClass: 9, isMajor: false),
+                                 duration: Double(bars) * 240 / 128, structure: s, version: TrackAnalysis.currentVersion)
+        }
+        let bassLine = SetOrdering.energy(song(lowIn: .bass))
+        XCTAssertEqual(SetOrdering.energy(song(lowIn: .drums)), bassLine, accuracy: 1e-9, "an 808")
+        XCTAssertEqual(SetOrdering.energy(song(lowIn: .other)), bassLine, accuracy: 1e-9, "a synth bass")
+        XCTAssertGreaterThan(bassLine, 0.8)
+    }
+
+    /// The beat in a blend is the two songs' drums alone: a bar where A's
+    /// drums break and B's aren't in yet reads as no beat, however loud
+    /// the voice and melody over it.
+    func testBeatIsTheDrumsAlone() {
+        let shape = TransitionShape(.stemSwap, bars: 8, vocalBar: 4, keysClash: false, lowSwap: nil)
+        var drumsA = [TransitionShape.Gains](repeating: (1, 1), count: 16)
+        drumsA[3] = (0, 0)
+        let a: [StemKind: [TransitionShape.Gains]] = [.drums: drumsA, .vocals: [TransitionShape.Gains](repeating: (1, 100), count: 16)]
+        let b: [StemKind: [TransitionShape.Gains]] = [.drums: [TransitionShape.Gains](repeating: (0, 0), count: 16), .other: [TransitionShape.Gains](repeating: (1, 100), count: 16)]
+        XCTAssertLessThan(shape.beatLevel(shape.first + 3, a: a, e: 0, b: b, c: 0), -60)
+        XCTAssertGreaterThan(shape.mixLevel(shape.first + 3, a: a, e: 0, b: b, c: 0), 10)
+    }
+
     /// With every transition priced alike, a set opens with its gentlest
     /// songs, has its hardest about four fifths in, and doesn't end on its
     /// gentlest; the search finds that as the exact order does.
