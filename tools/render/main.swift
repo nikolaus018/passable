@@ -607,7 +607,8 @@ if CommandLine.arguments.contains("--vocals") {
         func untouched(_ k: Int) -> [Double] {
             barLevels(from: from, bars: beats, barSeconds: beat, of: raw.snapshot(masterGain: 1, including: { i, s in i == k && s == .vocals }))
         }
-        let ua = untouched(t.from).map { $0 > ra - 15 }, ub = untouched(t.to).map { $0 > rb - 15 }
+        let rawA = untouched(t.from), rawB = untouched(t.to)
+        let ua = rawA.map { $0 > ra - 15 }, ub = rawB.map { $0 > rb - 15 }
         var gap = 0, run = 0, silencedA = 0, heldB = 0
         for k in 0..<beats {
             let hole = !ha[k] && !hb[k] && (ua[k] || ub[k])
@@ -636,12 +637,16 @@ if CommandLine.arguments.contains("--vocals") {
             print(String(format: "   A cut at sixteenth %d by its grid, %.2f as planned", k, planned))
         }
         // The singer's level as heard, A's last 8 sung beats against B's
-        // first 8 (median of each, beats where it's heard).
-        let aSung = ha.indices.filter { ha[$0] }.suffix(8).map { la[$0] }.sorted()
-        let bSung = hb.indices.filter { hb[$0] }.prefix(8).map { lb[$0] }.sorted()
+        // first 8 (median of each, beats where it's heard). Sung: within
+        // 10 dB of what that voice sings at here, played untouched (so
+        // neither a voice turned down to match nor a stem's breath and
+        // leftovers before a singer starts count as its level).
+        let singsA = ref(rawA) - 10, singsB = ref(rawB) - 10
+        let aSung = ha.indices.filter { ha[$0] && rawA[$0] > singsA }.suffix(8).map { la[$0] }.sorted()
+        let bSung = hb.indices.filter { hb[$0] && rawB[$0] > singsB }.prefix(8).map { lb[$0] }.sorted()
         // (A voice that never really sings here, its loud beats down in the
         // noise, has no level to match.)
-        let sings = ra > 25 && rb > 25 && !aSung.isEmpty && !bSung.isEmpty
+        let sings = ra > 25 && rb > 25 && aSung.count >= 4 && bSung.count >= 4
         let step = sings ? bSung[bSung.count / 2] - aSung[aSung.count / 2] : 0
         if sings { steps.append(step) }
         overlapSum += overlap; gapWorst = max(gapWorst, gap); if gap > 4 { gaps4 += 1 }

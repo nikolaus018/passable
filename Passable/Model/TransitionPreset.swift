@@ -126,8 +126,9 @@ struct TransitionBuilder {
     static let voiceMatchLeast = 1.5, voiceMatchMost = 8.0
     /// The handover itself (A's last two bars, B's first two) is sung at
     /// the matched level; B's voice then eases back to its own over
-    /// `voiceSettle` bars, and A's eases down over `voiceYield` bars before.
-    static let voiceHold = 2.0, voiceSettle = 8.0, voiceYield = 4.0
+    /// `voiceSettle` bars (by the blend's end, over no fewer than
+    /// `voiceSettleLeast`), and A's eases down over `voiceYield` bars before.
+    static let voiceHold = 2.0, voiceSettle = 8.0, voiceSettleLeast = 4.0, voiceYield = 4.0
     /// Linear gain a voice `step` dB louder than the other is met at.
     static func voiceMatch(_ step: Double) -> Double? {
         guard step >= voiceMatchLeast else { return nil }
@@ -417,8 +418,12 @@ struct TransitionBuilder {
         if vocalInFade > 0 {
             automate(.b, .vocals, .volume, [(vin, 0, .sCurve), (vin + vocalInFade, 1, .linear)])
         } else if let g = Self.voiceMatch(voiceStep) {
+            // (Back by the blend's end where there are four bars for it:
+            // still easing past it, B was heard held back once it played
+            // on its own.)
+            let settle = min(Self.voiceSettle, max(Self.voiceSettleLeast, Double(bars) - vin - Self.voiceHold))
             automate(.b, .vocals, .volume, [(vin, 0, .hold), (vin + 0.001, g, .linear), (vin + Self.voiceHold, g, .sCurve),
-                                            (vin + Self.voiceHold + Self.voiceSettle, 1, .linear)])
+                                            (vin + Self.voiceHold + settle, 1, .linear)])
         } else {
             automate(.b, .vocals, .volume, [(vin, 0, .hold), (vin + 0.001, 1, .linear)])
         }

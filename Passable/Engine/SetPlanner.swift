@@ -1943,16 +1943,20 @@ enum VocalPhrasing {
     /// A's last eight sung beats before it leaves at `out` against B's
     /// first eight after it opens at `vin` (master seconds), the median of
     /// each, each song at its set level (`trimA`, `trimB`). A beat counts
-    /// as sung within 15 dB of the voice's loud beats around there. nil
-    /// where either hardly sings there.
+    /// as sung only within `sungWithin` dB of what that voice sings at in
+    /// its song (`referenceA`, `referenceB`), and a bar's worth of such
+    /// beats is needed on each side. nil where either hardly sings there.
+    /// (Taken as sung within 15 dB of the loudest beats around the cut,
+    /// what the stem held of a voice that wasn't singing yet (breath,
+    /// bleed, the separation's leftovers) read as a quiet singer, and a
+    /// real one was turned down to it.)
     static func step(a: StemAudio, offsetA: Double, out: Double, trimA: Double, referenceA: Float,
                      b: StemAudio, offsetB: Double, vin: Double, trimB: Double, referenceB: Float,
                      beat: Double) -> Double? {
         func sung(_ stem: StemAudio, _ offset: Double, _ reference: Float, from: Double, last: Bool) -> Float? {
             let heard = (0..<16).map { level(stem, at: from + Double($0) * beat - offset, length: beat) }
-            let loud = heard.sorted()[13]
-            guard !quiet(loud, reference) else { return nil }
-            let beats = heard.filter { $0 > loud - 15 }
+            let beats = heard.filter { $0 > reference - sungWithin }
+            guard beats.count >= 4 else { return nil }
             let eight = (last ? Array(beats.suffix(8)) : Array(beats.prefix(8))).sorted()
             return eight[eight.count / 2]
         }
@@ -1960,6 +1964,10 @@ enum VocalPhrasing {
               let lb = sung(b, offsetB, referenceB, from: vin, last: false) else { return nil }
         return Double(lb - la) + trimB - trimA
     }
+
+    /// dB under what a voice sings at in its song that a beat of it still
+    /// counts as singing for `step`.
+    static let sungWithin: Float = 10
 
     /// The level a vocal sings at: its loud bars (90th percentile).
     static func reference(_ structure: TrackStructure?) -> Float? { structure?.vocalReference }
