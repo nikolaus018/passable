@@ -258,3 +258,96 @@ final class KeyLimitTests: XCTestCase {
         XCTAssertEqual(PairCosts.fingerprint(analysis), PairCosts.fingerprint(copy))
     }
 }
+
+final class SteadyingTests: XCTestCase {
+    /// A drummer's bars, a percent or two fast or slow.
+    private func breathing(bars: Int = 40) -> BeatGrid {
+        var d = [0.3]
+        for k in 0..<bars { d.append(d[k] + 2.0 * (1 + 0.02 * sin(Double(k) / 3))) }
+        return BeatGrid(bpm: 120, firstDownbeat: 0.3, downbeats: d, wanders: true)
+    }
+
+    func testEveryDownbeatLandsOnTheSteadiedGrid() throws {
+        let grid = breathing()
+        let warp = try XCTUnwrap(Steadying.warp(grid))
+        let d = grid.downbeats!
+        for (k, x) in d.enumerated() {
+            XCTAssertEqual(warp.output(x), d[0] + Double(k) * warp.bar, accuracy: 1e-9)
+        }
+        // The two maps undo each other, and before and after the bars the
+        // song plays as it is.
+        for y in stride(from: 0.0, to: 100, by: 0.37) { XCTAssertEqual(warp.output(warp.source(y)), y, accuracy: 1e-9) }
+        XCTAssertEqual(warp.output(0.1), 0.1)
+        XCTAssertEqual(warp.output(d.last! + 5) - warp.output(d.last!), 5, accuracy: 1e-9)
+    }
+
+    func testOnlyADrummersBarsAreEvenedOut() {
+        // A steady grid, or a song whose bars are counted out only because
+        // of an odd one, keeps its own.
+        XCTAssertNil(Steadying.warp(BeatGrid(bpm: 120, firstDownbeat: 0.1)))
+        var odd = breathing()
+        odd.wanders = false
+        XCTAssertNil(Steadying.warp(odd))
+        // Bars all the grid's (the tracker lost): nothing to even out.
+        let even = BeatGrid(bpm: 120, firstDownbeat: 0, downbeats: (0..<40).map { Double($0) * 2 }, wanders: true)
+        XCTAssertNil(Steadying.warp(even))
+        // One bar far off: the tracker's, not the drummer's.
+        var glitch = breathing()
+        glitch.downbeats![20] += 0.4
+        XCTAssertNil(Steadying.warp(glitch))
+    }
+
+    func testLinesMoveWithTheBars() throws {
+        let grid = breathing()
+        let warp = try XCTUnwrap(Steadying.warp(grid))
+        let d = grid.downbeats!
+        let line = VocalLine(start: d[10], end: d[12], words: 4, repeats: 0, breaks: [d[11]], wordTimes: [d[10], d[11]])
+        let moved = Steadying.moved(line, warp)
+        XCTAssertEqual(moved.start, d[0] + 10 * warp.bar, accuracy: 1e-9)
+        XCTAssertEqual(moved.end, d[0] + 12 * warp.bar, accuracy: 1e-9)
+        XCTAssertEqual(moved.breaks[0], d[0] + 11 * warp.bar, accuracy: 1e-9)
+        assertClose(moved.wordTimes, [d[0] + 10 * warp.bar, d[0] + 11 * warp.bar])
+    }
+}
+
+private func assertClose(_ a: [Double], _ b: [Double], accuracy: Double = 1e-9, file: StaticString = #filePath, line: UInt = #line) {
+    XCTAssertEqual(a.count, b.count, file: file, line: line)
+    for (x, y) in zip(a, b) { XCTAssertEqual(x, y, accuracy: accuracy, file: file, line: line) }
+}
+
+final class OrderPricerTests: XCTestCase {
+    /// Every move priced from the sums is what the whole order made says.
+    func testEveryMoveIsPricedAsTheOrderItMakes() {
+        var seed: UInt64 = 7
+        func next() -> Double { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return Double(seed >> 11) / Double(1 << 53) }
+        for n in [3, 5, 8, 11] {
+            for withExtras in [false, true] {
+                let costs = (0..<n).map { _ in (0..<n).map { _ in next() * 4 - 2 } }
+                let washOuts = withExtras ? (0..<n).map { _ in (0..<n).map { _ in next() < 0.3 } } : nil
+                let arc = withExtras ? SetOrdering.EnergyArc((0..<n).map { _ in next() }) : nil
+                var gen = Gen(state: UInt64(n))
+                let path = Array((0..<n).shuffled(using: &gen))
+                let pricer = SetOrdering.OrderPricer(path: path, costs, washOuts, arc)
+                var moves: [SetOrdering.OrderMove] = []
+                for length in 1...min(3, n - 1) {
+                    for i in 0...(n - length) {
+                        for j in 0...(n - length) where j != i {
+                            moves.append(.init(i: i, length: length, j: j, reversed: false))
+                            if length > 1 { moves.append(.init(i: i, length: length, j: j, reversed: true)) }
+                        }
+                    }
+                }
+                for i in 0..<(n - 1) { for j in (i + 1)..<n { moves.append(.init(i: i, length: 0, j: j, reversed: true)) } }
+                for m in moves {
+                    let made = m.applied(to: path)
+                    XCTAssertEqual(pricer.price(m), SetOrdering.total(made, costs, washOuts, arc), accuracy: 1e-9, "\(n) \(m)")
+                }
+            }
+        }
+    }
+
+    private struct Gen: RandomNumberGenerator {
+        var state: UInt64
+        mutating func next() -> UInt64 { state = state &* 6364136223846793005 &+ 1442695040888963407; return state }
+    }
+}

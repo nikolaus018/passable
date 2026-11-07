@@ -18,10 +18,10 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--as-listed", "--energy", "--vocals": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts": break
     case "--dump-vocals", "--models", "--vocal-step": _ = args.removeFirst()
     case "--order": ordered = true
-    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc": _ = args.removeFirst()
+    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot": _ = args.removeFirst()
     case "--list":
         let text = try String(contentsOfFile: args.removeFirst(), encoding: .utf8)
         songs += text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -54,6 +54,8 @@ func seconds(_ since: Date) -> String { String(format: "%.1f s", Date().timeInte
 
 if let k = CommandLine.arguments.firstIndex(of: "--cut-cost") { MixMath.cutCost = Double(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--clash-cost") { MixMath.clashCost = Double(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--rot") { SetOrdering.rotationsSettled = Int(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--kick") { SetOrdering.kickSpan = Int(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--arc") { SetOrdering.arcPenalty = Double(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--vocal-step") { VocalSeparator.step = Int(CommandLine.arguments[k + 1])! }
 
@@ -126,6 +128,23 @@ if CommandLine.arguments.contains("--twins") {
     exit(0)
 }
 
+if CommandLine.arguments.contains("--grids") {
+    // How far the beats a trained tracker hears in each song, as it's
+    // loaded (a drummer's song steadied), lie off its grid: 90th
+    // percentile and median, ms. Steady: within a frame or two (20 ms).
+    for t in tracks {
+        let stems = t.loaded.stems.values
+        let n = stems.map(\.count).max() ?? 0
+        var mono = [Float](repeating: 0, count: n)
+        for s in stems { for k in 0..<s.count { mono[k] += 0.25 * (s.left.pointer[k] + s.right.pointer[k]) } }
+        guard let tracker = BeatTracker.shared, let heard = try? tracker.track(mono) else { print("no tracker"); exit(1) }
+        let g = t.loaded.analysis.grid
+        let off = heard.beats.map { x in abs(x - g.snapped(x, division: 1)) * 1000 }.sorted()
+        print(String(format: "%6.1f BPM%@  off grid p50 %4.0f ms  p90 %4.0f ms  %@", g.bpm, g.isSteady ? " " : "~",
+                     off[off.count / 2], off[off.count * 9 / 10], SongTitle.of(t.url)))
+    }
+    exit(0)
+}
 if CommandLine.arguments.contains("--energy") {
     // Each song's `SetOrdering.energy` and what it's made of: share of bars
     // with drums and bass both going (activity > 0.5), each alone, tempo.
@@ -197,12 +216,17 @@ if CommandLine.arguments.contains("--tempos") {
 if ordered {
     // As the app's Auto-Order does it.
     let analyses = tracks.map(\.loaded.analysis)
-    let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: tracks.map(\.loaded)), remembered: true)
+    let t0 = Date()
+    let hits = BeatAlign.attacks(of: tracks.map(\.loaded))
+    let t1 = Date()
+    let costs = SetOrdering.costMatrix(analyses, drums: hits, remembered: true)
+    let t2 = Date()
     let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
     let shakes = CommandLine.arguments.firstIndex(of: "--shakes").map { Int(CommandLine.arguments[$0 + 1])! }
     // --as-listed: price the list's own order instead of searching one.
     let order = CommandLine.arguments.contains("--as-listed") ? Array(analyses.indices)
         : SetOrdering.order(costs, washOuts: washOuts, energies: energies, shakes: shakes)
+    print(String(format: "drum hits %.1f s, prices %.1f s, search %.1f s", t1.timeIntervalSince(t0), t2.timeIntervalSince(t1), Date().timeIntervalSince(t2)))
     let pairs = zip(order, order.dropFirst())
     print(String(format: "order cost %.2f (transitions %.2f, Wash Outs/cuts %d, clashing keys %d)",
                  SetOrdering.total(order, costs, washOuts, energies), pairs.reduce(0) { $0 + costs[$1.0][$1.1] },
@@ -578,6 +602,29 @@ if CommandLine.arguments.contains("--steps") {
     exit(0)
 }
 
+if CommandLine.arguments.contains("--shifts") {
+    // How far each transition takes the songs off their own tempo, and
+    // which play off their key: a song everyone knows is heard wrong far
+    // from either.
+    var stretches: [Double] = [], shifted = 0
+    for (i, t) in mix.transitions.enumerated() {
+        let share = t.plan.shared
+        let worst = max(MixMath.stretch(share.a), MixMath.stretch(share.b)) * 100
+        if t.edit.preset != .echoOut { stretches.append(worst) }
+        if t.edit.semitones != 0 { shifted += 1 }
+        if worst > 4 || t.edit.semitones != 0 {
+            print(String(format: "%02d %@ %d  A %+.1f%% B %+.1f%%  B %+d st  %@ → %@", i + 1, t.edit.preset.displayName, t.edit.bars,
+                         (share.a - 1) * 100, (share.b - 1) * 100, t.edit.semitones,
+                         SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url)))
+        }
+    }
+    stretches.sort()
+    print(String(format: "SHIFTS %d blends: stretch median %.1f%%, 90th %.1f%%, worst %.1f%%, over 4%%: %d | key shifted: %d",
+                 stretches.count, stretches.isEmpty ? 0 : stretches[stretches.count / 2],
+                 stretches.isEmpty ? 0 : stretches[stretches.count * 9 / 10], stretches.last ?? 0,
+                 stretches.filter { $0 > 4 }.count, shifted))
+    exit(0)
+}
 if CommandLine.arguments.contains("--vocals") {
     // How each pair of voices changed hands, as heard: beats both sang at
     // once, the longest silence between them, and where in each song's
@@ -622,8 +669,9 @@ if CommandLine.arguments.contains("--vocals") {
         // (Whose voice the hole is: A's taken out while it would sing on,
         // or B's held back while it would already sing; in beats, both
         // where both would.)
-        let hole = gap <= 4 || !CommandLine.arguments.contains("-v") ? nil : String(format: "   hole: A silenced %d beats, B held %d beats (out bar %.1f, in bar %.1f of %d)", silencedA, heldB,
-                         (out - t.start) / t.barSeconds, (inn - t.start) / t.barSeconds, t.edit.bars)
+        let hole = gap <= 4 || !CommandLine.arguments.contains("-v") ? nil : String(format: "   hole: A silenced %d beats, B held %d beats (out bar %.1f, in bar %.1f of %d, %@, switch %.0f, loop %d)", silencedA, heldB,
+                         (out - t.start) / t.barSeconds, (inn - t.start) / t.barSeconds, t.edit.bars, t.edit.preset.displayName,
+                         TransitionBuilder.switchBar(t.edit.preset, bars: t.edit.bars, lowSwap: t.plan.placement.lowSwap), t.loopBars)
         // (Inside on both neighbouring sixteenths too: a cut made to the
         // millisecond on a sentence's end rounds to either side of it.)
         // (A comma's clause ending is a way out the planner means to take.

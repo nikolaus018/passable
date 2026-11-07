@@ -202,6 +202,12 @@ final class TrackProcessor: @unchecked Sendable {
                 break
             }
         }
+        // A drummer's song plays with its bars made even, so it can be
+        // beat-matched (see `Steadying`).
+        if let steady = try Steadying.steadied(directory: directory, stems: stems, analysis: analysis) {
+            return Loaded(directory: steady.directory, stems: steady.stems, analysis: steady.analysis,
+                          peaks: StemCache.peaks(steady.stems, in: steady.directory, hop: Self.peakHop))
+        }
         return Loaded(directory: directory, stems: stems, analysis: analysis,
                       peaks: StemCache.peaks(stems, in: directory, hop: Self.peakHop))
     }

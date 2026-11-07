@@ -100,6 +100,24 @@ enum TimeStretcher {
         }
         return out
     }
+
+    /// A whole stem played along any monotonic map, not a `TimeMap`: what
+    /// a song with its bars made even is played as (see `Steadying`).
+    /// - Parameters:
+    ///   - count: output frames.
+    ///   - source: output frame → source frame.
+    ///   - output: its inverse, source frame → output frame (where each
+    ///     drum hit is copied to).
+    static func warp(_ input: StereoBuffer, count: Int, source: (Double) -> Double,
+                     output: (Double) -> Double, percussive: Bool) -> StereoBuffer {
+        let size = percussive ? 2048 : 4096
+        let onsets = Onsets.detect(input.mono(), sensitivity: percussive ? 0.06 : 0.25)
+        var out = PhaseVocoder(size: size).process(input, count: count, source: source, onsets: onsets)
+        if percussive { TransientCopy.apply(to: &out, source: input, output: output, onsets: onsets, until: count) }
+        out.left.removeSubrange(min(count, out.left.count)...)
+        out.right.removeSubrange(min(count, out.right.count)...)
+        return out
+    }
 }
 
 // MARK: - Onsets
@@ -416,6 +434,13 @@ enum TransientCopy {
     ///   land before `from` are left as they are).
     static func apply(to out: inout StereoBuffer, source: StereoBuffer, map: TimeMap, onsets: [Int], from: Int = 0,
                       until end: Int) {
+        apply(to: &out, source: source, output: map.output, onsets: onsets, from: from, until: end)
+    }
+
+    /// The same along any map: `output` takes a source frame to the output
+    /// frame it's heard at.
+    static func apply(to out: inout StereoBuffer, source: StereoBuffer, output: (Double) -> Double, onsets: [Int],
+                      from: Int = 0, until end: Int) {
         let sr = AudioIO.sampleRate
         let pre = Int(0.015 * sr)     // start this long before the detected onset
         let fadeIn = Int(0.002 * sr)
@@ -423,8 +448,8 @@ enum TransientCopy {
         let limit = min(end, out.count)
         for (i, x) in onsets.enumerated() {
             let nextX = i + 1 < onsets.count ? onsets[i + 1] : source.count + pre + fadeIn
-            let y = Int(map.output(Double(x)).rounded())
-            let nextY = i + 1 < onsets.count ? Int(map.output(Double(nextX)).rounded()) : limit + pre + fadeIn
+            let y = Int(output(Double(x)).rounded())
+            let nextY = i + 1 < onsets.count ? Int(output(Double(nextX)).rounded()) : limit + pre + fadeIn
             // Output span [start, stop): stop leaves room for the next
             // hit's lead-in, and never reads past the next source onset.
             let start = y - pre - fadeIn

@@ -632,8 +632,8 @@ enum SetOrdering {
         return search(costs, washOuts, arc, shakes: shakes)
     }
 
-    /// `order` for a set too long to try every order of: the best of a
-    /// greedy chain from every song, each tidied by moving single songs;
+    /// `order` for a set too long to try every order of: the best of the
+    /// cheapest few greedy chains (one from every song), each settled;
     /// then, from there, shaken and settled again and again (runs of songs
     /// moved or turned round as one, and a few runs swapped at random to
     /// get out of an order no single move improves), keeping what's
@@ -644,26 +644,38 @@ enum SetOrdering {
         let n = costs.count
         guard n > 2 else { return Array(0..<n) }
         var best = Array(0..<n), bestCost = Double.infinity
-        for start in 0..<n {
-            var path = greedy(costs, from: start)
-            improve(&path, costs, washOuts, energies, blocks: 1)
-            let c = total(path, costs, washOuts, energies)
-            if c < bestCost { bestCost = c; best = path }
+        // The best few greedy chains, each settled. (Every chain was tidied
+        // one move at a time on one core, as this was: 45 s of a 117-song
+        // set's ordering, for an order the shakes below then remade.)
+        let chains = (0..<n).map { start -> (path: [Int], cost: Double, start: Int) in
+            let path = greedy(costs, from: start)
+            return (path, total(path, costs, washOuts, energies), start)
+        }.sorted { ($0.cost, $0.start) < ($1.cost, $1.start) }
+        for chain in chains.prefix(6) {
+            var path = chain.path
+            let c = settle(&path, costs, washOuts, energies)
+            if c < bestCost - 1e-9 { (best, bestCost) = (path, c) }
         }
-        // Then runs of two and three songs that belong together, moved as one.
-        improve(&best, costs, washOuts, energies, blocks: 3)
-        bestCost = settle(&best, costs, washOuts, energies)
         guard n >= 8 else { return best }
         rotate(&best, &bestCost, costs, washOuts, energies)
         var random = SplitMix(state: 0x9E37_79B9_7F4A_7C15)
         // About as much work whatever the set's length (each settle costs
-        // ~n³): ~500 rounds at 68 songs, a few seconds, where more search
-        // stopped finding anything better (2000 and 10,000 gave the same
-        // order; the 86 used before left two more cuts in).
-        for _ in 0..<(shakes ?? max(60, min(2000, 160_000_000 / (n * n * n)))) {
+        // ~n² with `OrderPricer`): ~1,500 rounds at 117 songs, ten seconds
+        // or so, 3,000 at 80 and under. (A hundred rounds, as 117 songs
+        // got before, left an order 12 dearer than 1,500 found.)
+        for round in 0..<(shakes ?? max(60, min(3000, 20_000_000 / (n * n)))) {
             // Three cuts, the two middle runs swapped: a change no move of
             // one run undoes in one step.
-            var cuts = (0..<3).map { _ in 1 + Int(random.next() % UInt64(n - 1)) }.sorted()
+            // (Within a stretch of the set at most `kickSpan` songs long: a
+            // swap of two runs from far ends of the set changes most of it
+            // at once, and nearly always settles somewhere worse. At 117
+            // songs, 800 rounds found an order 0.8 cheaper so than across
+            // the whole set, in half the time.)
+            // Every other round anywhere in the set, all the same: a song
+            // whose place is at the far end needs a swap that long.
+            let span = round % 2 == 0 ? min(n - 1, kickSpan) : n - 1
+            let from = Int(random.next() % UInt64(n - span)) + 1
+            var cuts = (0..<3).map { _ in from + Int(random.next() % UInt64(span)) }.sorted()
             guard cuts[0] < cuts[1], cuts[1] < cuts[2] else { continue }
             if cuts[2] == n { cuts[2] = n - 1; guard cuts[1] < cuts[2] else { continue } }
             var path = Array(best[..<cuts[0]]) + best[cuts[1]..<cuts[2]] + best[cuts[0]..<cuts[1]] + best[cuts[2]...]
@@ -673,6 +685,14 @@ enum SetOrdering {
         rotate(&best, &bestCost, costs, washOuts, energies)
         return best
     }
+
+    /// How many of the set's ends moved to its start, the cheapest as they
+    /// are, `rotate` settles.
+    nonisolated(unsafe) static var rotationsSettled = 8
+
+    /// The longest stretch of the set every other shake of `search` swaps
+    /// runs within.
+    nonisolated(unsafe) static var kickSpan = 30
 
     /// The set's end moved to its start, either way round, at every split,
     /// each settled, while that finds a better order: a block of songs in a
@@ -688,12 +708,21 @@ enum SetOrdering {
         var rotated = true
         while rotated {
             rotated = false
+            // Every split priced as it is, and only the most promising few
+            // settled: settling all of them, both ways round, was most of a
+            // long set's ordering (232 settles at 117 songs, 30 s), and the
+            // one that pays is among the cheapest unsettled (where the arc
+            // and the seam it opens say so).
+            var tries: [(cost: Double, path: [Int])] = []
             for k in 1..<n {
                 for reversed in [false, true] {
-                    var path = (reversed ? Array(best[k...].reversed()) : Array(best[k...])) + best[..<k]
-                    let cost = settle(&path, costs, washOuts, energies)
-                    if cost < bestCost - 1e-9 { (best, bestCost, rotated) = (path, cost, true) }
+                    let path = (reversed ? Array(best[k...].reversed()) : Array(best[k...])) + best[..<k]
+                    tries.append((total(path, costs, washOuts, energies), path))
                 }
+            }
+            for var t in tries.sorted(by: { $0.cost < $1.cost }).prefix(rotationsSettled) {
+                let cost = settle(&t.path, costs, washOuts, energies)
+                if cost < bestCost - 1e-9 { (best, bestCost, rotated) = (t.path, cost, true) }
             }
         }
     }
@@ -721,7 +750,7 @@ enum SetOrdering {
         // Every move, priced on all cores: (block start, length; 0 = turn
         // round the run from `i` to `j`), then the best taken, ties to the
         // first in this order (the same set always gets the same order).
-        struct Move { let i: Int, length: Int, j: Int, reversed: Bool }
+        typealias Move = OrderMove
         var moves: [Move] = []
         for length in 1...min(3, n - 1) {
             for i in 0...(n - length) {
@@ -732,46 +761,167 @@ enum SetOrdering {
             }
         }
         for i in 0..<(n - 1) { for j in (i + 1)..<n { moves.append(Move(i: i, length: 0, j: j, reversed: true)) } }
-        /// The song at `p` once `m` is made on `base`, without making it.
-        @inline(__always) func song(_ p: Int, _ m: Move, _ base: UnsafeBufferPointer<Int>) -> Int {
-            if m.length == 0 { return p >= m.i && p <= m.j ? base[m.i + m.j - p] : base[p] }
-            func rest(_ q: Int) -> Int { q < m.i ? base[q] : base[q + m.length] }
-            if p < m.j { return rest(p) }
-            if p < m.j + m.length { let k = p - m.j; return base[m.i + (m.reversed ? m.length - 1 - k : k)] }
-            return rest(p - m.length)
-        }
-        func apply(_ m: Move, to path: [Int]) -> [Int] {
-            var p = path
-            if m.length == 0 { p[m.i...m.j].reverse(); return p }
-            let block = Array(p[m.i..<(m.i + m.length)])
-            p.removeSubrange(m.i..<(m.i + m.length))
-            p.insert(contentsOf: m.reversed ? block.reversed() : block, at: m.j)
-            return p
-        }
         let chunks = max(1, min(moves.count, ProcessInfo.processInfo.activeProcessorCount * 4))
         while true {
             var found = [(cost: Double, index: Int)](repeating: (.infinity, -1), count: chunks)
-            let base = path
-            base.withUnsafeBufferPointer { base in
-                found.withUnsafeMutableBufferPointer { out in
-                    let out = out
-                    DispatchQueue.concurrentPerform(iterations: chunks) { c in
-                        var best = (cost: Double.infinity, index: -1)
-                        var k = c * moves.count / chunks
-                        let end = (c + 1) * moves.count / chunks
-                        while k < end {
-                            let m = moves[k]
-                            let cost = total(count: n, costs, washOuts, energies) { song($0, m, base) }
-                            if cost < best.cost { best = (cost, k) }
-                            k += 1
-                        }
-                        out[c] = best
+            let pricer = OrderPricer(path: path, costs, washOuts, energies)
+            found.withUnsafeMutableBufferPointer { out in
+                let out = out
+                DispatchQueue.concurrentPerform(iterations: chunks) { c in
+                    var best = (cost: Double.infinity, index: -1)
+                    var k = c * moves.count / chunks
+                    let end = (c + 1) * moves.count / chunks
+                    while k < end {
+                        let cost = pricer.price(moves[k])
+                        if cost < best.cost { best = (cost, k) }
+                        k += 1
                     }
+                    out[c] = best
                 }
             }
             guard let best = found.filter({ $0.index >= 0 }).min(by: { ($0.cost, $0.index) < ($1.cost, $1.index) }),
                   best.cost < current - 1e-9 else { return current }
-            (path, current) = (apply(moves[best.index], to: path), best.cost)
+            path = moves[best.index].applied(to: path)
+            current = total(path, costs, washOuts, energies)
+        }
+    }
+
+    /// One change `settle` tries on an order: the run of `length` songs
+    /// from `i` moved to place `j` of what's left (turned round or not),
+    /// or, with `length` 0, the run from `i` to `j` turned round in place.
+    struct OrderMove: Equatable {
+        let i: Int, length: Int, j: Int, reversed: Bool
+
+        func applied(to path: [Int]) -> [Int] {
+            var p = path
+            if length == 0 { p[i...j].reverse(); return p }
+            let block = Array(p[i..<(i + length)])
+            p.removeSubrange(i..<(i + length))
+            p.insert(contentsOf: reversed ? block.reversed() : block, at: j)
+            return p
+        }
+
+        /// The order once made, as runs of the old one, each where it now
+        /// starts: (old start, old end (exclusive), turned round, new start).
+        func runs(count n: Int) -> [(from: Int, to: Int, reversed: Bool, at: Int)] {
+            if length == 0 { return [(0, i, false, 0), (i, j + 1, true, i), (j + 1, n, false, j + 1)] }
+            let block = (from: i, to: i + length, reversed: reversed, at: j)
+            if j > i {
+                return [(0, i, false, 0), (i + length, j + length, false, i), block, (j + length, n, false, j + length)]
+            }
+            return [(0, j, false, 0), block, (j, i, false, j + length), (i + length, n, false, i + length)]
+        }
+    }
+
+    /// Prices every `OrderMove` of one order without making it: what
+    /// `total` would say of the order made, from sums along the order kept
+    /// once, so a move costs the few seams it opens and the songs whose
+    /// place on the arc it shifts by more than three, not the whole set.
+    /// (Each was priced as a whole new order, as this was: on a 117-song
+    /// set 74,000 moves of 117 songs a step, and four fifths of its
+    /// ordering time.)
+    struct OrderPricer {
+        let n: Int
+        let path: [Int]
+        let costs: [[Double]]
+        let washOuts: [[Bool]]?
+        let energies: EnergyArc?
+        /// Sums over the transitions before each (k: from song k to k + 1),
+        /// played forward and turned round: cost, Wash Outs, and Wash Outs
+        /// right after one.
+        private var cost = [[Double]](repeating: [], count: 2)
+        private var washes = [[Int]](repeating: [], count: 2)
+        private var pairs = [[Int]](repeating: [], count: 2)
+        /// Sums over the songs before each place of their arc price,
+        /// played `s` places later (`s` + 3 here, -3…3).
+        private var arcs: [[Double]] = []
+
+        init(path: [Int], _ costs: [[Double]], _ washOuts: [[Bool]]?, _ energies: EnergyArc?) {
+            n = path.count
+            self.path = path
+            self.costs = costs
+            self.washOuts = washOuts
+            self.energies = energies
+            let edges = max(0, n - 1)
+            for dir in 0..<2 {
+                var c = [0.0], w = [0], p = [0, 0]
+                for k in 0..<edges {
+                    let (a, b) = dir == 0 ? (path[k], path[k + 1]) : (path[k + 1], path[k])
+                    c.append(c[k] + costs[a][b])
+                    let here = washOuts?[a][b] == true
+                    w.append(w[k] + (here ? 1 : 0))
+                    if k >= 1 {
+                        let (x, y) = dir == 0 ? (path[k - 1], path[k]) : (path[k], path[k - 1])
+                        let before = washOuts?[x][y] == true
+                        p.append(p[k] + (here && before ? 1 : 0))
+                    }
+                }
+                cost[dir] = c
+                washes[dir] = w
+                pairs[dir] = p
+            }
+            if let energies {
+                arcs = (-3...3).map { s in
+                    var sum = [0.0]
+                    for t in 0..<n {
+                        let place = t + s
+                        sum.append(sum[t] + (place >= 0 && place < n ? energies.cost(path[t], place: place, count: n) : 0))
+                    }
+                    return sum
+                }
+            }
+        }
+
+        /// `total` of the order `m` makes.
+        func price(_ m: OrderMove) -> Double {
+            var sum = 0.0, washCount = 0, washPairs = 0
+            var last: Int? = nil
+            /// The Wash Out flag of the transition before, if any yet.
+            var previous: Bool? = nil
+            func seam(_ a: Int, _ b: Int) {
+                sum += costs[a][b]
+                guard let washOuts else { return }
+                let w = washOuts[a][b]
+                if w { washCount += 1; if previous == true { washPairs += 1 } }
+                previous = w
+            }
+            for run in m.runs(count: n) where run.to > run.from {
+                let first = run.reversed ? path[run.to - 1] : path[run.from]
+                if let last { seam(last, first) }
+                last = run.reversed ? path[run.from] : path[run.to - 1]
+                if run.to - run.from >= 2 {
+                    // Its own transitions, k from `from` to `to` − 2.
+                    let dir = run.reversed ? 1 : 0, a = run.from, b = run.to - 1
+                    sum += cost[dir][b] - cost[dir][a]
+                    if washOuts != nil {
+                        washCount += washes[dir][b] - washes[dir][a]
+                        if b - a >= 2 { washPairs += pairs[dir][b] - pairs[dir][a + 1] }
+                        // (Into its first transition from the one before.)
+                        let firstK = run.reversed ? b - 1 : a
+                        let (x, y) = run.reversed ? (path[firstK + 1], path[firstK]) : (path[firstK], path[firstK + 1])
+                        if previous == true && washOuts![x][y] { washPairs += 1 }
+                        let lastK = run.reversed ? a : b - 1
+                        let (u, v) = run.reversed ? (path[lastK + 1], path[lastK]) : (path[lastK], path[lastK + 1])
+                        previous = washOuts![u][v]
+                    }
+                }
+                if let energies {
+                    let s = run.at - run.from
+                    if !run.reversed, abs(s) <= 3 {
+                        sum += arcs[s + 3][run.to] - arcs[s + 3][run.from]
+                    } else {
+                        for t in run.from..<run.to {
+                            let place = run.reversed ? run.at + (run.to - 1 - t) : run.at + (t - run.from)
+                            sum += energies.cost(path[t], place: place, count: n)
+                        }
+                    }
+                }
+            }
+            if washOuts != nil {
+                sum += washOutPairPenalty * Double(washPairs)
+                if n > 2 { sum += extraWashOutPenalty * Double(max(0, washCount - 1)) }
+            }
+            return sum
         }
     }
 
@@ -897,33 +1047,6 @@ enum SetOrdering {
             left.remove(next)
         }
         return path
-    }
-
-    /// Or-opt: move single songs, or runs of up to `blocks` songs, to a
-    /// better spot until nothing improves.
-    private static func improve(_ path: inout [Int], _ costs: [[Double]], _ washOuts: [[Bool]]? = nil,
-                                _ energies: EnergyArc? = nil, blocks: Int = 1) {
-        var improved = true
-        while improved {
-            improved = false
-            let current = total(path, costs, washOuts, energies)
-            outer: for length in 1...max(1, blocks) where length < path.count {
-                for i in 0...(path.count - length) {
-                    var rest = path
-                    let block = Array(rest[i..<(i + length)])
-                    rest.removeSubrange(i..<(i + length))
-                    for j in 0...rest.count where j != i {
-                        var p = rest
-                        p.insert(contentsOf: block, at: j)
-                        if total(p, costs, washOuts, energies) < current - 1e-9 {
-                            path = p
-                            improved = true
-                            break outer
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
