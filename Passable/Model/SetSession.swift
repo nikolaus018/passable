@@ -1033,6 +1033,14 @@ final class SetSession: ObservableObject {
 
     enum PhoneDestination { case file(URL), phone(PhoneLink.Phone) }
     private enum PhoneOutcome { case saved(URL), sent(String) }
+    /// A phone mix is on its way and can be stopped (`cancelPhoneExport`).
+    @Published private(set) var canCancelExport = false
+
+    /// Stops the phone mix being rendered or sent; nothing is left behind.
+    func cancelPhoneExport() {
+        guard canCancelExport else { return }
+        exportTask?.cancel()
+    }
 
     /// Renders the whole set and packs it, with the map of where each song
     /// sits, into a `.passablemix` for the Passable app on the iPhone: saved
@@ -1043,8 +1051,14 @@ final class SetSession: ObservableObject {
         let snapshot = makeSnapshot()
         let manifest = PhoneMix.manifest(for: mix, titles: items.map(\.title), title: title)
         let link = phoneLink
+        if case .phone = destination {
+            // Claimed now, not once the task runs: the panel closing right
+            // after Send must not stop looking for the phone first.
+            do { try link.hold() } catch { alert = error.localizedDescription; return }
+        }
         exportLabel = "Rendering…"
         exportProgress = 0
+        canCancelExport = true
         exportTask = Task.detached(priority: .userInitiated) { [weak self] in
             let temp = FileManager.default.temporaryDirectory
                 .appendingPathComponent("phonemix-\(UUID().uuidString)", isDirectory: true)
@@ -1061,12 +1075,16 @@ final class SetSession: ObservableObject {
                     let invitation = PassableMix.Invitation(title: title, songs: manifest.songs.count, bytes: estimate,
                                                             minutes: Int((manifest.duration / 60).rounded()))
                     try await link.connect(to: phone, invitation: invitation)
+                    // The phone leaving mid-render stops the render: the set
+                    // would have nowhere to go.
+                    await MainActor.run { link.onLost = { self?.exportTask?.cancel() } }
                     await self?.setPhoneStatus("Rendering…", progress: 0)
                 }
                 try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
                 let audio = temp.appendingPathComponent("mix.m4a")
                 try Exporter.render(snapshot: snapshot, range: frames, tail: 3, to: audio) { p in
-                    Task { @MainActor in self?.exportProgress = p * 0.9 }
+                    // (None may land once the export is over, cancelled or not.)
+                    Task { @MainActor in if self?.exportTask != nil { self?.exportProgress = p * 0.9 } }
                 }
                 await self?.setPhoneStatus("Packing…", progress: 0.9)
                 switch destination {
@@ -1083,9 +1101,11 @@ final class SetSession: ObservableObject {
                     outcome = .success(.sent(phone.name))
                 }
             } catch {
+                let lost = await link.connectionLost
                 await link.cancel()
-                outcome = .failure(error)
+                outcome = .failure(lost ? PhoneLink.LinkError.lost : error)
             }
+            await MainActor.run { link.onLost = nil }
             await self?.finishPhoneExport(outcome)
         }
     }
@@ -1097,6 +1117,7 @@ final class SetSession: ObservableObject {
 
     private func finishPhoneExport(_ result: Result<PhoneOutcome, Error>) {
         exportTask = nil
+        canCancelExport = false
         switch result {
         case .success(.saved(let url)):
             exportProgress = nil

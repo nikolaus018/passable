@@ -327,6 +327,12 @@ struct SetTransportBar: View {
             if let p = set.exportProgress {
                 ProgressView(value: p).frame(width: 110)
                 Text(set.exportLabel).font(.caption).foregroundStyle(.secondary)
+                if set.canCancelExport {
+                    Button { set.cancelPhoneExport() } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help("Stop sending to the iPhone")
+                }
             } else {
                 Menu {
                     Button("Whole Set…") {

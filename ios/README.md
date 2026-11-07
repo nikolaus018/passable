@@ -12,6 +12,8 @@ The Mac renders; the phone plays. Nothing is mixed on the phone.
 3. Tap **Accept** on the phone right away. The Mac then renders the set (a few seconds per song) while the phone keeps its screen on, packs it and sends it over Wi-Fi.
 
 Both devices must be on the same Wi-Fi. The first time, each asks for **Local Network** access: say yes.
+iOS only tells apps a phone is called "iPhone", so give each phone its own name under **Settings › Name on your Mac**.
+The Mac's panel has a ✕ next to the progress to stop a send; if the phone leaves while the Mac renders, the Mac stops too.
 The phone asks before every transfer and everything is encrypted in transit.
 
 No Wi-Fi? In the Mac's iPhone panel choose **Save as File…** and AirDrop the `.passablemix`, or use **+** in the app.

@@ -81,7 +81,12 @@ final class MixStore {
             let scoped = source.startAccessingSecurityScopedResource()
             defer {
                 if scoped { source.stopAccessingSecurityScopedResource() }
-                if moveFile { try? FileManager.default.removeItem(at: source) }
+                if moveFile {
+                    try? FileManager.default.removeItem(at: source)
+                    // The receiver's own folder for it, now empty.
+                    let folder = source.deletingLastPathComponent()
+                    if folder.lastPathComponent.hasPrefix("received-") { try? FileManager.default.removeItem(at: folder) }
+                }
             }
             do {
                 let item = try Self.unpack(source, into: root) { p in

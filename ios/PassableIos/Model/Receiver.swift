@@ -36,10 +36,12 @@ final class Receiver {
     /// Runs with the received file, in a temp folder the receiver owns.
     @ObservationIgnored var onReceived: ((URL) -> Void)?
 
-    let displayName: String
-    @ObservationIgnored private let peerID: MCPeerID
-    @ObservationIgnored private let session: MCSession
-    @ObservationIgnored private let advertiser: MCNearbyServiceAdvertiser
+    /// What Macs see this phone as. iOS only tells apps "iPhone", so it's
+    /// the owner's to change (`rename`); two phones may share it.
+    private(set) var displayName: String
+    @ObservationIgnored private var peerID: MCPeerID
+    @ObservationIgnored private var session: MCSession
+    @ObservationIgnored private var advertiser: MCNearbyServiceAdvertiser
     @ObservationIgnored private let proxy = Proxy()
     @ObservationIgnored private var pendingHandler: ((Bool, MCSession?) -> Void)?
     @ObservationIgnored private var progressObservation: NSKeyValueObservation?
@@ -50,26 +52,71 @@ final class Receiver {
     /// The Mac gives up on an unanswered invitation after this long; so does the phone.
     @ObservationIgnored private var offerExpiry: Task<Void, Never>?
 
+    private static let nameKey = "phoneName"
+    /// This install, for Macs to tell "the same phone again" from "another
+    /// phone of the same name".
+    private static let installID: String = {
+        let key = "installID"
+        if let saved = UserDefaults.standard.string(forKey: key) { return saved }
+        let fresh = UUID().uuidString
+        UserDefaults.standard.set(fresh, forKey: key)
+        return fresh
+    }()
+
     init() {
-        displayName = UIDevice.current.name
+        let saved = UserDefaults.standard.string(forKey: Self.nameKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = (saved?.isEmpty == false ? saved : nil) ?? UIDevice.current.name
+        displayName = name
+        (peerID, session, advertiser) = Self.makeLink(named: name)
+        proxy.owner = self
+        session.delegate = proxy
+        advertiser.delegate = proxy
+    }
+
+    private static func makeLink(named name: String) -> (MCPeerID, MCSession, MCNearbyServiceAdvertiser) {
         // The same identity every launch, so a Mac doesn't see a new phone
         // each time (and keep the old one listed for a while).
-        let key = "peerID.\(displayName)"
+        let key = "peerID.\(name)"
+        let peerID: MCPeerID
         if let data = UserDefaults.standard.data(forKey: key),
            let saved = try? NSKeyedUnarchiver.unarchivedObject(ofClass: MCPeerID.self, from: data) {
             peerID = saved
         } else {
-            let fresh = MCPeerID(displayName: displayName)
-            if let data = try? NSKeyedArchiver.archivedData(withRootObject: fresh, requiringSecureCoding: true) {
+            peerID = MCPeerID(displayName: name)
+            if let data = try? NSKeyedArchiver.archivedData(withRootObject: peerID, requiringSecureCoding: true) {
                 UserDefaults.standard.set(data, forKey: key)
             }
-            peerID = fresh
         }
-        session = MCSession(peer: peerID, securityIdentity: nil, encryptionPreference: .required)
-        advertiser = MCNearbyServiceAdvertiser(peer: peerID, discoveryInfo: nil, serviceType: PassableMix.serviceType)
-        proxy.owner = self
+        let session = MCSession(peer: peerID, securityIdentity: nil, encryptionPreference: .required)
+        let advertiser = MCNearbyServiceAdvertiser(peer: peerID, discoveryInfo: ["id": installID],
+                                                   serviceType: PassableMix.serviceType)
+        return (peerID, session, advertiser)
+    }
+
+    /// Whether `rename` would take now (not while a mix is coming in).
+    var canRename: Bool {
+        if case .receiving = state { return false }
+        return true
+    }
+
+    /// Shows this phone to Macs as `name` from now on. Empty goes back to
+    /// what iOS calls it. Multipeer names are at most 63 bytes.
+    func rename(_ name: String) {
+        guard canRename else { return }
+        var clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        while clean.utf8.count > 63 { clean.removeLast() }
+        let target = clean.isEmpty ? UIDevice.current.name : clean
+        UserDefaults.standard.set(clean.isEmpty ? nil : clean, forKey: Self.nameKey)
+        guard target != displayName else { return }
+        let wasOn = state != .off
+        if wasOn { stop() }
+        session.delegate = nil
+        advertiser.delegate = nil
+        displayName = target
+        (peerID, session, advertiser) = Self.makeLink(named: target)
         session.delegate = proxy
         advertiser.delegate = proxy
+        if wasOn { start() }
     }
 
     func start() {
