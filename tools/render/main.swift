@@ -608,11 +608,17 @@ if CommandLine.arguments.contains("--vocals") {
             barLevels(from: from, bars: beats, barSeconds: beat, of: raw.snapshot(masterGain: 1, including: { i, s in i == k && s == .vocals }))
         }
         let ua = untouched(t.from).map { $0 > ra - 15 }, ub = untouched(t.to).map { $0 > rb - 15 }
-        var gap = 0, run = 0
+        var gap = 0, run = 0, silencedA = 0, heldB = 0
         for k in 0..<beats {
             let hole = !ha[k] && !hb[k] && (ua[k] || ub[k])
+            if hole { if ua[k] { silencedA += 1 }; if ub[k] { heldB += 1 } }
             run = hole ? run + 1 : 0; gap = max(gap, run)
         }
+        // (Whose voice the hole is: A's taken out while it would sing on,
+        // or B's held back while it would already sing; in beats, both
+        // where both would.)
+        let hole = gap <= 4 || !CommandLine.arguments.contains("-v") ? nil : String(format: "   hole: A silenced %d beats, B held %d beats (out bar %.1f, in bar %.1f of %d)", silencedA, heldB,
+                         (out - t.start) / t.barSeconds, (inn - t.start) / t.barSeconds, t.edit.bars)
         // (Inside on both neighbouring sixteenths too: a cut made to the
         // millisecond on a sentence's end rounds to either side of it.)
         // (A comma's clause ending is a way out the planner means to take.
@@ -643,6 +649,7 @@ if CommandLine.arguments.contains("--vocals") {
         print(String(format: "%02d voice %+5.1f dB  overlap %2d beats  gap %2d beats  A out %@%@  B in %@%@  %@ → %@", i + 1, step, overlap, gap,
                      t.vocalOutKind ?? "-", sa ? " MID-SENTENCE" : "", t.vocalInKind ?? "-", sb ? " MID-PART" : "",
                      SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url)))
+        if let hole { print(hole) }
     }
     let absSteps = steps.map(abs).sorted()
     print(String(format: "VOICE LEVEL B against A: mean |step| %.1f dB, median %.1f, worst %.1f, over 4 dB: %d",
@@ -670,8 +677,12 @@ if CommandLine.arguments.contains("--report") {
                                     of: raw.snapshot(masterGain: 1) { i, _ in i == k }))
         }
         let ja = alone(t.from), jb = alone(t.to)
-        row.excess = js.indices.map { js[$0] - max(ja[$0], jb[$0]) }.max() ?? 0
-        row.seam = js.max() ?? 0
+        // (A drop moment, the bar of silence before B's drop, is meant:
+        // the steps into and out of it aren't counted, nor its level.)
+        let silenceBar = t.dropAt.map { Int((($0 - from) / t.barSeconds).rounded()) - 1 }
+        let meant = { (j: Int) in silenceBar.map { j == $0 - 1 || j == $0 } ?? false }
+        row.excess = js.indices.filter { !meant($0) }.map { js[$0] - max(ja[$0], jb[$0]) }.max() ?? 0
+        row.seam = js.indices.filter { !meant($0) }.map { js[$0] }.max() ?? 0
         // (Bar of B's entry the biggest step lands on: the step from the
         // bar before into this one.)
         let seamAt = Double(js.firstIndex(of: row.seam) ?? 0) + 1 + (from - t.start) / t.barSeconds
@@ -698,7 +709,9 @@ if CommandLine.arguments.contains("--report") {
         row.together = (0..<n).filter { a[$0] > all[$0] - 8 && b[$0] > all[$0] - 8 }.count
         // (Through two bars past the end: a swap lands on the blend's last
         // downbeat.)
-        let around = barLevels(from: t.begins, bars: n + 2, barSeconds: t.barSeconds) { _, _ in true }
+        let heard = barLevels(from: t.begins, bars: n + 2, barSeconds: t.barSeconds) { _, _ in true }
+        let quiet = silenceBar.map { $0 - 2 }
+        let around = heard.indices.map { $0 == quiet ? heard[max(0, $0 - 1)] : heard[$0] }
         row.dip = median - (around.min() ?? median)
         // (Where: bars from B's entry, and whose: A alone, B alone, both.)
         if let low = around.indices.min(by: { around[$0] < around[$1] }) {
@@ -734,7 +747,7 @@ if CommandLine.arguments.contains("--report") {
         print(String(format: "%02d %@ → %@  %@ %d  excess %.1f dB  seam %.2f× at %.0f (switch %.0f)  together %d/%d  dip %.1f dB (drop %.1f)  busy %d  at once %d  B after %.1f dB under  predicted together %d%@",
                      i + 1, SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url),
                      t.edit.preset.displayName, t.edit.bars, row.excess, row.seam, seamAt, sw, row.together, n, row.dip, row.hole, row.busy, row.moves, row.after, t.plan.placement.together ?? -1,
-                     t.melodiesClash ? "  clash" : ""))
+                     (t.melodiesClash ? "  clash" : "") + (t.dropAt != nil ? "  drop moment" : "")))
     }
     // How the voices changed hands: A's left on a line end ("line"),
     // between words ("word") or on the downbeat while singing ("bar");

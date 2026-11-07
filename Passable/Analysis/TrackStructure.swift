@@ -1972,7 +1972,16 @@ enum AutoPlacement {
                             // skipped once the spot can't win.
                             plans.insert(plan(from: swap, drumsLayer: false), at: 0)
                         }
-                        let heardPlan = plans.first { $0.mashup } ?? plans[plans.count - 1]
+                        // (Where the grooves aren't known to lock, the
+                        // builder hears them as they play and holds B's
+                        // voice back for the swap unless they do: that is
+                        // the handover priced. Priced as the hopeful one
+                        // instead, with the other's holes at half and its
+                        // entry not at all, a voice planned on the start of
+                        // a part came in bars later in the middle of the
+                        // next, after 12 bars with nobody singing.)
+                        let heardPlan = plans.first { $0.mashup }
+                            ?? (preset == .stemSwap && !drumsLock ? plans[0] : plans[plans.count - 1])
                         heardVocal = heardPlan.vin
                         heardOut = heardPlan.out
                         heardMid = sb.midPart(at: VocalPhrasing.slots * c

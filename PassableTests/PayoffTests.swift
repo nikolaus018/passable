@@ -384,6 +384,21 @@ final class PayoffTests: XCTestCase {
     /// Two singers a few dB apart meet at one level where they change
     /// hands: the louder one is down by the difference over the handover
     /// (at most `voiceMatchMost`), eased back over bars, never pushed up.
+    /// B's melody, held under A's voice, comes up where A's voice has
+    /// fallen silent before its cut, not on the cut.
+    func testMelodyLiftsWhenTheVoiceRests() {
+        func make(_ until: Double?) -> TransitionBuilder.Made {
+            TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16, lowSwap: 12,
+                                   vocalOut: 11.5, under: 6, underUntil: until)
+        }
+        let melody = { (made: TransitionBuilder.Made, bar: Double) in
+            made.lanes.first { $0.side == .b && $0.stem == .other }!.value(.volume, at: bar * 2)
+        }
+        XCTAssertLessThan(melody(make(nil), 9.5), 0.6)
+        XCTAssertLessThan(melody(make(9), 8.5), 0.6)
+        XCTAssertEqual(melody(make(9), 9.5), 1)
+    }
+
     func testVoicesMeetAtOneLevel() {
         func make(_ step: Double) -> TransitionBuilder.Made {
             TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16, lowSwap: 8,

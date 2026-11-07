@@ -427,7 +427,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "19"
+    static let planner = "20"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -2784,7 +2784,8 @@ enum SetBuilder {
                                         beat: blendBar / 4)
                 } : nil
                 func make(outFade: Double, inFade: Double, room: Double, start: Double? = nil,
-                          barSeconds: Double? = nil, voiceStep: Double = 0) -> TransitionBuilder.Made {
+                          barSeconds: Double? = nil, voiceStep: Double = 0,
+                          underUntil: Double? = nil) -> TransitionBuilder.Made {
                     TransitionBuilder.make(edit.preset, lanes: Lane.allLanes(), start: start ?? ga.downbeat(edit.entryBar),
                                            barSeconds: barSeconds ?? blendBar, bars: edit.bars,
                                            vocalBar: mashup ? plan.placement.vocalHandoff
@@ -2795,7 +2796,8 @@ enum SetBuilder {
                                            mashup: mashup, dropMoment: dropMoment, rollBeat: rollBeat,
                                            vocalOutFade: outFade, vocalInFade: inFade, room: room,
                                            carry: (plan.placement.carry || loop > 0) && !keysClash && !mashup, under: under,
-                                           loop: loop, loopBack: loopBack, hats: hats, voiceStep: voiceStep)
+                                           loop: loop, loopBack: loopBack, hats: hats, voiceStep: voiceStep,
+                                           underUntil: underUntil)
                 }
                 // B's melody plays under A's voice for as long as A sings,
                 // from the two songs' levels there, and steps up as the
@@ -2829,6 +2831,7 @@ enum SetBuilder {
                 // beat is a decision.
                 let bar = blendBar, beat = bar / 4
                 var made = make(outFade: 0, inFade: 0, room: room)
+                var voiceStep = 0.0, underUntil: Double?
                 // The two voices met at one level where they change hands
                 // (see `TransitionBuilder.voiceStep`), judged where the
                 // builder put them.
@@ -2841,9 +2844,22 @@ enum SetBuilder {
                                                  b: vocalsB, offsetB: offset + nudge, vin: start + vin * blendBar,
                                                  trimB: MixMath.trimDB(b.analysis), referenceB: refB,
                                                  beat: blendBar / 4) {
-                    if TransitionBuilder.voiceMatch(abs(step)) != nil {
-                        made = make(outFade: 0, inFade: 0, room: room, voiceStep: step)
-                    }
+                    if TransitionBuilder.voiceMatch(abs(step)) != nil { voiceStep = step }
+                }
+                // Where A's voice stops bars before it's cut (its own pause),
+                // B's melody needn't stay under it: from the bar after its
+                // last sung beat.
+                if under > 0.25, let exit = made.vocalExit, let vocalsA = a.stems[.vocals],
+                   let refA = VocalPhrasing.reference(a.loaded.analysis.structure) {
+                    var k = 0
+                    while Double(k + 1) / 4 < exit,
+                          !VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: refA,
+                                                  at: start + (exit - Double(k + 1) / 4) * bar, beat: beat) { k += 1 }
+                    let lift = (exit - Double(k) / 4).rounded(.up)
+                    if exit - lift >= 1 { underUntil = lift }
+                }
+                if voiceStep != 0 || underUntil != nil {
+                    made = make(outFade: 0, inFade: 0, room: room, voiceStep: voiceStep, underUntil: underUntil)
                 }
                 // (The builder may have moved the exit off the cut found: then
                 // it's judged where it ended up.)

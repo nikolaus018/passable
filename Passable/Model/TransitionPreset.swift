@@ -96,6 +96,10 @@ struct TransitionBuilder {
     /// a fight (and shows up every note that doesn't sit). It steps up to
     /// full as A's voice leaves. Set from the two songs' levels there.
     let under: Double
+    /// Bar (from B's entry) from which A's voice is silent until it's taken
+    /// out (its own pause before the cut): B's melody, held under it, steps
+    /// up there rather than on the cut. nil: it sings up to the cut.
+    let underUntil: Double?
     /// A's beat loops under the blend: from B's entry on, A's drums, bass
     /// line and melody repeat `loop` bars of themselves (those starting
     /// `loopBack` bars before the entry) instead of going where the song
@@ -145,7 +149,8 @@ struct TransitionBuilder {
          lowSwap: Int? = nil, drumsLayer: Bool = true, drumsLinger: Bool = true, vocalIn: Double? = nil,
          vocalOut: Double? = nil, mashup: Bool = false, dropMoment: Bool = false, rollBeat: Int? = nil,
          vocalOutFade: Double = 0, vocalInFade: Double = 0, room: Double = 0, carry: Bool = false, under: Double = 0,
-         loop: Int = 0, loopBack: Int = 0, hats: Bool = false, voiceStep: Double = 0) {
+         loop: Int = 0, loopBack: Int = 0, hats: Bool = false, voiceStep: Double = 0, underUntil: Double? = nil) {
+        self.underUntil = underUntil
         self.hats = hats
         self.voiceStep = voiceStep
         self.loop = loop
@@ -190,7 +195,7 @@ struct TransitionBuilder {
                      vocalOut: Double? = nil, mashup: Bool = false, dropMoment: Bool = false, rollBeat: Int? = nil,
                      vocalOutFade: Double = 0, vocalInFade: Double = 0, room: Double = 0, carry: Bool = false,
                      under: Double = 0, loop: Int = 0, loopBack: Int = 0, hats: Bool = false,
-                     voiceStep: Double = 0) -> Made {
+                     voiceStep: Double = 0, underUntil: Double? = nil) -> Made {
         var builder = TransitionBuilder(lanes: lanes, start: start, barSeconds: barSeconds, bars: bars,
                                         vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap,
                                         drumsLayer: drumsLayer, drumsLinger: drumsLinger,
@@ -198,7 +203,8 @@ struct TransitionBuilder {
                                         mashup: mashup, dropMoment: dropMoment, rollBeat: rollBeat,
                                         vocalOutFade: vocalOutFade, vocalInFade: vocalInFade, room: room, carry: carry,
                                         under: under, loop: preset == .stemSwap ? loop : 0, loopBack: loopBack,
-                                        hats: hats && !drumsLayer, voiceStep: voiceStep)
+                                        hats: hats && !drumsLayer, voiceStep: voiceStep,
+                                        underUntil: underUntil)
         builder.clearAll()
         builder.write(preset)
         builder.writeLoop()
@@ -632,11 +638,15 @@ struct TransitionBuilder {
                 // dissolves (low-pass sweep into a reverb wash), so there's
                 // never more than one song's harmony for long.
                 bringIn(.other, at: q, filter: 0.7, open: q + max(1, q / 2))
-                if under > 0.25, out > q + 0.01 {
+                // (Up on the bar after A's last word where it falls silent
+                // bars before its cut: held under a voice that has stopped,
+                // with A's melody gone, the blend sagged 8 dB.)
+                let lift = min(out, underUntil ?? out)
+                if under > 0.25, lift > q + 0.01 {
                     // Under A's voice for as long as it sings, then up to
                     // full on the beat it leaves on: a step, not a fade.
                     let held = pow(10, -min(under, 12) / 20)
-                    automate(.b, .other, .volume, [(q + 0.002, held, .hold), (out, held, .hold), (out + 0.001, 1, .linear)])
+                    automate(.b, .other, .volume, [(q + 0.002, held, .hold), (lift, held, .hold), (lift + 0.001, 1, .linear)])
                 }
                 dissolveMelody(from: Self.melodyDissolve(preset, bars: bars, switchAt: sw, carry: carry))
             }
