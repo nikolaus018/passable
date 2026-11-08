@@ -1130,13 +1130,20 @@ final class PayoffTests: XCTestCase {
 
     /// A voice that never falls silent is still cut between two lines of
     /// its words; sung at full through it, the cut is told and priced as
-    /// one between words (it's heard cut), so placement looks for a pause.
+    /// one through what's sung (it's heard cut), so placement looks for a
+    /// pause.
     func testAVoiceIsCutBetweenLines() {
         func level(_ k: Int) -> Float { -20 }
         XCTAssertNil(VocalPhrasing.cut(opening: false, from: -8, through: 8, reference: -20, level: level))
         let cut = VocalPhrasing.cut(opening: false, from: -8, through: 8, reference: -20, turns: { $0 == 3 }, level: level)
         XCTAssertEqual(cut?.slot, 3)
-        XCTAssertEqual(cut?.kind, .word)
+        XCTAssertEqual(cut?.kind, .through)
+        XCTAssertGreaterThan(AutoPlacement.cutCost(in: .line, out: .through), AutoPlacement.cutCost(in: .line, out: .word))
+        // A gap between words where the voice does dip is just that.
+        let dip = VocalPhrasing.cut(opening: false, from: -8, through: 8, reference: -20, between: { $0 == 2 }) {
+            $0 == 2 ? -29 : -20
+        }
+        XCTAssertEqual(dip?.kind, .word)
         // A little down there (a backing voice, a reverb), it's the line's end.
         let soft = VocalPhrasing.cut(opening: false, from: -8, through: 8, reference: -20, turns: { $0 == 3 }) {
             $0 == 3 ? -28 : -20

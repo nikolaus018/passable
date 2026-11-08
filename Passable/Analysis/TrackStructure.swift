@@ -1195,6 +1195,8 @@ enum AutoPlacement {
             // (A sentence cut off on its breath: nearly as bad as no cut
             // at all; heard as the words stopping, not the line ending.)
             case .mid?: return 0.8 * none
+            // (Through what's sung: heard as the words chopped.)
+            case .through?: return 0.8 * none
             case nil: return none
             }
         }

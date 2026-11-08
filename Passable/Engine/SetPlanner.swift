@@ -427,7 +427,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "24"
+    static let planner = "25"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -1900,6 +1900,9 @@ enum VocalPhrasing {
         /// silent, but what's sung goes on across it ("I gotta get my body
         /// | moving"), so the words are cut short all the same.
         case mid
+        /// Between two words by the lyrics, but the voice isn't down there
+        /// at all (`sungThrough`): it's heard cut through what's sung.
+        case through
     }
 
     /// Sixteenths to a bar.
@@ -2094,7 +2097,17 @@ enum VocalPhrasing {
             } else if between?(k) == true {
                 kind = .word
             }
-            guard let kind else { continue }
+            guard var kind else { continue }
+            // (Between words with the voice not down at all there: a cut
+            // through what's sung, taken only where nothing cleaner is
+            // within half a bar, and told as what it is. Told as a gap
+            // between words, placement priced it a third of no cut at all,
+            // and ten of 58 voices on a 59-song set were cut at full
+            // level.)
+            if kind == .word, !silent(gap), level(gap) > reference - sungThrough {
+                kind = .through
+                extra += 2 * throughCost
+            }
             // (By more than a bar's distance: a line that ends anywhere in
             // the window beats a cut through a sentence right on target.)
             // (Next to a line's edge only where the voice stops or starts
@@ -2113,7 +2126,7 @@ enum VocalPhrasing {
             // an eighth of a bar, as this was, a gap between words on the
             // bar beat a line starting half a beat later: 14 of 57 voices
             // came in mid-line on a 58-song set.)
-            let cost = 2 * Double(abs(k)) / Double(slots) + (kind == .word ? wordCost : 0) + extra / 2 + (wrongSide ? 0.1 : 0)
+            let cost = 2 * Double(abs(k)) / Double(slots) + (kind == .word || kind == .through ? wordCost : 0) + extra / 2 + (wrongSide ? 0.1 : 0)
             if cost < best?.cost ?? .infinity { best = (k, kind, cost, within, nil) }
             if !within, cost < clean?.cost ?? .infinity { clean = (k, kind, cost, within, nil) }
         }
@@ -2185,6 +2198,10 @@ enum VocalPhrasing {
     /// dB under what a voice sings at around a cut within which a
     /// sixteenth is sung at full (see `cut`).
     static let sungThrough: Float = 6
+
+    /// What a cut through what's sung costs on top of one between words,
+    /// in `cut`'s units (2 a bar).
+    static let throughCost = 0.5
 
     /// dB under what a voice sings at (locally, and in the song) that it
     /// has to fall to for a word the recogniser heard there to be over
