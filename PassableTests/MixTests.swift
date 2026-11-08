@@ -380,6 +380,31 @@ final class SetShapeTests: XCTestCase {
         XCTAssertLessThan(mid, AutoPlacement.cutCost(in: .line, out: nil))
     }
 
+    /// The lyrics' line edge is near, not exact: where the voice really
+    /// stops or starts a sixteenth or two off it, that's where it's cut,
+    /// even with the recogniser's word running through the gap.
+    func testLineEdgeSnapsToTheVoice() {
+        // Let in: the lyrics start the line at 2, but 2 is the last word's
+        // tail, 3 the breath (13 dB down), 4 the line.
+        let opening: (Int) -> Float = { $0 == 3 ? -13 : 0 }
+        let entry = VocalPhrasing.cut(opening: true, from: 0, through: 8, reference: 0, turns: { $0 == 2 },
+                                      inside: { $0 > 4 }, sung: { $0 == 4 }, level: opening)
+        XCTAssertEqual(entry?.slot, 4)
+        XCTAssertEqual(entry?.kind, .line)
+        // Taken out: the clause ends at 0 by the lyrics, the last word's
+        // tail rings through 1, and the voice is down from 2.
+        let closing: (Int) -> Float = { $0 >= 2 && $0 <= 4 ? -30 : 0 }
+        let exit = VocalPhrasing.cut(opening: false, from: -4, through: 4, reference: 0, turns: { $0 == 0 },
+                                     inside: { $0 < 0 }, level: closing)
+        XCTAssertEqual(exit?.slot, 2)
+        XCTAssertEqual(exit?.kind, .line)
+        // Between two words two sixteenths short of a clause's end is still
+        // inside the sentence: the voice doesn't stop there.
+        let words = VocalPhrasing.cut(opening: false, from: -4, through: 0, reference: 0, turns: { $0 == 1 },
+                                      inside: { $0 < 1 }, between: { $0 == -1 }) { _ in 0 }
+        XCTAssertEqual(words?.kind, .mid)
+    }
+
     /// A low end carried by the kick (an 808) or a synth counts as much as
     /// a bass line: a song with its beat and low end going all through is
     /// a hard one, whatever stem the separation put the low end in.

@@ -1,4 +1,5 @@
 import Foundation
+import Accelerate
 
 // passable-render: builds a set from songs already loaded once in the app
 // (stems and analysis cached) and writes it, or just its transitions, as WAV.
@@ -18,7 +19,7 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times": break
     case "--dump-vocals", "--models", "--vocal-step": _ = args.removeFirst()
     case "--order": ordered = true
     case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot": _ = args.removeFirst()
@@ -267,6 +268,53 @@ if ordered {
     try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
     try? tracks.map(\.url.path).joined(separator: "\n").write(to: outDir.appendingPathComponent("order.txt"), atomically: true, encoding: .utf8)
     print("ordered in \(seconds(clock))")
+}
+if CommandLine.arguments.contains("--word-times") {
+    // Where the recogniser puts a word's start and end against where the
+    // vocal stem really rises and falls there: the sharpest 10 ms rise
+    // (fall) within 250 ms of it, of 8 dB at least. Median and quartiles
+    // of (audio - recogniser), ms, per song and over the set.
+    func frames(_ s: StemAudio) -> [Float] {
+        let len = Int(0.005 * AudioIO.sampleRate)
+        return (0..<(s.count / len)).map { f in
+            var l: Float = 0, r: Float = 0
+            vDSP_measqv(s.left.pointer + f * len, 1, &l, vDSP_Length(len))
+            vDSP_measqv(s.right.pointer + f * len, 1, &r, vDSP_Length(len))
+            return 10 * log10(max((l + r) / 2, 1e-10))
+        }
+    }
+    func quartiles(_ v: [Double]) -> String {
+        guard !v.isEmpty else { return "-" }
+        let s = v.sorted()
+        return String(format: "%+4.0f [%+4.0f %+4.0f] n=%d", s[s.count / 2], s[s.count / 4], s[s.count * 3 / 4], s.count)
+    }
+    var allStarts: [Double] = [], allEnds: [Double] = [], allLines: [Double] = []
+    for t in tracks {
+        guard let v = t.loaded.stems[.vocals], let lines = t.loaded.analysis.structure?.vocalLines else { continue }
+        let f = frames(v)
+        func mean(_ a: Int, _ b: Int) -> Float { a < 0 || b > f.count || b <= a ? -100 : f[a..<b].reduce(0, +) / Float(b - a) }
+        func edge(_ time: Double, rising: Bool) -> Double? {
+            let c = Int(time / 0.005)
+            var best: (i: Int, d: Float)?
+            for i in (c - 50)...(c + 50) {
+                let d = rising ? mean(i, i + 2) - mean(i - 2, i) : mean(i - 2, i) - mean(i, i + 2)
+                if d > best?.d ?? 8 { best = (i, d) }
+            }
+            return best.map { (Double($0.i) * 0.005 - time) * 1000 }
+        }
+        var starts: [Double] = [], ends: [Double] = [], lineStarts: [Double] = []
+        for line in lines {
+            if let d = edge(line.start, rising: true) { lineStarts.append(d) }
+            for w in stride(from: 0, to: line.wordTimes.count - 1, by: 2) {
+                if let d = edge(line.wordTimes[w], rising: true) { starts.append(d) }
+                if let d = edge(line.wordTimes[w + 1], rising: false) { ends.append(d) }
+            }
+        }
+        allStarts += starts; allEnds += ends; allLines += lineStarts
+        print("word starts \(quartiles(starts))  ends \(quartiles(ends))  lines \(quartiles(lineStarts))  \(SongTitle.of(t.url))")
+    }
+    print("ALL word starts \(quartiles(allStarts))  ends \(quartiles(allEnds))  line starts \(quartiles(allLines))")
+    exit(0)
 }
 let built = Date()
 let mix = try await SetBuilder.build(tracks, processor: processor) { _ in }
@@ -658,7 +706,7 @@ if CommandLine.arguments.contains("--vocals") {
         let own = track.map.source((t - track.offset) * sr) / sr
         return Int((track.loaded.analysis.grid.bars(at: own) * Double(VocalPhrasing.slots)).rounded())
     }
-    var overlapSum = 0, gapWorst = 0, gaps4 = 0, aMid = 0, bMid = 0, both = 0, steps: [Double] = []
+    var overlapSum = 0, gapWorst = 0, gaps4 = 0, aMid = 0, bMid = 0, both = 0, steps: [Double] = [], chopsOut = 0, chopsIn = 0
     for (i, t) in mix.transitions.enumerated() {
         guard let out = t.vocalOut, let inn = t.vocalIn else { continue }
         both += 1
@@ -730,6 +778,41 @@ if CommandLine.arguments.contains("--vocals") {
         let sings = ra > 25 && rb > 25 && aSung.count >= 4 && bSung.count >= 4
         let step = sings ? bSung[bSung.count / 2] - aSung[aSung.count / 2] : 0
         if sings { steps.append(step) }
+        // Whether the cut itself fell in a gap, on the audio: the voice as
+        // its song sings it (untouched), in 5 ms frames, where the channel
+        // shuts (from its release, 30 ms before A's exit, to 20 ms after)
+        // and opens (the 40 ms before B's entry), against the loud frames
+        // around it. Above `chopLimit` there, a word was cut in two.
+        func frames(_ k: Int, from t0: Double, count: Int) -> [Double] {
+            let renderer = MixRenderer(snapshot: raw.snapshot(masterGain: 1, including: { i, s in i == k && s == .vocals }))
+            renderer.setPositionImmediately(Int(t0 * sr))
+            let len = Int(0.005 * sr)
+            // (A's beat looped: what its voice would sing from the loop on
+            // is the loop's, which never plays, its channel shut first.)
+            let silentFrom = k == t.from && t.loopBars > 0 ? t.start : .infinity
+            return (0..<count).map { f in
+                var l = [Float](repeating: 0, count: len), r = l
+                renderer.render(left: &l, right: &r, count: len)
+                guard t0 + Double(f) * 0.005 < silentFrom else { return -120 }
+                let p = zip(l, r).reduce(0.0) { $0 + Double(0.25 * ($1.0 + $1.1) * ($1.0 + $1.1)) } / Double(len)
+                return 10 * log10(p + 1e-12)
+            }
+        }
+        func chopAt(_ k: Int, _ time: Double, before: Double, after: Double) -> Double {
+            let around = frames(k, from: time - 2 * t.barSeconds, count: Int(4 * t.barSeconds / 0.005)).sorted()
+            let loud = around[around.count * 9 / 10]
+            let at = frames(k, from: time - before, count: max(1, Int((before + after) / 0.005)))
+            return (at.max() ?? -120) - loud
+        }
+        let chopOut = t.vocalOutKind == "bar" ? nil : Optional(chopAt(t.from, out, before: 0.03, after: 0.02))
+        let chopIn = chopAt(t.to, inn, before: 0.04, after: 0)
+        let chopLimit = -15.0
+        if (chopOut ?? -99) > chopLimit { chopsOut += 1 }
+        if chopIn > chopLimit { chopsIn += 1 }
+        if CommandLine.arguments.contains("-v"), (chopOut ?? -99) > chopLimit || chopIn > chopLimit {
+            print(String(format: "   CHOP: A at its exit %@, B before its entry %+.0f dB (vs its loud frames)",
+                         chopOut.map { String(format: "%+.0f dB", $0) } ?? "-", chopIn))
+        }
         overlapSum += overlap; gapWorst = max(gapWorst, gap); if gap > 4 { gaps4 += 1 }
         if sa { aMid += 1 }; if sb { bMid += 1 }
         print(String(format: "%02d voice %+5.1f dB  overlap %2d beats  gap %2d beats  A out %@%@  B in %@%@  %@ → %@", i + 1, step, overlap, gap,
@@ -741,7 +824,7 @@ if CommandLine.arguments.contains("--vocals") {
     print(String(format: "VOICE LEVEL B against A: mean |step| %.1f dB, median %.1f, worst %.1f, over 4 dB: %d",
                  absSteps.reduce(0, +) / Double(max(1, absSteps.count)), absSteps.isEmpty ? 0 : absSteps[absSteps.count / 2],
                  absSteps.last ?? 0, absSteps.filter { $0 > 4 }.count))
-    print("VOCALS \(both) handovers: overlap \(overlapSum) beats, longest gap \(gapWorst) beats, gaps over a bar \(gaps4), A cut mid-sentence \(aMid), B in mid-part \(bMid)")
+    print("VOCALS \(both) handovers: overlap \(overlapSum) beats, longest gap \(gapWorst) beats, gaps over a bar \(gaps4), A cut mid-sentence \(aMid), B in mid-part \(bMid), words cut in two: A \(chopsOut), B \(chopsIn)")
     exit(0)
 }
 if CommandLine.arguments.contains("--report") {

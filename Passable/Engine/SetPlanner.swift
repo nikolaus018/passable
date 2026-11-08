@@ -427,7 +427,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "21"
+    static let planner = "22"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -1948,30 +1948,56 @@ enum VocalPhrasing {
         let song = reference
         let reference = local(reference, from: from, through: through, level: level)
         func silent(_ k: Int) -> Bool { quiet(level(k), reference) }
+        /// Where the voice itself stops (taken out) or starts (let in) at
+        /// sixteenth k, as the audio has it: a silent sixteenth, or one
+        /// 10 dB down from the last (up to the next).
+        func edge(_ k: Int) -> Bool {
+            silent(opening ? k - 1 : k) || (opening ? level(k) - level(k - 1) >= 10 : level(k - 1) - level(k) >= 10)
+        }
+        /// A line's end (start) by the lyrics within `turnReach` of k: the
+        /// recogniser's times are near, not exact, so the line's edge is
+        /// where the voice stops (starts) there.
+        func nearTurn(_ k: Int) -> Bool { (-turnReach...turnReach).contains { turns?(k + $0) == true } }
         var best: (slot: Int, kind: Cut, cost: Double, within: Bool)?, clean: (slot: Int, kind: Cut, cost: Double, within: Bool)?
         for k in from...through {
             let gap = opening ? k - 1 : k
             var kind: Cut?, extra = 0.0
             let turn = turns?(k) ?? false
+            let near = nearTurn(k)
             // (Through a word, as heard: never. Unless the voice has
             // really stopped there, `wordSilence` under what it sings at:
-            // in a dense verse a dip of 15 dB is a consonant, not a gap.)
-            if sung?(k) == true, level(gap) >= min(reference, song) - wordSilence { continue }
+            // in a dense verse a dip of 15 dB is a consonant, not a gap.
+            // Nor where the voice stops or starts by the audio next to a
+            // line's edge by the lyrics: that is the edge, and the word
+            // the recogniser had running through it is its timing off by
+            // a sixteenth. Vetoed, a voice opened on the lyrics' line
+            // start, a sixteenth early, with the last word before it.)
+            if sung?(k) == true, level(gap) >= min(reference, song) - wordSilence, !(near && edge(k)) { continue }
             if silent(gap) {
-                kind = silent(gap - 1) || silent(gap + 1) || turn ? .line : .word
+                kind = silent(gap - 1) || silent(gap + 1) || near ? .line : .word
             } else if opening ? level(k) - level(k - 1) >= 10 : level(k - 1) - level(k) >= 10 {
-                (kind, extra) = turn ? (.line, 0.1) : (.word, 0.25)
+                (kind, extra) = near ? (.line, 0.1) : (.word, 0.25)
             } else if turn {
                 // (A breath, where there is one as near, is still the
-                // cleaner cut.)
-                (kind, extra) = (.line, 0.2)
+                // cleaner cut. Where the voice stops or starts a sixteenth
+                // or two off it, that is where the line really ends or
+                // begins: cut here, through sound, it takes the last word's
+                // tail with it, or opens on it. At 0.2 a voice let in on
+                // the lyrics' line start beat the audio's a sixteenth on:
+                // 15 of 59 cuts on a 60-song set fell 80 to 140 ms short
+                // of the gap they were meant for.)
+                let audible = (-turnReach...turnReach).contains { $0 != 0 && edge(k + $0) }
+                (kind, extra) = (.line, audible ? 1.5 : 0.2)
             } else if between?(k) == true {
                 kind = .word
             }
             guard let kind else { continue }
             // (By more than a bar's distance: a line that ends anywhere in
             // the window beats a cut through a sentence right on target.)
-            let within = !turn && inside?(k) == true
+            // (Next to a line's edge only where the voice stops or starts
+            // there: between two words of a sentence near its end is
+            // still inside it.)
+            let within = !(turn || (near && edge(k))) && inside?(k) == true
             if within { extra += 4.4 }
             // Taken out late, it sings over the song that has taken over;
             // let in early, over the one that hasn't left.
@@ -2008,6 +2034,12 @@ enum VocalPhrasing {
     /// lines, in `cut`'s units (2 a bar away from the target).
     static let wordCost = 1.0
 
+    /// Sixteenths a line's edge by the lyrics is trusted to: the voice
+    /// stopping or starting this near it is that edge. (The recogniser's
+    /// word times scatter about ±125 ms around the stem's own rises and
+    /// falls on a 60-song set, with no lean either way.)
+    static let turnReach = 2
+
     /// dB under what a voice sings at (locally, and in the song) that it
     /// has to fall to for a word the recogniser heard there to be over
     /// after all (it stretches a word over the pause after it).
@@ -2015,6 +2047,10 @@ enum VocalPhrasing {
 
     /// Seconds a gap is looked through for its quietest moment.
     static let gapFrame = 0.002
+
+    /// Frames either side a frame's level is held to (see `refine`): a
+    /// moment is quiet only where 10 ms around it are.
+    static let gapSpread = 2
 
     /// Where in the gap around `time` (master seconds; the start of the
     /// sixteenth `cut` chose) the voice really is quietest, to the
@@ -2026,13 +2062,24 @@ enum VocalPhrasing {
     /// before the word. Within `earliest...latest`.
     /// Never inside a word as heard (`sung`, at a master time), unless the
     /// voice is silent there (under `quiet`, dB).
+    /// - Parameter reach: sixteenths either side looked through instead,
+    ///   where the cut goes through sound on a line's edge by the lyrics
+    ///   (nothing quiet in its sixteenth): the voice's own breath there
+    ///   may be shorter than a sixteenth, and the recogniser's time a
+    ///   sixteenth or two off it. Its words' times aren't trusted there.
     private static func refine(_ stem: StemAudio, offset: Double, at time: Double, slot: Double, opening: Bool,
-                               earliest: Double, latest: Double, quiet: Float, sung: ((Double) -> Bool)?) -> Double {
-        let from = max(earliest, opening ? time - slot : time - slot / 2)
-        let to = min(latest, opening ? time + slot / 2 : time + slot)
+                               earliest: Double, latest: Double, quiet: Float, sung: ((Double) -> Bool)?,
+                               reach: Int? = nil) -> Double {
+        let from = max(earliest, reach.map { time - Double($0) * slot } ?? (opening ? time - slot : time - slot / 2))
+        let to = min(latest, reach.map { time + Double($0) * slot } ?? (opening ? time + slot / 2 : time + slot))
+        let sung = reach == nil ? sung : nil
         let count = Int((to - from) / gapFrame)
         guard count > 1 else { return time }
-        let heard = (0..<count).map { level(stem, at: from + Double($0) * gapFrame - offset, length: gapFrame) }
+        // (Each frame as loud as the loudest within `gapSpread` of it: a
+        // sung note's waveform has troughs a couple of milliseconds long,
+        // and the quietest 2 ms in a vowel read as a gap.)
+        let raw = (-gapSpread..<(count + gapSpread)).map { level(stem, at: from + Double($0) * gapFrame - offset, length: gapFrame) }
+        let heard = (0..<count).map { raw[$0...($0 + 2 * gapSpread)].max()! }
         let free = (0..<count).map { heard[$0] < quiet || !(sung?(from + Double($0) * gapFrame) ?? false) }
         // (Nothing outside a word in reach: where the cut was found.)
         guard free.contains(true) else { return time }
@@ -2139,8 +2186,13 @@ enum VocalPhrasing {
             { lines.song.inWord(at: Double(lines.slot) + lines.past + ($0 - target) / slot) ?? false }
         }
         return found.map {
+            // (Through sound: the sixteenth it shuts in, or the one before
+            // it opens, isn't quiet.)
+            let through = !quiet(sixteenth(opening ? $0.slot - 1 : $0.slot), local)
+                && !(opening ? sixteenth($0.slot) - sixteenth($0.slot - 1) >= 10 : sixteenth($0.slot - 1) - sixteenth($0.slot) >= 10)
             let t = refine(stem, offset: offset, at: target + Double($0.slot) * slot, slot: slot, opening: opening,
-                           earliest: earliest, latest: latest, quiet: min(local, reference) - wordSilence, sung: sungAt)
+                           earliest: earliest, latest: latest, quiet: min(local, reference) - wordSilence, sung: sungAt,
+                           reach: through && $0.kind == .line ? turnReach : nil)
             return (t, $0.kind)
         }
     }
