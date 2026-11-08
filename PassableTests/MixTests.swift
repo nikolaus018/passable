@@ -455,6 +455,19 @@ final class SetShapeTests: XCTestCase {
         XCTAssertNotEqual(late?.slot, 2)
     }
 
+    /// A voice let in after a breath doesn't open on a short scrap, clearly
+    /// quieter, that has a breath of its own before the line: it opens on
+    /// the line. A scrap as loud as the line is the line's first word.
+    func testAVoiceComesInOnItsLineNotAScrapBeforeIt() {
+        let breaths: [ClosedRange<Double>] = [-1.0...0.0, 1.25...1.5]
+        func span(_ quiet: Float) -> (Double, Double) -> Float { { a, _ in a < 1.25 ? quiet : 0 } }
+        XCTAssertEqual(VocalPhrasing.pastFragments(0, breaths: breaths, through: 8, span: span(-5)), 1.5)
+        XCTAssertEqual(VocalPhrasing.pastFragments(0, breaths: breaths, through: 8, span: span(-1)), 0)
+        // (Not past the window, nor past a scrap longer than two sixteenths.)
+        XCTAssertEqual(VocalPhrasing.pastFragments(0, breaths: breaths, through: 1.4, span: span(-5)), 0)
+        XCTAssertEqual(VocalPhrasing.pastFragments(0, breaths: [-1.0...0.0, 2.5...3.0], through: 8, span: span(-5)), 0)
+    }
+
     /// A low end carried by the kick (an 808) or a synth counts as much as
     /// a bass line: a song with its beat and low end going all through is
     /// a hard one, whatever stem the separation put the low end in.

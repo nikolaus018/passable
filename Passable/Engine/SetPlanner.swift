@@ -2022,10 +2022,17 @@ enum VocalPhrasing {
                 // line's edge is: the lyrics' spot, sung through, is no
                 // edge. Left as one, a voice opened on a word's tail a
                 // breath before its line.)
-                guard case let e?? = edgeAt else {
+                guard case var e?? = edgeAt else {
                     if case .some(.none) = edgeAt { displaced.insert(t) }
                     continue
                 }
+                // Let in: where a short fragment of the voice, clearly under
+                // what follows, comes before another breath (an ad-lib, a
+                // breathy "yeah", a backing voice's tail), the line starts
+                // after that breath: a voice let in on the fragment is heard
+                // as a scrap before its line. (Roadrunner's opened on 160 ms
+                // of mumble, 4 dB under the line that came 275 ms later.)
+                if opening { e = pastFragments(e, breaths: breaths, through: Double(through)) { span($0, $1, level: level) } }
                 // (The sixteenth a cut there is told by: let in, the one
                 // whose start it's in reach of; taken out, the one it's in.)
                 let k = opening ? Int(e.rounded(.up)) : Int(e.rounded(.down))
@@ -2146,6 +2153,34 @@ enum VocalPhrasing {
     /// Sixteenths from a line's edge by the lyrics a breath may be for it
     /// to be put on (see `cut`): a beat and a half.
     static let breathReach = 6
+
+    /// A fragment of a voice before its line (see `cut`): sixteenths long
+    /// at the most, and dB under the line at the least.
+    static let fragmentMost = 2.0
+    static let fragmentUnder: Float = 3
+
+    /// Where a voice let in at `e` (sixteenths from the target) really
+    /// starts its line: past any fragment before it (see `cut`), up to
+    /// `through`.
+    /// - Parameter span: the voice's level (dB, mean power) from one
+    ///   moment to another, in sixteenths from the target.
+    static func pastFragments(_ e: Double, breaths: [ClosedRange<Double>], through: Double,
+                              span: (Double, Double) -> Float) -> Double {
+        var e = e
+        while let next = breaths.first(where: { $0.lowerBound > e && $0.lowerBound - e <= fragmentMost }), next.upperBound <= through {
+            // (The fragment against the line's first sixteenth.)
+            guard span(e, next.lowerBound) <= span(next.upperBound, next.upperBound + 1) - fragmentUnder else { break }
+            e = next.upperBound
+        }
+        return e
+    }
+
+    /// `span` from per-sixteenth levels: the mean power of the sixteenths
+    /// the moments touch.
+    static func span(_ a: Double, _ b: Double, level: (Int) -> Float) -> Float {
+        let ks = Array(Int(a.rounded(.down))...max(Int(a.rounded(.down)), Int(b.rounded(.up)) - 1))
+        return 10 * log10(max(ks.reduce(Float(0)) { $0 + pow(10, level($1) / 10) } / Float(ks.count), 1e-12))
+    }
 
     /// dB under what a voice sings at around a cut within which a
     /// sixteenth is sung at full (see `cut`).
@@ -2317,6 +2352,14 @@ enum VocalPhrasing {
             let t = refine(stem, offset: offset, at: target + Double($0.slot) * slot, slot: slot, opening: opening,
                            earliest: earliest, latest: latest, quiet: min(local, reference) - wordSilence, sung: sungAt,
                            reach: through ? turnReach : nil)
+            // (Let in, past a fragment before the line: see `pastFragments`.)
+            if opening {
+                let e = (t - target) / slot
+                let past = pastFragments(e, breaths: breaths, through: (latest - target) / slot) { a, b in
+                    level(stem, at: target + a * slot - offset, length: max(TrackStructure.breathFrame, (b - a) * slot))
+                }
+                if past > e { return (min(latest, target + past * slot - TrackStructure.breathFrame / 2), $0.kind) }
+            }
             return (t, $0.kind)
         }
     }
