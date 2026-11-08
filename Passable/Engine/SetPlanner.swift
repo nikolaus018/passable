@@ -2260,6 +2260,24 @@ enum VocalPhrasing {
         return min(latest, from + Double(j + 1) * gapFrame)
     }
 
+    /// The breath's edge in the audio near `time` (master seconds, within
+    /// `breathSnap`): taken out, where the voice first falls under its
+    /// breath level (`TrackStructure.breathBelow` under its loud 10 ms
+    /// frames around); let in, where it rises out of it again. nil: none.
+    private static func breathEdge(_ stem: StemAudio, offset: Double, near time: Double, opening: Bool) -> Double? {
+        let frame = TrackStructure.breathFrame, step = gapFrame
+        let around = stride(from: time - 1, to: time + 1, by: frame).map { level(stem, at: $0 - offset, length: frame) }.sorted()
+        guard around.count > 10 else { return nil }
+        let quietBelow = around[(around.count - 1) * 9 / 10] - TrackStructure.breathBelow
+        func quiet(_ t: Double) -> Bool { level(stem, at: t - offset, length: frame) < quietBelow }
+        let times = Array(stride(from: time - breathSnap, through: time + breathSnap, by: step))
+        // (The one nearest `time`: a gap between two words just before
+        // the breath is no edge of it.)
+        let edges = opening ? times.filter { quiet($0 - frame) && !quiet($0) } : times.filter { !quiet($0 - frame) && quiet($0) }
+        return edges.min { abs($0 - time) < abs($1 - time) }
+    }
+    static let breathSnap = 0.05
+
     /// Mean square of `stem` over `length` seconds starting at `time`
     /// (seconds of the stem's own output), in dB.
     private static func level(_ stem: StemAudio, at time: Double, length: Double) -> Float {
@@ -2359,16 +2377,29 @@ enum VocalPhrasing {
             // its first moments (it lasts `TrackStructure.breathLeast` at
             // the least).
             if let at = $0.at {
-                let t = target + at * slot + (opening ? -TrackStructure.breathFrame / 2 : TransitionBuilder.vocalRelease)
+                // (Where the stem that plays really falls quiet or starts
+                // again near there: the map's time comes through the
+                // song's grid and the blend's bars, a few milliseconds off
+                // it, and 25 ms early let the channel's release take the
+                // end of a word.)
+                let edge = breathEdge(stem, offset: offset, near: target + at * slot, opening: opening) ?? target + at * slot
+                let t = edge + (opening ? -TrackStructure.breathFrame / 2 : TransitionBuilder.vocalRelease)
                 return (min(latest, max(earliest, t)), $0.kind)
             }
             // (Through sound: the sixteenth it shuts in, or the one before
             // it opens, isn't quiet.)
             let through = !quiet(sixteenth(opening ? $0.slot - 1 : $0.slot), local)
                 && !(opening ? sixteenth($0.slot) - sixteenth($0.slot - 1) >= 10 : sixteenth($0.slot - 1) - sixteenth($0.slot) >= 10)
-            let t = refine(stem, offset: offset, at: target + Double($0.slot) * slot, slot: slot, opening: opening,
+            var t = refine(stem, offset: offset, at: target + Double($0.slot) * slot, slot: slot, opening: opening,
                            earliest: earliest, latest: latest, quiet: min(local, reference) - wordSilence, sung: sungAt,
                            reach: through ? turnReach : nil)
+            // Taken out on a breath, the channel's release (it ends at the
+            // cut) goes over the breath, not the word before it: the cut
+            // falls `vocalRelease` past where the voice goes quiet. (Cut
+            // 5 ms in, the release took the last 25 ms of TiK ToK's word.)
+            if !opening, !through, let edge = breathEdge(stem, offset: offset, near: t, opening: false), edge <= t {
+                t = min(latest, max(t, edge + TransitionBuilder.vocalRelease))
+            }
             // (Let in, past a fragment before the line: see `pastFragments`.)
             if opening {
                 let e = (t - target) / slot
