@@ -80,7 +80,14 @@ struct TrackStructure: Codable, Equatable {
     /// How the marks were made: structures whose marks were made another
     /// way have their lines put on the grid again on load.
     var linesVersion: Int?
-    static let linesVersion = 6
+    static let linesVersion = 7
+    /// Where the voice breathes (see `breaths`): start and end of each,
+    /// seconds of the song; nil for songs measured before. On the grid,
+    /// in sixteenths from the first downbeat (fractions kept), in
+    /// `breathSpans` (see `setLines`). What a line's edge by the lyrics is
+    /// put on (see `VocalPhrasing.cut`).
+    var vocalBreaths: [Double]?
+    var breathSpans: [Double]?
 
     /// How loud the track is when it's going: the level of its loud bars
     /// (80th percentile), which is what a DJ matches with the trim knob.
@@ -130,6 +137,45 @@ struct TrackStructure: Codable, Equatable {
         guard from < to else { return 0 }
         return a[from..<to].reduce(0, +) / Float(to - from)
     }
+
+    /// Where the voice breathes: each time it falls `breathBelow` dB under
+    /// what it sings at around there (its loud 10 ms frames, 90th
+    /// percentile, over `breathContext` seconds either side) for
+    /// `breathLeast` seconds or more. Start and end of each, seconds of
+    /// the song. A rapper's breath, or a singer's between two lines of a
+    /// dense chorus, is 40 to 80 ms: over a sixteenth (~120 ms) it
+    /// averages away, and a cut on the lyrics' line end then went through
+    /// the voice half a beat before it really paused.
+    static func breaths(_ vocals: StemAudio) -> [Double] {
+        let frame = breathFrame, len = Int(frame * AudioIO.sampleRate)
+        let count = vocals.count / len
+        guard count > 0 else { return [] }
+        let db: [Float] = (0..<count).map { f in
+            var l: Float = 0, r: Float = 0
+            vDSP_measqv(vocals.left.pointer + f * len, 1, &l, vDSP_Length(len))
+            vDSP_measqv(vocals.right.pointer + f * len, 1, &r, vDSP_Length(len))
+            return 10 * log10(max((l + r) / 2, 1e-10))
+        }
+        // (Its loud level per second, from the seconds around it.)
+        let perSecond = Int((1 / frame).rounded()), seconds = (count + perSecond - 1) / perSecond
+        let context = Int(breathContext.rounded())
+        let loud: [Float] = (0..<seconds).map { s in
+            let a = max(0, (s - context) * perSecond), b = min(count, (s + context + 1) * perSecond)
+            let around = db[a..<b].sorted()
+            return around[(around.count - 1) * 9 / 10]
+        }
+        let run = Int((breathLeast / frame).rounded())
+        var out: [Double] = [], start: Int?
+        for f in 0...count {
+            let quiet = f < count && db[f] < loud[f / perSecond] - breathBelow
+            if quiet { start = start ?? f; continue }
+            if let s = start, f - s >= run { out += [Double(s) * frame, Double(f) * frame] }
+            start = nil
+        }
+        return out
+    }
+    static let breathFrame = 0.01, breathLeast = 0.04, breathContext = 2.0
+    static let breathBelow: Float = 15
 
     /// `heardReference` of a song: the 80th percentile of its bars' level
     /// through the BS.1770 K-weighting (a +4 dB shelf above 1.7 kHz and a
@@ -302,6 +348,7 @@ struct TrackStructure: Codable, Equatable {
         structure.harmonyChroma = stems[.other].map { chromaPerBar([$0] + [stems[.bass]].compactMap { $0 }, normalised: false) } ?? []
         structure.melodyChroma = stems[.other].map { chromaPerBar([$0], normalised: false) } ?? []
         structure.vocalSixteenthLevel = vocalLevels(parts: 4)
+        structure.vocalBreaths = stems[.vocals].map(breaths) ?? []
         structure.vocalChroma = stems[.vocals].map { chromaPerBar([$0], normalised: false) } ?? []
         structure.heardReference = heardReference(stems: stems, grid: grid)
         structure.activityMeasure = Self.activityMeasure
@@ -475,6 +522,7 @@ extension TrackStructure {
         vocalLines = lines
         lyricsTried = tried
         linesVersion = Self.linesVersion
+        breathSpans = vocalBreaths.map { $0.map { grid.bars(at: $0) * Double(VocalPhrasing.slots) } }
         // (The words aren't used for the hooks: tried, lines that come
         // back counting as much as harmony that does, placement chased
         // hooks into worse handovers.)
@@ -677,6 +725,25 @@ extension TrackStructure {
         return slot >= 0 && slot < marks.count && marks[slot] & 4 != 0
     }
 
+    /// The voice's breaths from sixteenth `from` to `to` (fractions kept),
+    /// as ranges in sixteenths from `origin`. Empty for songs measured
+    /// before breaths were.
+    func breaths(from: Double, to: Double, origin: Double) -> [ClosedRange<Double>] {
+        guard let spans = breathSpans else { return [] }
+        var lo = 0, hi = spans.count / 2
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if spans[2 * mid + 1] < from { lo = mid + 1 } else { hi = mid }
+        }
+        var out: [ClosedRange<Double>] = []
+        var i = lo
+        while i < spans.count / 2, spans[2 * i] <= to {
+            out.append((spans[2 * i] - origin)...(spans[2 * i + 1] - origin))
+            i += 1
+        }
+        return out
+    }
+
     /// Whether sixteenth `slot` is in the middle of a part of the vocal: a
     /// voice let in there comes in mid-verse, whatever line starts there
     /// (nil: the song's words weren't heard).
@@ -714,6 +781,10 @@ extension TrackStructure {
         s.stemLowLevel = stemLowLevel.map { $0.reduce(into: [:]) { $0[$1.key] = loop($1.value, gone: $1.key == voice ? -90 : nil) } }
         s.vocalBeatLevel = vocalBeatLevel.map { loop($0, per: 4, gone: -90) }
         s.vocalSixteenthLevel = vocalSixteenthLevel.map { loop($0, per: 16, gone: -90) }
+        // (Its breaths up to the loop: from there it doesn't sing.)
+        s.breathSpans = breathSpans.map { spans in
+            stride(from: 0, to: spans.count - 1, by: 2).filter { spans[$0 + 1] <= Double(16 * entry) }.flatMap { [spans[$0], spans[$0 + 1]] }
+        }
         let none = [Float](repeating: 0, count: 12)
         s.vocalChroma = vocalChroma.map { loop($0, gone: none) }
         s.hookStart = hookStart.map { loop($0, gone: 0) }
@@ -1280,8 +1351,14 @@ enum AutoPlacement {
     /// alone are a handover, a singer cutting in mid-verse isn't. (Where
     /// waiting leaves bars with nobody singing, placement prices them and
     /// finds a spot where B's part starts as A's ends.)
-    static func entryLatest(_ s: TrackStructure?, aim: Double, bars: Int) -> Double {
-        s?.midPart(at: 0) != nil ? max(aim + vocalWait, Double(bars)) : aim + vocalWait
+    /// - Parameter alone: A's voice is gone already (its beat looped):
+    ///   nobody sings while B's waits, so it waits no longer than
+    ///   `vocalWait` for a part, then comes in on its next line. (Held for
+    ///   a part to the blend's end over a loop, eight bars of a looped beat
+    ///   went by with nobody singing, both songs' voices there: 4 of 58
+    ///   handovers on a 59-song set.)
+    static func entryLatest(_ s: TrackStructure?, aim: Double, bars: Int, alone: Bool = false) -> Double {
+        s?.midPart(at: 0) != nil && !alone ? max(aim + vocalWait, Double(bars)) : aim + vocalWait
     }
 
     /// Bars before the bar it's due to leave on that A's voice may leave
@@ -1340,10 +1417,13 @@ enum AutoPlacement {
                                       turns: { opening ? s.partStart(at: base + t + $0) : s.clauseEnd(at: base + t + $0) },
                                       inside: { (opening ? s.midPart(at: base + t + $0) : s.midSentence(at: base + t + $0)) ?? false },
                                       sung: { s.inWord(at: Double(base + t + $0) + past) ?? false },
-                                      between: { s.wordEdge(at: Double(base + t + $0) + past) }) {
+                                      between: { s.wordEdge(at: Double(base + t + $0) + past) },
+                                      breaths: s.breaths(from: Double(base) + earliest * slots - Double(VocalPhrasing.breathReach + 2),
+                                                         to: Double(base) + latest * slots + Double(VocalPhrasing.breathReach + 2),
+                                                         origin: Double(base) + target * slots)) {
             level(base + t + $0)
         }
-        return found.map { (Double(t + $0.slot) / slots, $0.kind) } ?? (target, nil)
+        return found.map { ($0.at.map { target + $0 / slots } ?? Double(t + $0.slot) / slots, $0.kind) } ?? (target, nil)
     }
 
     /// Where the builder will open B's vocal (bars from B's entry).
@@ -1931,7 +2011,7 @@ enum AutoPlacement {
                                                           // pickup, not on a gap between its words
                                                           // just past the bar line.)
                                                           earliest: max(0, Double(aim) - (clashHere ? 0 : 0.5)),
-                                                          latest: AutoPlacement.entryLatest(sb, aim: Double(aim), bars: n))
+                                                          latest: AutoPlacement.entryLatest(sb, aim: Double(aim), bars: n, alone: loop > 0))
                         }
                         /// Before the swap B's voice sings over A's melody
                         /// and bass line: only where it sits on them (as

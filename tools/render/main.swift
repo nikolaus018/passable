@@ -19,8 +19,8 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times": break
-    case "--dump-vocals", "--models", "--vocal-step": _ = args.removeFirst()
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times", "--breaths": break
+    case "--dump-vocals", "--models", "--vocal-step", "--breaths-at": _ = args.removeFirst()
     case "--order": ordered = true
     case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot": _ = args.removeFirst()
     case "--list":
@@ -268,6 +268,43 @@ if ordered {
     try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
     try? tracks.map(\.url.path).joined(separator: "\n").write(to: outDir.appendingPathComponent("order.txt"), atomically: true, encoding: .utf8)
     print("ordered in \(seconds(clock))")
+}
+if CommandLine.arguments.contains("--breaths") {
+    // Each song's breaths (see `TrackStructure.breaths`): how many, how
+    // long, and how many fall inside a sung line by the recogniser
+    // against at its edges (within a beat of a line's start or end).
+    for t in tracks {
+        guard let v = t.loaded.stems[.vocals] else { continue }
+        let b = TrackStructure.breaths(v)
+        let spans = stride(from: 0, to: b.count, by: 2).map { (b[$0], b[$0 + 1]) }.filter { $0.1 - $0.0 < 1 }
+        let lines = t.loaded.analysis.structure?.vocalLines ?? []
+        let beat = t.loaded.analysis.grid.barSeconds / 4
+        let edges = lines.flatMap { [$0.start, $0.end] + $0.breaks }
+        let atEdge = spans.filter { s in edges.contains { abs($0 - s.0) < beat || abs($0 - s.1) < beat } }.count
+        let inLine = spans.filter { s in lines.contains { $0.start + beat < s.0 && s.1 < $0.end - beat } }.count
+        let sung = lines.reduce(0.0) { $0 + $1.end - $1.start }
+        let lengths = spans.map { $0.1 - $0.0 }.sorted()
+        print(String(format: "%4d short breaths (%.1f per sung minute), median %3.0f ms, at a line's edge %3d, inside a line %3d  %@",
+                     spans.count, sung > 0 ? Double(spans.count) / sung * 60 : 0, lengths.isEmpty ? 0 : lengths[lengths.count / 2] * 1000,
+                     atEdge, inLine, SongTitle.of(t.url)))
+        // (On the grid: the song's own sixteenth levels inside its longer
+        // breaths, against what it sings at.)
+        if let st = t.loaded.analysis.structure, let spans = st.breathSpans, let lv = st.vocalSixteenthLevel, let ref = st.vocalReference {
+            var inside: [Float] = [], shifted: [Float] = []
+            for i in stride(from: 0, to: spans.count - 1, by: 2) where spans[i + 1] - spans[i] >= 2 && spans[i + 1] - spans[i] < 16 {
+                let a = Int(spans[i].rounded(.up)), b = Int(spans[i + 1].rounded(.down))
+                for k in a..<max(a, b) where k >= 0 && k < lv.count { inside.append(lv[k] - ref) }
+            }
+            inside.sort()
+            print(String(format: "     grid check: %d sixteenths inside breaths, median %.0f dB vs its level, %.0f%% above -16", inside.count,
+                         inside.isEmpty ? 0 : inside[inside.count / 2], inside.isEmpty ? 0 : 100 * Double(inside.filter { $0 > -16 }.count) / Double(inside.count)))
+            _ = shifted
+        }
+        if let k = CommandLine.arguments.firstIndex(of: "--breaths-at"), let at = Double(CommandLine.arguments[k + 1]) {
+            print("  near \(at): " + spans.filter { abs($0.0 - at) < 3 }.map { String(format: "%.3f–%.3f", $0.0, $0.1) }.joined(separator: "  "))
+        }
+    }
+    exit(0)
 }
 if CommandLine.arguments.contains("--word-times") {
     // Where the recogniser puts a word's start and end against where the
@@ -706,7 +743,7 @@ if CommandLine.arguments.contains("--vocals") {
         let own = track.map.source((t - track.offset) * sr) / sr
         return Int((track.loaded.analysis.grid.bars(at: own) * Double(VocalPhrasing.slots)).rounded())
     }
-    var overlapSum = 0, gapWorst = 0, gaps4 = 0, aMid = 0, bMid = 0, both = 0, steps: [Double] = [], chopsOut = 0, chopsIn = 0
+    var overlapSum = 0, gapWorst = 0, gaps4 = 0, aMid = 0, bMid = 0, both = 0, steps: [Double] = [], chopsOut = 0, chopsIn = 0, hardOut = 0, hardIn = 0
     for (i, t) in mix.transitions.enumerated() {
         guard let out = t.vocalOut, let inn = t.vocalIn else { continue }
         both += 1
@@ -746,9 +783,9 @@ if CommandLine.arguments.contains("--vocals") {
         // (Whose voice the hole is: A's taken out while it would sing on,
         // or B's held back while it would already sing; in beats, both
         // where both would.)
-        let hole = gap <= 4 || !CommandLine.arguments.contains("-v") ? nil : String(format: "   hole: A silenced %d beats, B held %d beats (out bar %.1f, in bar %.1f of %d, %@, switch %.0f, loop %d)", silencedA, heldB,
+        let hole = gap <= 4 || !CommandLine.arguments.contains("-v") ? nil : String(format: "   hole: A silenced %d beats, B held %d beats (out bar %.1f, in bar %.1f of %d, %@, switch %.0f, loop %d, placement expected B at %.1f)", silencedA, heldB,
                          (out - t.start) / t.barSeconds, (inn - t.start) / t.barSeconds, t.edit.bars, t.edit.preset.displayName,
-                         TransitionBuilder.switchBar(t.edit.preset, bars: t.edit.bars, lowSwap: t.plan.placement.lowSwap), t.loopBars)
+                         TransitionBuilder.switchBar(t.edit.preset, bars: t.edit.bars, lowSwap: t.plan.placement.lowSwap), t.loopBars, t.plan.placement.expectedVocalIn ?? -1)
         // (Inside on both neighbouring sixteenths too: a cut made to the
         // millisecond on a sentence's end rounds to either side of it.)
         // (A comma's clause ending is a way out the planner means to take.
@@ -756,14 +793,21 @@ if CommandLine.arguments.contains("--vocals") {
         // time: its own grid isn't the blend's count there.)
         let plain = mix.tracks[t.from].skip == nil && mix.tracks[t.to].skip == nil
             && MixMath.tempoMultiplier(a: mix.tracks[t.from].loaded.analysis.grid.bpm, b: mix.tracks[t.to].loaded.analysis.grid.bpm) == 1
+        // (A line's edge by the words within two sixteenths either way
+        // counts: the recogniser's times are no closer than that.)
         let sa = plain && (slot(t.from, out).map { k in (k - 1...k + 1).allSatisfy {
-            (mix.tracks[t.from].loaded.analysis.structure?.midSentence(at: $0) ?? false)
-                && !(mix.tracks[t.from].loaded.analysis.structure?.clauseEnd(at: $0) ?? false) } } ?? false)
+            (mix.tracks[t.from].loaded.analysis.structure?.midSentence(at: $0) ?? false) }
+            && !(k - 2...k + 2).contains { mix.tracks[t.from].loaded.analysis.structure?.clauseEnd(at: $0) ?? false } } ?? false)
         let sb = plain && slot(t.to, inn).map { k in (k - 1...k + 1).allSatisfy {
-            mix.tracks[t.to].loaded.analysis.structure?.midPart(at: $0) ?? false } } ?? false
+            mix.tracks[t.to].loaded.analysis.structure?.midPart(at: $0) ?? false }
+            && !(k - 2...k + 2).contains { mix.tracks[t.to].loaded.analysis.structure?.partStart(at: $0) ?? false } } ?? false
         if sa, CommandLine.arguments.contains("-v"), let k = slot(t.from, out) {
             let planned = Double(VocalPhrasing.slots) * (Double(t.edit.entryBar) + (out - t.start) / t.barSeconds)
             print(String(format: "   A cut at sixteenth %d by its grid, %.2f as planned", k, planned))
+            if let st = mix.tracks[t.from].loaded.analysis.structure {
+                print("   clause ends near: " + ((k - 8)...(k + 8)).filter { st.clauseEnd(at: $0) }.map { String($0 - k) }.joined(separator: " ")
+                      + "   breaths near: " + st.breaths(from: Double(k - 8), to: Double(k + 8), origin: Double(k)).map { String(format: "%.2f…%.2f", $0.lowerBound, $0.upperBound) }.joined(separator: " "))
+            }
         }
         // The singer's level as heard, A's last 8 sung beats against B's
         // first 8 (median of each, beats where it's heard). Sung: within
@@ -802,15 +846,50 @@ if CommandLine.arguments.contains("--vocals") {
             let around = frames(k, from: time - 2 * t.barSeconds, count: Int(4 * t.barSeconds / 0.005)).sorted()
             let loud = around[around.count * 9 / 10]
             let at = frames(k, from: time - before, count: max(1, Int((before + after) / 0.005)))
+            // (No voice around at all: nothing to cut.)
+            guard loud > -60 else { return -120 }
             return (at.max() ?? -120) - loud
         }
-        let chopOut = t.vocalOutKind == "bar" ? nil : Optional(chopAt(t.from, out, before: 0.03, after: 0.02))
+        // (A's on its own song, where the master time falls in it: past a
+        // loop's start what plays is the loop, and a little of it before.)
+        func songFrames(_ k: Int, from t0: Double, count: Int) -> [Double] {
+            let track = mix.tracks[k]
+            guard let v = track.loaded.stems[.vocals] else { return [] }
+            let len = Int(0.005 * sr)
+            return (0..<count).map { f in
+                let at = t0 + Double(f) * 0.005
+                let own = Int(track.map.source((at - track.stemOffset(at: at)) * sr))
+                guard own >= 0, own + len <= v.count else { return -120 }
+                var l: Float = 0, r: Float = 0
+                vDSP_measqv(v.left.pointer + own, 1, &l, vDSP_Length(len))
+                vDSP_measqv(v.right.pointer + own, 1, &r, vDSP_Length(len))
+                return Double(10 * log10(max((l + r) / 2, 1e-12)))
+            }
+        }
+        func chopOwn(_ k: Int, _ time: Double, before: Double, after: Double) -> Double {
+            let around = songFrames(k, from: time - 2 * t.barSeconds, count: Int(4 * t.barSeconds / 0.005)).sorted()
+            let loud = around[around.count * 9 / 10]
+            let at = songFrames(k, from: time - before, count: max(1, Int((before + after) / 0.005)))
+            // (No voice around at all: nothing to cut.)
+            guard loud > -60 else { return -120 }
+            return (at.max() ?? -120) - loud
+        }
+        let chopOut = t.vocalOutKind == "bar" ? nil : Optional(chopOwn(t.from, out, before: 0.03, after: 0.02))
         let chopIn = chopAt(t.to, inn, before: 0.04, after: 0)
         let chopLimit = -15.0
         if (chopOut ?? -99) > chopLimit { chopsOut += 1 }
         if chopIn > chopLimit { chopsIn += 1 }
+        if (chopOut ?? -99) > -6 { hardOut += 1 }
+        if chopIn > -6 { hardIn += 1 }
+        if CommandLine.arguments.contains("-v"), (chopOut ?? -99) > chopLimit, let k = slot(t.from, out),
+           let st = mix.tracks[t.from].loaded.analysis.structure {
+            print("   A exit: clause ends near " + ((k - 8)...(k + 8)).filter { st.clauseEnd(at: $0) }.map { String($0 - k) }.joined(separator: " ")
+                  + "   breaths near " + st.breaths(from: Double(k - 8), to: Double(k + 8), origin: Double(k)).map { String(format: "%.1f…%.1f", $0.lowerBound, $0.upperBound) }.joined(separator: " ")
+                  + "   own level k-2…k+2: " + ((k - 2)...(k + 2)).map { j in String(format: "%.0f", (st.vocalSixteenthLevel.map { j >= 0 && j < $0.count ? $0[j] : -99 } ?? -99) - (st.vocalReference ?? 0)) }.joined(separator: " ")
+                  + String(format: "  skip %@ loop %d start %.3f out %.3f", mix.tracks[t.from].skip.map { "\($0)" } ?? "-", t.loopBars, t.start, out))
+        }
         if CommandLine.arguments.contains("-v"), (chopOut ?? -99) > chopLimit || chopIn > chopLimit {
-            print(String(format: "   CHOP: A at its exit %@, B before its entry %+.0f dB (vs its loud frames)",
+            print(String(format: "   CHOP (out %.3f in %.3f): A at its exit %@, B before its entry %+.0f dB (vs its loud frames)", out, inn,
                          chopOut.map { String(format: "%+.0f dB", $0) } ?? "-", chopIn))
         }
         overlapSum += overlap; gapWorst = max(gapWorst, gap); if gap > 4 { gaps4 += 1 }
@@ -818,13 +897,19 @@ if CommandLine.arguments.contains("--vocals") {
         print(String(format: "%02d voice %+5.1f dB  overlap %2d beats  gap %2d beats  A out %@%@  B in %@%@  %@ → %@", i + 1, step, overlap, gap,
                      t.vocalOutKind ?? "-", sa ? " MID-SENTENCE" : "", t.vocalInKind ?? "-", sb ? " MID-PART" : "",
                      SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url)))
-        if let hole { print(hole) }
+        if let hole { print(hole)
+            if let sb = mix.tracks[t.to].loaded.analysis.structure, let sa = mix.tracks[t.from].loaded.analysis.structure {
+                let c = t.plan.placement.cueBar, e = t.plan.placement.entryBar
+                print("   placement sees A voice " + (0..<t.edit.bars).map { String(format: "%.2f", sa.meanActivity(.vocals, bars: (e + $0)..<(e + $0 + 1))) }.joined(separator: " "))
+                print("   placement sees B voice " + (0..<t.edit.bars).map { String(format: "%.2f", sb.meanActivity(.vocals, bars: (c + $0)..<(c + $0 + 1))) }.joined(separator: " "))
+            }
+        }
     }
     let absSteps = steps.map(abs).sorted()
     print(String(format: "VOICE LEVEL B against A: mean |step| %.1f dB, median %.1f, worst %.1f, over 4 dB: %d",
                  absSteps.reduce(0, +) / Double(max(1, absSteps.count)), absSteps.isEmpty ? 0 : absSteps[absSteps.count / 2],
                  absSteps.last ?? 0, absSteps.filter { $0 > 4 }.count))
-    print("VOCALS \(both) handovers: overlap \(overlapSum) beats, longest gap \(gapWorst) beats, gaps over a bar \(gaps4), A cut mid-sentence \(aMid), B in mid-part \(bMid), words cut in two: A \(chopsOut), B \(chopsIn)")
+    print("VOCALS \(both) handovers: overlap \(overlapSum) beats, longest gap \(gapWorst) beats, gaps over a bar \(gaps4), A cut mid-sentence \(aMid), B in mid-part \(bMid), words cut in two: A \(chopsOut), B \(chopsIn) (at full: A \(hardOut), B \(hardIn))")
     exit(0)
 }
 if CommandLine.arguments.contains("--report") {

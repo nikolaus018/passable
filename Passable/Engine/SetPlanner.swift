@@ -427,7 +427,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "22"
+    static let planner = "24"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -1941,9 +1941,14 @@ enum VocalPhrasing {
     ///   `TrackStructure.wordEdge`): a gap between two words as heard,
     ///   where the voice may be cut though the stem never falls quiet in
     ///   it (a rapper's, a reverb's).
+    /// - Parameter breaths: where the voice breathes (see
+    ///   `TrackStructure.breaths`), in sixteenths from the target: a line's
+    ///   edge by the lyrics is put on the longest near it, to the
+    ///   millisecond (`at`, in sixteenths from the target).
     static func cut(opening: Bool, from: Int, through: Int, reference: Float, turns: ((Int) -> Bool)? = nil,
                     inside: ((Int) -> Bool)? = nil, sung: ((Int) -> Bool)? = nil, between: ((Int) -> Bool)? = nil,
-                    level: (Int) -> Float) -> (slot: Int, kind: Cut)? {
+                    breaths: [ClosedRange<Double>] = [],
+                    level: (Int) -> Float) -> (slot: Int, kind: Cut, at: Double?)? {
         guard from <= through else { return nil }
         let song = reference
         let reference = local(reference, from: from, through: through, level: level)
@@ -1954,16 +1959,100 @@ enum VocalPhrasing {
         func edge(_ k: Int) -> Bool {
             silent(opening ? k - 1 : k) || (opening ? level(k) - level(k - 1) >= 10 : level(k - 1) - level(k) >= 10)
         }
+        // A line's edge by the lyrics is where the voice breathes near it:
+        // the recogniser's times scatter about ±125 ms and now and then a
+        // beat or more, and its words then run through the breath. The
+        // longest breath within `turnReach` of it (a line's end is the
+        // voice's longest pause around it), or, with none there, the
+        // longest within three sixteenths, or a rest of a sixteenth or more
+        // within `breathReach`. Let in, the line starts as the breath ends;
+        // taken out, it ends as the breath begins. The lyrics' own spot,
+        // sung through, is then the middle of a phrase.
+        // (Left on the lyrics', Umbrella's voice came in mid-phrase half a
+        // second before the breath its line starts after, and Chabos'
+        // rapper was cut mid-flow half a beat before he breathed.)
+        // Without breaths (songs measured before them): a rest of
+        // `restLeast` silent sixteenths within `restReach` of a line's
+        // edge that's sung straight through.
+        var movedAt: [Int: Double] = [:], displaced = Set<Int>()
+        if let turns {
+            let reach = breaths.isEmpty ? turnReach + restReach : breathReach
+            for t in ((from - reach)...(through + reach)) where turns(t) {
+                // (nil: no breath near; .some(nil): one, out of the window.)
+                let edgeAt: Double??
+                if !breaths.isEmpty {
+                    // (Within `turnReach` first, where the recogniser
+                    // usually is: reached past, a pause inside the
+                    // sentence a beat back, longer than the breath at its
+                    // end, took its last words: 4 of 58 voices on a
+                    // 59-song set were cut mid-sentence, against 1.)
+                    let line = Double(t)
+                    let near = breaths.map { b in (b, max(0, b.lowerBound - line, line - b.upperBound)) }
+                    let tier = near.filter { $0.1 <= Double(turnReach) }
+                    // (Further, only a rest of a sixteenth or more: the
+                    // gaps between words are shorter, and one a beat off
+                    // a sentence's end, taken for its breath, cut it.)
+                    edgeAt = (tier.isEmpty ? near.filter { $0.1 <= (($0.0.upperBound - $0.0.lowerBound) >= 1 ? Double(breathReach) : 3) } : tier)
+                        .max { $0.0.upperBound - $0.0.lowerBound < $1.0.upperBound - $1.0.lowerBound }
+                        // (Anywhere in it is clean: as near its edge as the
+                        // window allows. A rest that began before the window
+                        // was passed over for a cut through the next line.)
+                        .map { b -> Double? in
+                            let e = opening ? min(b.0.upperBound, Double(through)) : max(b.0.lowerBound, Double(from))
+                            // (In the window too: a rest that ended before
+                            // it opened a voice on the word after it.)
+                            return b.0.contains(e) && e >= Double(from) && e <= Double(through) ? e : nil
+                        }
+                } else {
+                    guard !(-turnReach...turnReach).contains(where: { edge(t + $0) }) else { continue }
+                    let span = turnReach + restReach + 8
+                    var rests: [ClosedRange<Int>] = []
+                    for k in ((t - span)...(t + span)).filter(silent) {
+                        if let last = rests.last, last.upperBound == k - 1 { rests[rests.count - 1] = last.lowerBound...k } else { rests.append(k...k) }
+                    }
+                    let near: [(rest: ClosedRange<Int>, distance: Int)] = rests.filter { $0.count >= restLeast }
+                        .map { r in (r, max(0, r.lowerBound - t, t - r.upperBound)) }
+                        .filter { $0.distance <= restReach }
+                    let rest: Double? = near.min { $0.distance < $1.distance }
+                        .map { Double(opening ? $0.rest.upperBound + 1 : $0.rest.lowerBound) }
+                    // (One out of the window is checked below, as ever.)
+                    if let rest { edgeAt = Optional<Double>.some(rest) } else { edgeAt = nil }
+                }
+                // (A breath there that's out of reach still says where the
+                // line's edge is: the lyrics' spot, sung through, is no
+                // edge. Left as one, a voice opened on a word's tail a
+                // breath before its line.)
+                guard case let e?? = edgeAt else {
+                    if case .some(.none) = edgeAt { displaced.insert(t) }
+                    continue
+                }
+                // (The sixteenth a cut there is told by: let in, the one
+                // whose start it's in reach of; taken out, the one it's in.)
+                let k = opening ? Int(e.rounded(.up)) : Int(e.rounded(.down))
+                guard k >= from, k <= through else { continue }
+                if movedAt[k] == nil || abs(e - Double(t)) < abs(movedAt[k]! - Double(t)) { movedAt[k] = e }
+                if k != t { displaced.insert(t) }
+            }
+        }
+        let moved = Set(movedAt.keys)
+        func turnAt(_ k: Int) -> Bool { moved.contains(k) || (turns?(k) == true && !displaced.contains(k)) }
         /// A line's end (start) by the lyrics within `turnReach` of k: the
         /// recogniser's times are near, not exact, so the line's edge is
         /// where the voice stops (starts) there.
-        func nearTurn(_ k: Int) -> Bool { (-turnReach...turnReach).contains { turns?(k + $0) == true } }
-        var best: (slot: Int, kind: Cut, cost: Double, within: Bool)?, clean: (slot: Int, kind: Cut, cost: Double, within: Bool)?
+        func nearTurn(_ k: Int) -> Bool { (-turnReach...turnReach).contains { turnAt(k + $0) } }
+        var best: (slot: Int, kind: Cut, cost: Double, within: Bool, at: Double?)?, clean: (slot: Int, kind: Cut, cost: Double, within: Bool, at: Double?)?
         for k in from...through {
             let gap = opening ? k - 1 : k
             var kind: Cut?, extra = 0.0
-            let turn = turns?(k) ?? false
+            let turn = turnAt(k)
             let near = nearTurn(k)
+            if let e = movedAt[k] {
+                // On the breath that is the line's edge.
+                let cost = 2 * abs(e) / Double(slots) + ((opening ? k < 0 : k > 0) ? 0.1 : 0)
+                if cost < best?.cost ?? .infinity { best = (k, .line, cost, false, e) }
+                if cost < clean?.cost ?? .infinity { clean = (k, .line, cost, false, e) }
+                continue
+            }
             // (Through a word, as heard: never. Unless the voice has
             // really stopped there, `wordSilence` under what it sings at:
             // in a dense verse a dip of 15 dB is a consonant, not a gap.
@@ -1986,8 +2075,15 @@ enum VocalPhrasing {
                 // the lyrics' line start beat the audio's a sixteenth on:
                 // 15 of 59 cuts on a 60-song set fell 80 to 140 ms short
                 // of the gap they were meant for.)
+                // (Sung at full through it, the voice not down at all
+                // there: cut, it's heard cut whatever the words say, so
+                // it's told and priced as a cut between words, here and in
+                // placement, which then looks for a spot where the singer
+                // does pause. Told as a line, Chabos' rapper was taken out
+                // mid-flow, rapping straight on into his next line.)
                 let audible = (-turnReach...turnReach).contains { $0 != 0 && edge(k + $0) }
-                (kind, extra) = (.line, audible ? 1.5 : 0.2)
+                let full = level(gap) > reference - sungThrough
+                (kind, extra) = audible ? (.line, 1.5) : full ? (.word, 0) : (.line, 0.2)
             } else if between?(k) == true {
                 kind = .word
             }
@@ -1997,7 +2093,9 @@ enum VocalPhrasing {
             // (Next to a line's edge only where the voice stops or starts
             // there: between two words of a sentence near its end is
             // still inside it.)
-            let within = !(turn || (near && edge(k))) && inside?(k) == true
+            // (Nor is the lyrics' edge where the voice sings straight on to
+            // a rest: that's the middle of its phrase.)
+            let within = !(turn || (near && edge(k))) && (inside?(k) == true || displaced.contains(k))
             if within { extra += 4.4 }
             // Taken out late, it sings over the song that has taken over;
             // let in early, over the one that hasn't left.
@@ -2009,14 +2107,14 @@ enum VocalPhrasing {
             // bar beat a line starting half a beat later: 14 of 57 voices
             // came in mid-line on a 58-song set.)
             let cost = 2 * Double(abs(k)) / Double(slots) + (kind == .word ? wordCost : 0) + extra / 2 + (wrongSide ? 0.1 : 0)
-            if cost < best?.cost ?? .infinity { best = (k, kind, cost, within) }
-            if !within, cost < clean?.cost ?? .infinity { clean = (k, kind, cost, within) }
+            if cost < best?.cost ?? .infinity { best = (k, kind, cost, within, nil) }
+            if !within, cost < clean?.cost ?? .infinity { clean = (k, kind, cost, within, nil) }
         }
         // A breath inside a sentence (a part, for a voice let in) is no
         // line's end: it's priced and told as what it is. (Told as a
         // line, placement took it for free: 10 of 57 voices on a 58-song
         // set were taken out on a breath mid-sentence.)
-        return (clean ?? best).map { ($0.slot, $0.within ? .mid : $0.kind) }
+        return (clean ?? best).map { ($0.slot, $0.within ? .mid : $0.kind, $0.at) }
     }
 
     /// The level a voice sings at around a cut: its loud sixteenths (90th
@@ -2039,6 +2137,19 @@ enum VocalPhrasing {
     /// word times scatter about ±125 ms around the stem's own rises and
     /// falls on a 60-song set, with no lean either way.)
     static let turnReach = 2
+
+    /// Sixteenths of rest, and how far (sixteenths) from a line's edge by
+    /// the lyrics that's sung straight through, that make the rest the
+    /// line's edge instead (see `cut`): half a beat's breath, within a beat.
+    static let restLeast = 2, restReach = 4
+
+    /// Sixteenths from a line's edge by the lyrics a breath may be for it
+    /// to be put on (see `cut`): a beat and a half.
+    static let breathReach = 6
+
+    /// dB under what a voice sings at around a cut within which a
+    /// sixteenth is sung at full (see `cut`).
+    static let sungThrough: Float = 6
 
     /// dB under what a voice sings at (locally, and in the song) that it
     /// has to fall to for a word the recogniser heard there to be over
@@ -2178,21 +2289,34 @@ enum VocalPhrasing {
         // (Only in reach: the window is the caller's to keep. A word edge
         // up to a bar outside it let A's voice sing past the blend's end or
         // over B's landing on a cut, and B's open before its floor.)
+        // (The song's breaths around, in sixteenths from the target.)
+        let breaths = lines.map { lines -> [ClosedRange<Double>] in
+            let origin = Double(lines.slot) + lines.past, pad = Double(breathReach + 2)
+            return lines.song.breaths(from: origin + Double(from) - pad, to: origin + Double(through) + pad, origin: origin)
+        } ?? []
         let found = cut(opening: opening, from: from, through: through, reference: reference, turns: turns,
-                        inside: inside, sung: sung, between: between, level: sixteenth)
+                        inside: inside, sung: sung, between: between, breaths: breaths, level: sixteenth)
         let local = from <= through ? Self.local(reference, from: from, through: through, level: sixteenth) : reference
         // (A moment of the song, in its sixteenths: where its words are.)
         let sungAt: ((Double) -> Bool)? = lines.map { lines in
             { lines.song.inWord(at: Double(lines.slot) + lines.past + ($0 - target) / slot) ?? false }
         }
         return found.map {
+            // On a breath: let in right as it ends (a frame ahead of the
+            // word), taken out as it begins with the channel's release over
+            // its first moments (it lasts `TrackStructure.breathLeast` at
+            // the least).
+            if let at = $0.at {
+                let t = target + at * slot + (opening ? -TrackStructure.breathFrame / 2 : TransitionBuilder.vocalRelease)
+                return (min(latest, max(earliest, t)), $0.kind)
+            }
             // (Through sound: the sixteenth it shuts in, or the one before
             // it opens, isn't quiet.)
             let through = !quiet(sixteenth(opening ? $0.slot - 1 : $0.slot), local)
                 && !(opening ? sixteenth($0.slot) - sixteenth($0.slot - 1) >= 10 : sixteenth($0.slot - 1) - sixteenth($0.slot) >= 10)
             let t = refine(stem, offset: offset, at: target + Double($0.slot) * slot, slot: slot, opening: opening,
                            earliest: earliest, latest: latest, quiet: min(local, reference) - wordSilence, sung: sungAt,
-                           reach: through && $0.kind == .line ? turnReach : nil)
+                           reach: through ? turnReach : nil)
             return (t, $0.kind)
         }
     }
@@ -2899,7 +3023,7 @@ enum SetBuilder {
                         if let cut = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: ref, opening: true,
                                                        target: start + aim * bar,
                                                        earliest: start + max(0, aim - (keysClash ? 0 : 0.5)) * bar,
-                                                       latest: start + AutoPlacement.entryLatest(bCounted.structure, aim: aim, bars: edit.bars) * bar,
+                                                       latest: start + AutoPlacement.entryLatest(bCounted.structure, aim: aim, bars: edit.bars, alone: loop > 0) * bar,
                                                        bar: bar, lines: linesB(start + aim * bar)) {
                             vocalIn = (cut.time - start) / bar
                             vocalInKind = cut.kind == .line ? "breath" : cut.kind.rawValue

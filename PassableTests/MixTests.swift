@@ -405,6 +405,56 @@ final class SetShapeTests: XCTestCase {
         XCTAssertEqual(words?.kind, .mid)
     }
 
+    /// A line's edge by the lyrics that the voice sings straight through,
+    /// with a rest a beat on: the line starts after the rest (ends as it
+    /// begins), and the lyrics' edge is the middle of the phrase.
+    func testLineEdgeSungThroughMovesToTheRest() {
+        // Sung at full to 13, a rest 14...19, the line from 20; the lyrics
+        // start a part at 10.
+        let level: (Int) -> Float = { (14...19).contains($0) ? -30 : 0 }
+        let entry = VocalPhrasing.cut(opening: true, from: 0, through: 24, reference: 0, turns: { $0 == 10 },
+                                      inside: { $0 != 10 }, sung: { $0 != 10 }, between: { $0 == 10 }, level: level)
+        XCTAssertEqual(entry?.kind, .line)
+        XCTAssertTrue((15...20).contains(entry?.slot ?? -1), "opens in the rest, before the line")
+        // Taken out: the lyrics end a clause at 10, the voice rests from 14.
+        let exit = VocalPhrasing.cut(opening: false, from: 0, through: 24, reference: 0, turns: { $0 == 10 },
+                                     inside: { $0 != 10 }, level: level)
+        XCTAssertEqual(exit?.slot, 14)
+        XCTAssertEqual(exit?.kind, .line)
+    }
+
+    /// With the voice's breaths known (too short for a sixteenth to show),
+    /// a line's edge by the lyrics is put on the longest breath near it,
+    /// to the millisecond; a short gap between words further off isn't
+    /// taken for it; one out of the window isn't used, and leaves the
+    /// lyrics' spot no line's edge.
+    func testLineEdgeGoesOnTheBreath() {
+        let full: (Int) -> Float = { _ in 0 }
+        // Taken out: a clause ends at 8 by the lyrics; the voice breathes
+        // at 9.3…9.8 and between two words at 7.6…7.8.
+        let exit = VocalPhrasing.cut(opening: false, from: 0, through: 16, reference: 0, turns: { $0 == 8 },
+                                     inside: { $0 != 8 }, breaths: [7.6...7.8, 9.3...9.8], level: full)
+        XCTAssertEqual(exit?.kind, .line)
+        XCTAssertEqual(exit?.at ?? 0, 9.3, accuracy: 1e-9)
+        // Let in, on the breath's end.
+        let entry = VocalPhrasing.cut(opening: true, from: 0, through: 16, reference: 0, turns: { $0 == 8 },
+                                      inside: { $0 != 8 }, breaths: [9.3...9.8], level: full)
+        XCTAssertEqual(entry?.at ?? 0, 9.8, accuracy: 1e-9)
+        // A short gap five sixteenths off is between words, not the line's end.
+        let far = VocalPhrasing.cut(opening: false, from: 0, through: 16, reference: 0, turns: { $0 == 8 },
+                                    inside: { $0 != 8 }, breaths: [13.0...13.4], level: full)
+        XCTAssertNil(far?.at)
+        // A long rest five sixteenths off is.
+        let rest = VocalPhrasing.cut(opening: false, from: 0, through: 16, reference: 0, turns: { $0 == 8 },
+                                     inside: { $0 != 8 }, breaths: [13.0...15.0], level: full)
+        XCTAssertEqual(rest?.at ?? 0, 13.0, accuracy: 1e-9)
+        // Let in, the breath ended before the window: not opened on the
+        // word after it; the lyrics' spot is then mid-phrase.
+        let late = VocalPhrasing.cut(opening: true, from: 2, through: 16, reference: 0, turns: { $0 == 2 },
+                                     inside: { _ in false }, between: { $0 == 6 }, breaths: [0.0...1.5], level: full)
+        XCTAssertNotEqual(late?.slot, 2)
+    }
+
     /// A low end carried by the kick (an 808) or a synth counts as much as
     /// a bass line: a song with its beat and low end going all through is
     /// a hard one, whatever stem the separation put the low end in.

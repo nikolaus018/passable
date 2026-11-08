@@ -114,8 +114,14 @@ enum Steadying {
         }
         let steady = try StemCache.loadStems(from: folder)
 
-        if fm.fileExists(atPath: analysisMark.path), let made = StemCache.loadAnalysis(from: folder),
+        if fm.fileExists(atPath: analysisMark.path), var made = StemCache.loadAnalysis(from: folder),
            made.version == analysis.version {
+            // (Breaths, for one steadied before they were measured.)
+            if let structure = made.structure, structure.vocalBreaths == nil {
+                made.structure?.vocalBreaths = steady[.vocals].map(TrackStructure.breaths) ?? []
+                made.structure?.setLines(structure.vocalLines, tried: structure.lyricsTried, grid: made.grid)
+                StemCache.saveAnalysis(made, to: folder)
+            }
             return (folder, steady, made)
         }
         // Its analysis: the song's, on a constant grid from its first

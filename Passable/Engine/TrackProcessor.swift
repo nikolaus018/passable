@@ -163,6 +163,13 @@ final class TrackProcessor: @unchecked Sendable {
                 cached.structure?.setLines(old?.vocalLines, tried: old?.lyricsTried, grid: cached.grid)
                 StemCache.saveAnalysis(cached, to: directory)
             }
+            // (Breaths, for songs measured before them: from the stems,
+            // and the lines put on the grid with them.)
+            if let structure = cached.structure, structure.vocalBreaths == nil {
+                cached.structure?.vocalBreaths = stems[.vocals].map(TrackStructure.breaths) ?? []
+                cached.structure?.setLines(structure.vocalLines, tried: structure.lyricsTried, grid: cached.grid)
+                StemCache.saveAnalysis(cached, to: directory)
+            }
             if cached.structure != nil, cached.structure?.heardReference == nil {
                 cached.structure?.heardReference = TrackStructure.heardReference(stems: stems, grid: cached.grid)
                 StemCache.saveAnalysis(cached, to: directory)
