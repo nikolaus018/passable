@@ -511,6 +511,16 @@ if let k = CommandLine.arguments.firstIndex(of: "--detail"), let which = Int(Com
         row(side) { k, _ in k == i }
         for stem in StemKind.laneOrder { row("  \(side) \(stem.rawValue)") { k, s in k == i && s == stem } }
     }
+    // (Each song as it would play untouched there: its own breaks and
+    // builds, against what the blend did to it.)
+    var raw = mix
+    for k in raw.tracks.indices { raw.tracks[k].envelopes = [:]; raw.tracks[k].rolls = [] }
+    for (side, i) in [("A", t.from), ("B", t.to)] {
+        for stem in [StemKind.drums, .vocals] {
+            let v = barLevels(from: from, bars: n, barSeconds: t.barSeconds, of: raw.snapshot(masterGain: 1) { k, s in k == i && s == stem })
+            print("  \(side) own \(stem.rawValue)".padding(toLength: 10, withPad: " ", startingAt: 0) + v.map { $0 < -90 ? "   ." : String(format: "%4.0f", $0) }.joined())
+        }
+    }
     exit(0)
 }
 
