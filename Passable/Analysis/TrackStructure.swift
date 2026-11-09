@@ -1625,8 +1625,8 @@ enum AutoPlacement {
         let musicEndA = (whole.loudness.lastIndex { $0 + trimA > refA - 5 } ?? barsA - 1) + 1
         // (A loop needs none of A's music past the entry.)
         let latest = max(0, min(barsA, musicEndA) - (loop > 0 ? 0 : max(1, span)))
-        // The entry is someone's say (a spot chosen in the editor, the
-        // next song brought in now): not for placement to pick.
+        // The entry is someone's say (a spot chosen in the editor): not
+        // for placement to pick.
         let given = spot != nil || entryRange.map { $0.lowerBound == $0.upperBound } ?? false
         // A Wash Out's bridge starts its bars before the entry: A's own
         // time on its own comes before that, not under it.

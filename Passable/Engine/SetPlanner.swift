@@ -2461,20 +2461,6 @@ enum SetBuilder {
         max(8, Int((minimumSoloSeconds / grid.barSeconds).rounded(.up)))
     }
 
-    /// When the outgoing song of a pair leaves, by the say of whoever is
-    /// playing the set: the bars the transition may start on (one bar: the
-    /// next song is brought in there; from a bar on: this song is held
-    /// until then), and the jump the song had been given when that was
-    /// said (kept as it was: the song is playing).
-    struct Exit: Equatable {
-        var range: ClosedRange<Int>
-        var skip: Range<Int>?
-        /// A's bar its way out may start gliding from at the earliest (A
-        /// is already playing up to there): where the next song is brought
-        /// in now, A gets to the blend's tempo quicker rather than late.
-        var wayOutFrom: Int? = nil
-    }
-
     /// Everything a transition is built from (see `build(previous:)`).
     struct BuildKey: Equatable {
         let a: URL, b: URL
@@ -2503,16 +2489,14 @@ enum SetBuilder {
     ///   - previous: the set as last built. A transition planned from the
     ///     same two songs, at the same spot and tempo, is taken over from
     ///     it rather than measured again: a change to one transition (an
-    ///     edit, a request, the next song brought in now) then builds in a
+    ///     edit, a request) then builds in a
     ///     moment, whatever the set's length.
-    ///   - exits: when a song leaves, where that was said while it played
-    ///     (see `Exit`).
     ///   - unlocked: pairs whose grooves were predicted to lock and then,
     ///     measured on the audio that plays, didn't: planned without
     ///     counting on B's drums building in under A's (see the end).
     static func build(_ tracks: [(url: URL, loaded: TrackProcessor.Loaded)], edits: [PairKey: TransitionEdit] = [:],
                       reuse: [URL: TrackProcessor.Matched] = [:], previous: SetMix? = nil,
-                      exits: [PairKey: Exit] = [:], unlocked: Set<PairKey> = [], clashed: Set<PairKey> = [],
+                      unlocked: Set<PairKey> = [], clashed: Set<PairKey> = [],
                       locked: Set<PairKey> = [],
                       processor: TrackProcessor,
                       progress: @escaping @Sendable (String) -> Void) async throws -> SetMix {
@@ -2570,9 +2554,8 @@ enum SetBuilder {
                 // A club edit: once A has the floor, jump over its verse and
                 // breakdown to where it repeats the part it's in. Not the
                 // opener's (its intro is the set's), not under a hand edit.
-                let asked = isEdited ? nil : exits[key]
                 let skip = isEdited || k == 1 ? nil
-                    : asked.map(\.skip) ?? a.analysis.structure?.skip(from: settledBar + 4, landingBy: barsA - 24)
+                    : a.analysis.structure?.skip(from: settledBar + 4, landingBy: barsA - 24)
                 let lastBar = max(0, barsA - 1)
                 let entryRange = min(settledBar, lastBar)...lastBar
                 /// A Wash Out's bridge starts before its entry: not inside
@@ -2591,7 +2574,7 @@ enum SetBuilder {
                 let byHand = edits[key]?.byHand ?? false
                 let chosen = edits[key].flatMap { $0.byHand ? nil : inRange($0) }
                 let plan = PairPlan.make(a: a.analysis, b: b.analysis,
-                                         entryRange: asked?.range ?? (settledBar + soloBars)...Int.max,
+                                         entryRange: (settledBar + soloBars)...Int.max,
                                          aShift: shifts[k - 1], soloFrom: settledBar, skip: skip,
                                          drums: unlocked.contains(key) ? nil
                                              : hits[k - 1].flatMap { x in hits[k].map { (a: x, b: $0) } },
@@ -2615,7 +2598,7 @@ enum SetBuilder {
                     let drawn = edit.rolls.first { $0.side == .a && $0.seamless == true }
                     let back = byHand ? drawn.map { Int((($0.start - $0.anchor) / bar).rounded()) } ?? 0
                         : plan.placement.loopBack
-                    let earliest = max(settledBar, asked?.wayOutFrom ?? settledBar)
+                    let earliest = settledBar
                     let runUp = min(MixMath.glideBars(rate: share.a), max(0, edit.entryBar - back - earliest))
                     let from = plans[k - 1].map.output(ga.downbeat(edit.entryBar - back - runUp) * sr)
                     // (As many output frames as play `runUp` bars of A while
@@ -3384,7 +3367,6 @@ enum SetBuilder {
             return try await build(tracks, edits: edits, reuse: renditions,
                                    previous: SetMix(tracks: planned, transitions: transitions, length: 0,
                                                     learned: .init(unlocked: unlocked, clashed: clashed, locked: locked)),
-                                   exits: exits,
                                    unlocked: unlocked.union(broken), clashed: clashed.union(clashing),
                                    locked: locked.union(locking), processor: processor, progress: progress)
         }
@@ -3480,7 +3462,7 @@ enum SetBuilder {
     private static func match(_ loaded: TrackProcessor.Loaded, plan: TrackProcessor.MatchPlan,
                               processor: TrackProcessor) async throws -> TrackProcessor.Matched {
         // (Called off with the build: a build started over this one, after
-        // an edit or a song brought in now, doesn't wait behind renditions
+        // an edit or a request, doesn't wait behind renditions
         // nobody will hear.)
         let ticket = TrackProcessor.Ticket()
         return try await withTaskCancellationHandler {

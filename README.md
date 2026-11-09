@@ -53,8 +53,6 @@ Shows the transition that's playing, or the one you picked with **Edit**: both s
 
 Any change goes straight into the set and unticks **Automatic**. Moving the transition, or picking a preset, length or key, keeps Passable writing the automation for your choice from what it hears in the two songs (grooves, notes, vocal lines); drawing on a lane takes the automation over by hand, and it then plays exactly as drawn. Tick **Automatic** again to return to the automatic transition. Undo and redo (⌘Z / ⇧⌘Z) cover your edits. Mute and solo apply to the set's playback.
 
-While the set plays, **Mix Now** (⌘↩) brings the next song in on the next phrase that can be got ready (about 16 seconds ahead) instead of where it was planned, and **Hold** (⇧⌘↩) keeps the playing song for at least sixteen bars longer. The music never stops for either: the set is rebuilt around what's playing, and only the transitions that change are built again.
-
 One transport serves both tabs: **Space** plays or pauses, holding **M** mutes the playing song's vocal (let the crowd sing the chorus) and holding **S** leaves only that vocal, for as long as the key is down, **⌘→** (or the keyboard's ⏭ key) jumps to where the next transition begins, **⌘←** (⏮) goes back to the start of the current song's transition, and twice quickly to the one before. The ⏯ ⏮ ⏭ keys, headphone buttons and Control Center work while Passable is in the background. **Render** writes the whole set, or just this transition, as an AAC `.m4a` (256 kbps), which is plenty for songs from YouTube. Type a `.wav` name to get a 24-bit, 44.1 kHz WAV, lossless for your own files, or for other software. The set and your edits are remembered between launches.
 
 ## On your iPhone
@@ -132,7 +130,7 @@ tools/convert-beats/.venv/bin/python tools/audit/audit.py /tmp/audit
 
 `PassableTests/GridProbe` (`TEST_RUNNER_PASSABLE_GRIDS`, `TEST_RUNNER_PASSABLE_GRIDS_OUT`) lists each song's grid and key as cached and as estimated now, without touching the cache.
 
-With `TEST_RUNNER_PASSABLE_SET_FIXED=1`, SetLab plays the songs in the order listed, so two runs measure the same pairs (ordered automatically, a small change reshuffles the whole set). `PassableTests/LyricsProbe` (`TEST_RUNNER_PASSABLE_LYRICS`) prints what was heard of each song's words and what they make of its phrase edges. `PassableTests/LiveLab` (`TEST_RUNNER_PASSABLE_LIVE`) checks that a set built from the last one is the set built from scratch, sample for sample, and that Hold and Mix Now leave what plays around the playhead untouched.
+With `TEST_RUNNER_PASSABLE_SET_FIXED=1`, SetLab plays the songs in the order listed, so two runs measure the same pairs (ordered automatically, a small change reshuffles the whole set). `PassableTests/LyricsProbe` (`TEST_RUNNER_PASSABLE_LYRICS`) prints what was heard of each song's words and what they make of its phrase edges. `PassableTests/LiveLab` (`TEST_RUNNER_PASSABLE_LIVE`) checks that a set built from the last one is the set built from scratch, sample for sample.
 
 ## Layout
 
