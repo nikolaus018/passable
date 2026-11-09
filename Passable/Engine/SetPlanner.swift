@@ -2327,7 +2327,13 @@ enum VocalPhrasing {
                      beat: Double) -> Double? {
         func sung(_ stem: StemAudio, _ offset: Double, _ reference: Float, from: Double, last: Bool) -> Float? {
             let heard = (0..<16).map { level(stem, at: from + Double($0) * beat - offset, length: beat) }
-            let beats = heard.filter { $0 > reference - sungWithin }
+            // (Within `sungWithin` of what it sings at there, its loud
+            // beats around the handover, not in its loudest part: against
+            // the song's chorus, a verse sung softer kept only its loudest
+            // beats and read several dB too loud, so a voice already
+            // quieter than the last was turned down further.)
+            let local = heard.sorted()[(heard.count - 1) * 9 / 10]
+            let beats = heard.filter { $0 > max(local - sungWithin, reference - 2 * sungWithin) }
             guard beats.count >= 4 else { return nil }
             let eight = (last ? Array(beats.suffix(8)) : Array(beats.prefix(8))).sorted()
             return eight[eight.count / 2]

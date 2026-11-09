@@ -455,6 +455,28 @@ final class SetShapeTests: XCTestCase {
         XCTAssertNotEqual(late?.slot, 2)
     }
 
+    /// Two voices are met at the level each sings at where they change
+    /// hands: a verse sung 11 dB under the chorus counts at the verse's
+    /// level, not as the chorus's few loud beats (which matched a quieter
+    /// voice as the louder one, and turned it down further).
+    func testASingerSoftlyIntoAVerseIsHeardAtItsVerseLevel() {
+        let sr = AudioIO.sampleRate
+        func stem(_ amp: (Double) -> Double) -> StemAudio {
+            let x = (0..<Int(20 * sr)).map { i -> Float in
+                let t = Double(i) / sr
+                return Float(amp(t) * sin(2 * Double.pi * 220 * t))
+            }
+            return StemAudio(left: MappedChannel(samples: x), right: MappedChannel(samples: x))
+        }
+        let a = stem { $0 < 8 ? 0.3 : 0 }
+        // B: a soft verse from 10 s, its chorus only in the window's last second.
+        let b = stem { $0 < 10 ? 0 : $0 < 17 ? 0.08 : 0.3 }
+        let chorus: Float = -13.5
+        let step = VocalPhrasing.step(a: a, offsetA: 0, out: 8, trimA: 0, referenceA: chorus,
+                                      b: b, offsetB: 0, vin: 10, trimB: 0, referenceB: chorus, beat: 0.5)
+        XCTAssertEqual(step ?? 0, 20 * log10(0.08 / 0.3), accuracy: 0.5)
+    }
+
     /// Taken out where the only cut would go through what's sung at full,
     /// a breath the song really falls silent in is taken instead, even one
     /// the recogniser has a word running through. Let in, never.
