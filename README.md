@@ -27,16 +27,22 @@
 
 <p align="center"><sub>Top: one transition of a 59-song set, as planned (Automatic): A's voice leaves at the end of its line and B's takes over, the melodies swap, and the kick and bass change hands on one downbeat. Bottom: the set, ordered, with what each transition does.</sub></p>
 
+A native macOS app that mixes songs like a DJ, stem by stem. Add songs to a set, and Passable puts them in the order that flows best, builds every transition and plays or renders one continuous mix. Any transition can be opened and shaped by hand.
+
 ## Highlights
 
 - **Stem separation** into vocals, melody, drums and bass on Core ML: drums, bass and melody from HTDemucs v4, the voice from Mel-Band RoFormer, 2.9 dB closer to the true vocal (about 45 s for a 4-minute track the first time; cached after)
 - **Analysis**: neural beat tracking, per-bar grids for songs with a drifting tempo, key detection, song structure and vocal line timing
 - **Automatic set ordering and transitions** based on tempo, key, energy and section alignment
+- **Vocal handovers between lines**: line timing from on-device speech recognition and a map of each singer's breaths, so one voice leaves and the next comes in on a breath, not in the middle of a word
+- **Song requests while the set plays**: a requested song is downloaded, separated and mixed in after the playing song, or as soon as it fits, without stopping the music
 - **Hand-editable automation**: volume, filter, EQ, reverb and delay lanes for every stem
 - **Sample-exact rendering** to AAC or 24-bit WAV, plus a `.passable` set format
 - **Passable for iPhone** (in [`ios/`](ios)) plays the sets you send it over Wi-Fi, with song-by-song Next/Previous and lock-screen controls
 
-A native macOS app that mixes songs like a DJ, stem by stem. Add songs to a set, and Passable puts them in the order that flows best, builds every transition and plays or renders one continuous mix. Any transition can be opened and shaped by hand.
+## Download
+
+Get the latest `Passable-…-macOS.zip` from [Releases](https://github.com/nikolaus018/passable/releases/latest), unzip it and move **Passable** to Applications. It needs macOS 14 or later (hearing song lyrics needs macOS 26) and runs on Apple silicon and Intel. The app is ad-hoc signed, not notarized, so the first time macOS blocks it: open **System Settings → Privacy & Security** and click **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/Passable.app`. Finding songs online needs `yt-dlp` and `ffmpeg` (`brew install yt-dlp ffmpeg`).
 
 ## Set tab
 
