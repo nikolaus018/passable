@@ -1376,7 +1376,7 @@ enum AutoPlacement {
 
     /// What each bar past the first costs a spot where nobody sings though
     /// a song has words there (A's voice gone before B's has come).
-    static let voicelessBar: Float = 0.3
+    static let voicelessBar: Float = 0.35
 
     /// What `bars` bars in a row of nobody singing cost (where a song has
     /// words there): `voicelessBar` each past the first, and more for each
