@@ -87,7 +87,11 @@ final class VocalSeparatorTests: XCTestCase {
     /// mask of one (torch.stft / torch.istft, centred, Hann at hop 441).
     func testRoformerSTFTReconstructs() {
         let n = RoformerSTFT.chunk
-        let x = (0..<n).map { Float(sin(Double($0) * 0.013) * 0.5 + sin(Double($0) * 0.37) * 0.2) }
+        let x = (0..<n).map { (i: Int) -> Float in
+            let t = Double(i)
+            let low: Double = sin(t * 0.013) * 0.5, high: Double = sin(t * 0.37) * 0.2
+            return Float(low + high)
+        }
         let stft = RoformerSTFT()
         let rows = 2 * RoformerSTFT.bins, frames = RoformerSTFT.frames
         var spec = [Float](repeating: 0, count: rows * frames * 2)
