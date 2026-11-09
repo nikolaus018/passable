@@ -6,6 +6,10 @@
 </p>
 
 <p align="center">
+  <b><a href="https://passable.ringtwo.win">Listen to transitions from a real set → passable.ringtwo.win</a></b>
+</p>
+
+<p align="center">
   <a href="https://github.com/nikolaus018/passable/actions/workflows/ci.yml"><img src="https://github.com/nikolaus018/passable/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/nikolaus018/passable" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/macOS-14%2B-blue" alt="macOS 14+">
