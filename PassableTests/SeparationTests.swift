@@ -98,7 +98,9 @@ final class VocalSeparatorTests: XCTestCase {
             stft.forward(x, channel: 1, into: s.baseAddress!)
             stft.inverse(spec: s.baseAddress!, mask: mask, channel: 1, into: &y)
         }
-        let error = zip(x, y).map { ($0 - $1) * ($0 - $1) }.reduce(0, +) / x.map { $0 * $0 }.reduce(0, +)
+        let residual: Float = zip(x, y).map { (a: Float, b: Float) -> Float in (a - b) * (a - b) }.reduce(0, +)
+        let power: Float = x.map { (a: Float) -> Float in a * a }.reduce(0, +)
+        let error = residual / power
         XCTAssertLessThan(10 * log10(error), -100)
     }
 

@@ -782,8 +782,14 @@ extension TrackStructure {
         s.vocalBeatLevel = vocalBeatLevel.map { loop($0, per: 4, gone: -90) }
         s.vocalSixteenthLevel = vocalSixteenthLevel.map { loop($0, per: 16, gone: -90) }
         // (Its breaths up to the loop: from there it doesn't sing.)
-        s.breathSpans = breathSpans.map { spans in
-            stride(from: 0, to: spans.count - 1, by: 2).filter { spans[$0 + 1] <= Double(16 * entry) }.flatMap { [spans[$0], spans[$0 + 1]] }
+        let loopStart = Double(16 * entry)
+        s.breathSpans = breathSpans.map { (spans: [Double]) -> [Double] in
+            var kept: [Double] = []
+            for k in stride(from: 0, to: spans.count - 1, by: 2) where spans[k + 1] <= loopStart {
+                kept.append(spans[k])
+                kept.append(spans[k + 1])
+            }
+            return kept
         }
         let none = [Float](repeating: 0, count: 12)
         s.vocalChroma = vocalChroma.map { loop($0, gone: none) }

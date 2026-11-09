@@ -678,7 +678,10 @@ enum SetOrdering {
             var cuts = (0..<3).map { _ in from + Int(random.next() % UInt64(span)) }.sorted()
             guard cuts[0] < cuts[1], cuts[1] < cuts[2] else { continue }
             if cuts[2] == n { cuts[2] = n - 1; guard cuts[1] < cuts[2] else { continue } }
-            var path = Array(best[..<cuts[0]]) + best[cuts[1]..<cuts[2]] + best[cuts[0]..<cuts[1]] + best[cuts[2]...]
+            var path: [Int] = Array(best[..<cuts[0]])
+            path += best[cuts[1]..<cuts[2]]
+            path += best[cuts[0]..<cuts[1]]
+            path += best[cuts[2]...]
             let cost = settle(&path, costs, washOuts, energies)
             if cost < bestCost - 1e-9 { (best, bestCost) = (path, cost) }
         }

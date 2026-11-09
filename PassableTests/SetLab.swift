@@ -495,9 +495,11 @@ final class SetLab: XCTestCase {
                     if wa, let w = mix.tracks[t.from].loaded.analysis.structure?.wordSpans {
                         // A's words around its gate: start…end, ms from it.
                         let at = Double(16 * t.edit.entryBar) + (ga - t.start) / bar * 16, ms = bar / 16 * 1000
-                        print("      A's words around its gate (ms): " + stride(from: 0, to: w.count - 1, by: 2).filter {
-                            w[$0 + 1] > at - 8 && w[$0] < at + 8
-                        }.map { String(format: "%.0f…%.0f", (w[$0] - at) * ms, (w[$0 + 1] - at) * ms) }.joined(separator: "  "))
+                        var around: [String] = []
+                        for k in stride(from: 0, to: w.count - 1, by: 2) where w[k + 1] > at - 8 && w[k] < at + 8 {
+                            around.append(String(format: "%.0f…%.0f", (w[k] - at) * ms, (w[k + 1] - at) * ms))
+                        }
+                        print("      A's words around its gate (ms): " + around.joined(separator: "  "))
                     }
                     if wa || wb { print("      gate inside a heard word: \(wa ? "A's" : "")\(wa && wb ? ", " : "")\(wb ? "B's" : "")") }
                 }
