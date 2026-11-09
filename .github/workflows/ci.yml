@@ -27,11 +27,18 @@ jobs:
           xcodegen generate
       # (bash with pipefail: the step fails when xcodebuild does, not only
       # when tail does.)
+      # The newest Xcode the runner has (the app is written against the
+      # latest SDK), and the compiler's own errors if the build fails.
       - name: Build the app and its tests
         shell: bash
         run: |
+          ls -d /Applications/Xcode*.app
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          xcodebuild -version
           xcodebuild build-for-testing -project Passable.xcodeproj -scheme Passable \
-            -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO | tail -40
+            -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO > build.log 2>&1 \
+            || { grep -E "error:" build.log | sort -u | head -40; tail -20 build.log; exit 1; }
+          tail -5 build.log
 
   ios:
     name: Build and test (iPhone)
