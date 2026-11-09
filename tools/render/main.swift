@@ -904,6 +904,8 @@ if CommandLine.arguments.contains("--vocals") {
         }
         overlapSum += overlap; gapWorst = max(gapWorst, gap); if gap > 4 { gaps4 += 1 }
         if sa { aMid += 1 }; if sb { bMid += 1 }
+        print(String(format: "ROW\t%@\t%@\t%.0f\t%.0f\t%d\t%d\t%d\t%.1f\t%d\t%d", SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url),
+                     chopOut ?? -99, chopIn, gap, sa ? 1 : 0, sb ? 1 : 0, step, silencedA, heldB))
         print(String(format: "%02d voice %+5.1f dB  overlap %2d beats  gap %2d beats  A out %@%@  B in %@%@  %@ → %@", i + 1, step, overlap, gap,
                      t.vocalOutKind ?? "-", sa ? " MID-SENTENCE" : "", t.vocalInKind ?? "-", sb ? " MID-PART" : "",
                      SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url)))
@@ -1007,6 +1009,15 @@ if CommandLine.arguments.contains("--report") {
         }
         rows.append(row)
         if row.dip > 4 { print("   dip at " + row.dipAt) }
+        // (Bars of the blend with no beat to speak of: both kits 15 dB or
+        // more under what they play at through it.)
+        let kit = barLevels(from: t.begins, bars: max(1, Int(((t.end - t.begins) / t.barSeconds).rounded())), barSeconds: t.barSeconds) { k, s in
+            (k == t.from || k == t.to) && s == .drums
+        }
+        let kitLoud = kit.sorted()[kit.count * 3 / 4]
+        let beatless = kit.filter { $0 < kitLoud - 15 }.count
+        print(String(format: "RROW\t%@\t%@\t%.2f\t%.2f\t%d\t%.2f\t%d\t%d", SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url),
+                     row.excess, row.seam, row.together, row.dip, row.busy, beatless))
         let sw = TransitionBuilder.switchBar(t.edit.preset, bars: t.edit.bars, lowSwap: t.plan.placement.lowSwap)
         print(String(format: "%02d %@ → %@  %@ %d  excess %.1f dB  seam %.2f× at %.0f (switch %.0f)  together %d/%d  dip %.1f dB (drop %.1f)  busy %d  at once %d  B after %.1f dB under  predicted together %d%@",
                      i + 1, SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url),

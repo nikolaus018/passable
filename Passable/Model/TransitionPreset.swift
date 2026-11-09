@@ -283,6 +283,43 @@ struct TransitionBuilder {
         }
     }
 
+    /// Where A's own drums stop inside the blend (its breakdown, a break)
+    /// while B's beat isn't playing yet: bars (from B's entry) `from..<to`
+    /// that A's `length` bars of full beat from bar `source` loop over, so the
+    /// floor never goes without a kick. What a DJ does with the loop button
+    /// when the outgoing record drops into its breakdown early. nil: no
+    /// such gap (or one too short to matter, under a bar).
+    /// - Parameter a: A's structure as it plays (its bars from `entry`).
+    /// - Parameter b: B's, as counted in the blend's bars (from `cue`).
+    /// - Parameter bDrumsFrom: bar B's drums are let in from (its own may
+    ///   still be silent there: an intro).
+    static func drumBridge(a: TrackStructure, entry e: Int, b: TrackStructure?, cue c: Int, bars n: Int,
+                           bDrumsFrom: Double, until end: Double) -> (from: Int, to: Int, source: Int, length: Int)? {
+        func aBeat(_ k: Int) -> Bool { a.activity(.drums).indices.contains(e + k) && a.activity(.drums)[e + k] > TrackStructure.threshold }
+        func bBeat(_ k: Int) -> Bool {
+            Double(k) >= bDrumsFrom && (b.map { s in s.activity(.drums).indices.contains(c + k) && s.activity(.drums)[c + k] > TrackStructure.threshold } ?? false)
+        }
+        let last = min(n, Int(end.rounded(.up)))
+        // (From the second bar: A's own beat in the blend's first is what
+        // the loop is made of.)
+        guard let from = (1..<max(1, last)).first(where: { !aBeat($0) && !bBeat($0) }), aBeat(from - 1) else { return nil }
+        var to = from
+        while to < last, !aBeat(to), !bBeat(to) { to += 1 }
+        guard to > from else { return nil }
+        // Looped: A's last bars of beat at full (within 6 dB of what its
+        // kit plays at), a phrase of them if there are, else a bar; from
+        // up to a phrase before the blend. (A bar already half into the
+        // break, looped, brought the beat back 14 dB down.)
+        guard let levels = a.stemLevel?[StemKind.drums.rawValue], !levels.isEmpty else { return nil }
+        let loud = levels.filter { $0 > -80 }.sorted()
+        guard !loud.isEmpty else { return nil }
+        let full = loud[(loud.count - 1) * 9 / 10] - 6
+        func aFull(_ k: Int) -> Bool { levels.indices.contains(e + k) && levels[e + k] >= full }
+        guard let lastFull = stride(from: from - 1, through: -4, by: -1).first(where: aFull) else { return nil }
+        let run = (1...4).reversed().first { k in (lastFull - k + 1...lastFull).allSatisfy(aFull) } ?? 1
+        return (from, to, lastFull + 1 - run, run)
+    }
+
     /// Bars within which two effect throws (an echo or reverb send opened
     /// and closed again) count as at once.
     static let throwSpacing = 1.5

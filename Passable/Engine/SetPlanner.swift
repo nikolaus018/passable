@@ -324,14 +324,14 @@ struct PairPlan: Equatable {
         }
         typealias Candidate = (preset: TransitionPreset, bars: Int, shift: Int, placement: AutoPlacement.Result, prior: Float)
         func search(drumsLock: Bool, drumsLinger: Bool = true) -> Candidate {
-            options.flatMap { option in shifts.map { (option, $0) } }
+            let all = options.flatMap { option in shifts.map { (option, $0) } }
                 .map { option, shift -> Candidate in
                     (option.preset, option.bars, shift,
                      place(option.preset, option.bars, shift, drumsLock, drumsLinger, option.loop),
                      option.prior - 1.0 * Float(abs(shift)))
                 }
                 .filter { $0.shift == 0 || fixed != nil || shiftPays($0.preset, $0.bars, $0.shift, $0.placement) }
-                .max { $0.placement.score + $0.prior < $1.placement.score + $1.prior }!
+            return all.max { $0.placement.score + $0.prior < $1.placement.score + $1.prior }!
         }
         /// Whether the two grooves clearly lock where `c` puts the blend,
         /// and whether A's drums can then play on under B's after the swap.
@@ -427,7 +427,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "25"
+    static let planner = "26"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -3282,6 +3282,21 @@ enum SetBuilder {
                 }
                 edit.lanes = made.lanes
                 edit.rolls = made.rolls
+                // A's own drums dropping out before B's beat is in: A's last
+                // bars of beat loop on over the gap (see `drumBridge`).
+                // (Without, Can't Hold Us broke down a bar into its blend
+                // with Pump It's beat three bars off: three bars of no beat.)
+                if edit.preset == .stemSwap, loop == 0, let sa = saPlays,
+                   let bridge = TransitionBuilder.drumBridge(a: sa, entry: edit.entryBar, b: bCounted.structure, cue: cueCounted,
+                                                             bars: edit.bars, bDrumsFrom: align.grooves ? 0 : switchBar,
+                                                             until: switchBar) {
+                    let from = ga.downbeat(edit.entryBar) + Double(bridge.from) * blendBar - TransitionBuilder.loopLead
+                    edit.rolls.append(Roll(side: .a, stem: .drums, start: from,
+                                           end: ga.downbeat(edit.entryBar) + Double(bridge.to) * blendBar - TransitionBuilder.loopLead,
+                                           anchor: ga.downbeat(edit.entryBar) + Double(bridge.source) * blendBar - TransitionBuilder.loopLead,
+                                           length: Double(bridge.length) * blendBar,
+                                           seamless: true))
+                }
                 payoff = plan.placement.payoff.filter { !$0.hasPrefix("mashup") && $0 != "roll into the drop" }
                 if mashup { payoff.append("mashup: B sings over A's beat") }
                 if dropMoment { payoff.append("roll into the drop") }

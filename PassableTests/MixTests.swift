@@ -468,6 +468,30 @@ final class SetShapeTests: XCTestCase {
         XCTAssertEqual(VocalPhrasing.pastFragments(0, breaths: [-1.0...0.0, 2.5...3.0], through: 8, span: span(-5)), 0)
     }
 
+    /// Where A's own drums drop out inside the blend before B's beat is in,
+    /// A's last bars of full beat loop over the gap; nothing where B's beat
+    /// is already there, or where A's drums never stop.
+    func testABeatIsLoopedOverItsOwnBreak() {
+        // A: full beat to bar 20, its breakdown from 21 (the blend enters at 20).
+        let drums: [Float] = (0..<40).map { $0 < 21 ? 1 : 0 }
+        var a = TrackStructure(activity: ["drums": drums], loudness: [Float](repeating: -10, count: 40))
+        a.stemLevel = ["drums": drums.map { $0 > 0 ? -12 : -70 }]
+        // B: no drums for its first four bars.
+        let b = TrackStructure(activity: ["drums": (0..<40).map { $0 < 4 ? 0 : 1 }], loudness: [Float](repeating: -10, count: 40))
+        let bridge = TransitionBuilder.drumBridge(a: a, entry: 20, b: b, cue: 0, bars: 16, bDrumsFrom: 4, until: 4)
+        XCTAssertEqual(bridge?.from, 1)
+        XCTAssertEqual(bridge?.to, 4)
+        XCTAssertEqual(bridge?.source ?? 0, -3)
+        XCTAssertEqual(bridge?.length, 4)
+        // B's beat already playing from bar 0: no gap.
+        let bEarly = TrackStructure(activity: ["drums": [Float](repeating: 1, count: 40)], loudness: [Float](repeating: -10, count: 40))
+        XCTAssertNil(TransitionBuilder.drumBridge(a: a, entry: 20, b: bEarly, cue: 0, bars: 16, bDrumsFrom: 0, until: 4))
+        // A's drums on all through: no gap.
+        var aOn = TrackStructure(activity: ["drums": [Float](repeating: 1, count: 40)], loudness: [Float](repeating: -10, count: 40))
+        aOn.stemLevel = ["drums": [Float](repeating: -12, count: 40)]
+        XCTAssertNil(TransitionBuilder.drumBridge(a: aOn, entry: 20, b: b, cue: 0, bars: 16, bDrumsFrom: 4, until: 4))
+    }
+
     /// A low end carried by the kick (an 808) or a synth counts as much as
     /// a bass line: a song with its beat and low end going all through is
     /// a hard one, whatever stem the separation put the low end in.
