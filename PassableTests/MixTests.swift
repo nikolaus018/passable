@@ -455,6 +455,25 @@ final class SetShapeTests: XCTestCase {
         XCTAssertNotEqual(late?.slot, 2)
     }
 
+    /// Taken out where the only cut would go through what's sung at full,
+    /// a breath the song really falls silent in is taken instead, even one
+    /// the recogniser has a word running through. Let in, never.
+    func testAVoiceSungAtFullIsTakenOutOnABreathNotThroughAWord() {
+        let level: (Int) -> Float = { $0 == -6 ? -18 : 0 }
+        func cut(_ opening: Bool, _ breaths: [ClosedRange<Double>]) -> (slot: Int, kind: VocalPhrasing.Cut, at: Double?)? {
+            VocalPhrasing.cut(opening: opening, from: -16, through: 0, reference: 0, sung: { $0 != -2 },
+                              between: { $0 == -2 }, breaths: breaths, level: level)
+        }
+        let exit = cut(false, [-6.0 ... -5.4])
+        XCTAssertEqual(exit?.slot, -6)
+        XCTAssertEqual(exit?.at ?? 0, -6.0, accuracy: 1e-9)
+        XCTAssertNotEqual(exit?.kind, .through)
+        // Without the breath: through the word, told as such.
+        XCTAssertEqual(cut(false, [])?.kind, .through)
+        // Let in: the breath isn't taken over the word.
+        XCTAssertNotEqual(cut(true, [-6.0 ... -5.4])?.slot, -5)
+    }
+
     /// A voice let in after a breath doesn't open on a short scrap, clearly
     /// quieter, that has a breath of its own before the line: it opens on
     /// the line. A scrap as loud as the line is the line's first word.

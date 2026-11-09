@@ -427,7 +427,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "26"
+    static let planner = "27"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -1950,7 +1950,7 @@ enum VocalPhrasing {
     ///   millisecond (`at`, in sixteenths from the target).
     static func cut(opening: Bool, from: Int, through: Int, reference: Float, turns: ((Int) -> Bool)? = nil,
                     inside: ((Int) -> Bool)? = nil, sung: ((Int) -> Bool)? = nil, between: ((Int) -> Bool)? = nil,
-                    breaths: [ClosedRange<Double>] = [],
+                    breaths: [ClosedRange<Double>] = [], breathsOpen: Bool = false,
                     level: (Int) -> Float) -> (slot: Int, kind: Cut, at: Double?)? {
         guard from <= through else { return nil }
         let song = reference
@@ -2051,6 +2051,7 @@ enum VocalPhrasing {
         /// where the voice stops (starts) there.
         func nearTurn(_ k: Int) -> Bool { (-turnReach...turnReach).contains { turnAt(k + $0) } }
         var best: (slot: Int, kind: Cut, cost: Double, within: Bool, at: Double?)?, clean: (slot: Int, kind: Cut, cost: Double, within: Bool, at: Double?)?
+        var breathy: (slot: Int, kind: Cut, cost: Double, within: Bool, at: Double?)?
         for k in from...through {
             let gap = opening ? k - 1 : k
             var kind: Cut?, extra = 0.0
@@ -2071,7 +2072,14 @@ enum VocalPhrasing {
             // the recogniser had running through it is its timing off by
             // a sixteenth. Vetoed, a voice opened on the lyrics' line
             // start, a sixteenth early, with the last word before it.)
-            if sung?(k) == true, level(gap) >= min(reference, song) - wordSilence, !(near && edge(k)) { continue }
+            // (Second pass, where nothing but a cut through what's sung
+            // was found: a breath the breath map has there, the voice
+            // really silent in it, is a gap whatever the recogniser's
+            // word times run through.)
+            let breath = breathsOpen && silent(gap) ? breaths.first { b in
+                min(b.upperBound, Double(gap + 1)) - max(b.lowerBound, Double(gap)) >= 0.5
+            } : nil
+            if breath == nil, sung?(k) == true, level(gap) >= min(reference, song) - wordSilence, !(near && edge(k)) { continue }
             if silent(gap) {
                 kind = silent(gap - 1) || silent(gap + 1) || near ? .line : .word
             } else if opening ? level(k) - level(k - 1) >= 10 : level(k - 1) - level(k) >= 10 {
@@ -2127,13 +2135,26 @@ enum VocalPhrasing {
             // bar beat a line starting half a beat later: 14 of 57 voices
             // came in mid-line on a 58-song set.)
             let cost = 2 * Double(abs(k)) / Double(slots) + (kind == .word || kind == .through ? wordCost : 0) + extra / 2 + (wrongSide ? 0.1 : 0)
-            if cost < best?.cost ?? .infinity { best = (k, kind, cost, within, nil) }
-            if !within, cost < clean?.cost ?? .infinity { clean = (k, kind, cost, within, nil) }
+            let at = breath.map { opening ? $0.upperBound : $0.lowerBound }
+            if at != nil, cost < breathy?.cost ?? .infinity { breathy = (k, kind, cost, within, at) }
+            if cost < best?.cost ?? .infinity { best = (k, kind, cost, within, at) }
+            if !within, cost < clean?.cost ?? .infinity { clean = (k, kind, cost, within, at) }
+        }
+        // Cut through what's sung at full: a breath of the song's instead,
+        // where there is one in the window (see above).
+        if !opening, !breathsOpen, !breaths.isEmpty, (clean ?? best)?.kind == .through,
+           let open = cut(opening: opening, from: from, through: through, reference: song, turns: turns, inside: inside,
+                          sung: sung, between: between, breaths: breaths, breathsOpen: true, level: level),
+           open.kind != .through {
+            return open
         }
         // A breath inside a sentence (a part, for a voice let in) is no
         // line's end: it's priced and told as what it is. (Told as a
         // line, placement took it for free: 10 of 57 voices on a 58-song
         // set were taken out on a breath mid-sentence.)
+        // (The second pass: the breath, even inside a sentence, over a
+        // word cut at full.)
+        if breathsOpen { return breathy.map { ($0.slot, $0.within ? .mid : $0.kind, $0.at) } }
         return (clean ?? best).map { ($0.slot, $0.within ? .mid : $0.kind, $0.at) }
     }
 
