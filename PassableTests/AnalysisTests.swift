@@ -358,7 +358,8 @@ final class HandoverPriceTests: XCTestCase {
     func testLongSilencesCostMoreThanTheirBars() {
         XCTAssertEqual(AutoPlacement.voiceless(0), 0)
         XCTAssertEqual(AutoPlacement.voiceless(1), 0)
-        XCTAssertEqual(AutoPlacement.voiceless(4), 3 * AutoPlacement.voicelessBar, accuracy: 1e-6)
+        XCTAssertEqual(AutoPlacement.voiceless(AutoPlacement.longHole), Float(AutoPlacement.longHole - 1) * AutoPlacement.voicelessBar, accuracy: 1e-6)
+        XCTAssertGreaterThan(AutoPlacement.voiceless(AutoPlacement.longHole + 1), Float(AutoPlacement.longHole) * AutoPlacement.voicelessBar)
         XCTAssertGreaterThan(AutoPlacement.voiceless(16), 4 * AutoPlacement.voiceless(4) + 3 * AutoPlacement.voicelessBar)
         for bars in 1..<24 { XCTAssertGreaterThan(AutoPlacement.voiceless(bars + 1), AutoPlacement.voiceless(bars)) }
     }

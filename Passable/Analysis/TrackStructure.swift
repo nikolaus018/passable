@@ -1392,12 +1392,18 @@ enum AutoPlacement {
     /// sixteen silent bars cost what four holes of four did, and a blend
     /// looped A's beat for sixteen bars with B's voice held to the end,
     /// chosen knowing it.)
+    /// (Growing from the fourth bar at 0.15 a bar squared: on three fixed
+    /// orders of a 60-song set, handovers where both songs had words and
+    /// nobody sang 17 → 13, mid-part entries unchanged, flaw score
+    /// 130.3 → 124.7. From the fifth at 0.05, a 6-bar hole cost what one
+    /// mid-verse entry did, and was chosen; at 0.25, a few more words cut
+    /// at full and beatless bars outweighed the holes it closed.)
     static func voiceless(_ bars: Int) -> Float {
         let long = Float(max(0, bars - longHole))
         return voicelessBar * Float(max(0, bars - 1)) + longHoleBar * long * long
     }
-    static let longHole = 4
-    static let longHoleBar: Float = 0.05
+    static let longHole = 3
+    static let longHoleBar: Float = 0.15
 
     /// Where the builder will cut a vocal in or out (bars from the
     /// transition's start, with the song at its bar `bar0` there), found
