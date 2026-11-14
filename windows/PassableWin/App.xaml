@@ -1,0 +1,18 @@
+<Application
+    x:Class="PassableWin.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    RequestedTheme="Dark">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+            </ResourceDictionary.MergedDictionaries>
+            <SolidColorBrush x:Key="PassableBackground" Color="#09090F" />
+            <SolidColorBrush x:Key="PassableCard" Color="#12FFFFFF" />
+            <SolidColorBrush x:Key="PassableHairline" Color="#1AFFFFFF" />
+            <SolidColorBrush x:Key="DeckABrush" Color="#5C9EFF" />
+            <SolidColorBrush x:Key="DeckBBrush" Color="#FF855C" />
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

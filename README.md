@@ -39,6 +39,7 @@ A native macOS app that mixes songs like a DJ, stem by stem. Add songs to a set,
 - **Hand-editable automation**: volume, filter, EQ, reverb and delay lanes for every stem
 - **Sample-exact rendering** to AAC or 24-bit WAV, plus a `.passable` set format
 - **Passable for iPhone** (in [`ios/`](ios)) plays the sets you send it over Wi-Fi, with song-by-song Next/Previous and lock-screen controls
+- **Passable for Windows** (in [`windows/`](windows)) is a native WinUI 3 player for the same `.passablemix` files, with the same song-by-song skipping and media keys
 
 ## Download
 
