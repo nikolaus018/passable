@@ -373,8 +373,20 @@ struct TransitionBuilder {
 
     /// Seconds ahead of the beat that a part is switched on or off.
     static let switchLead = 0.025
-    /// Seconds a bass line or a low band is switched over.
-    static let lowRamp = 0.008
+    /// Seconds a switch takes: a part cut in or out, a filter or an EQ band
+    /// snapped open or shut. In one step (a millisecond or two), whatever
+    /// the part was sounding is chopped mid-wave, which puts a tick on the
+    /// mix: measured over a 59-song set (`passable-render --clicks`), half
+    /// the transitions had a switch whose splatter came within 20 dB of the
+    /// whole mix in its band, one in five within 10, nearly all on the swap
+    /// (a kick's tail, a bass note, a voice's low end switched as it rang).
+    /// Eight milliseconds is still a cut to the ear, and done ahead of the
+    /// beat like every switch.
+    static let switchRamp = 0.008
+    /// Seconds a bass line or a low band is switched over: low notes ring
+    /// through the beat, and a 50 Hz wave switched in under a period of
+    /// itself clicks.
+    static let lowRamp = 0.012
     /// Seconds A's voice is closed over as it's taken out. Shut in a
     /// millisecond, whatever still rang there (a word's tail, its reverb,
     /// the stem's bleed) was chopped into a click; over 30 ms it's still a
@@ -389,36 +401,65 @@ struct TransitionBuilder {
     /// the beat let the first milliseconds of its next hit through (a click
     /// that flams the swap). Ahead of the beat sits the tail of the last
     /// hit, where a switch isn't heard.
+    ///
+    /// And every switch, on the beat or off it (a voice let in on a
+    /// breath), is a ramp of `switchRamp` that ends where the switch is
+    /// due, never a step: see `switchRamp`.
     private mutating func switchBeforeTheBeat() {
         let lead = Self.switchLead
         let tiny = 0.0015 * barSeconds + 1e-6
         func onGrid(_ time: Double) -> Bool { self.onGrid(time, within: 0.003) }
         for i in lanes.indices {
-            for parameter in [LaneParameter.volume, .filter, .low, .mid, .high] {
+            // Where the lane's fader shuts (the moment it's shut by) and
+            // opens (the moment it starts to): a filter or an EQ band
+            // switched with it is switched while the lane is silent, after
+            // the one and before the other. Swept in the same milliseconds
+            // as the fader moves, a low-pass let the highs it had been
+            // holding back through for an instant as the part left.
+            var shut: [Double] = [], opens: [Double] = []
+            for parameter in [LaneParameter.volume, .filter, .low, .mid, .high, .reverb, .delay] {
                 var points = lanes[i][parameter].points
                 var moved = false
-                for k in points.indices.dropFirst() where abs(points[k].value - points[k - 1].value) > 0.05 {
+                let length = lanes[i].stem == .bass || parameter == .low ? Self.lowRamp : Self.switchRamp
+                // (A send snapped open or shut chops what goes into the
+                // effect, and an echo repeats the tick it's given. It's
+                // ramped where it's due: a throw is timed to what it throws.)
+                let send = parameter == .reverb || parameter == .delay
+                var k = 1
+                while k < points.count {
+                    defer { k += 1 }
+                    guard abs(points[k].value - points[k - 1].value) > 0.05 else { continue }
                     let ramp = points[k].time - points[k - 1].time <= tiny
                     let held = points[k - 1].curve == .hold
                     guard ramp || held else { continue }
                     // Where the step is heard: a short ramp from its first
                     // point, a held value at the point it jumps to.
                     let at = ramp ? points[k - 1].time : points[k].time
-                    guard onGrid(at) else { continue }
-                    if ramp {
-                        let floor = k >= 2 ? points[k - 2].time + 1e-6 : -Double.infinity
-                        guard points[k - 1].time - lead > floor else { continue }
-                        points[k - 1].time -= lead
-                        points[k].time -= lead
-                        // Low notes ring through the beat: switched in 2 ms,
-                        // a 50 Hz wave clicks. 8 ms doesn't, and is still a
-                        // cut to the ear.
-                        if lanes[i].stem == .bass || parameter == .low {
-                            points[k - 1].time = max(floor, min(points[k - 1].time, points[k].time - Self.lowRamp))
+                    // Where it's done by: ahead of the beat it's on.
+                    var done = onGrid(at) && !send ? at - lead : at
+                    let floor = ramp ? (k >= 2 ? points[k - 2].time + 1e-6 : -Double.infinity) : points[k - 1].time + 1e-6
+                    let ceiling = k + 1 < points.count ? points[k + 1].time - 1e-6 : Double.infinity
+                    if parameter != .volume, !send {
+                        if let silent = shut.first(where: { abs($0 - done) < 0.03 }), silent + length < ceiling {
+                            done = silent + length
+                        } else if let open = opens.first(where: { abs($0 - done) < 0.03 }), open - length > floor {
+                            done = open
                         }
+                    }
+                    guard done - length > floor else { continue }
+                    if parameter == .volume {
+                        if points[k].value < 0.001 { shut.append(done) }
+                        if points[k - 1].value < 0.001 { opens.append(done - length) }
+                    }
+                    if ramp {
+                        points[k - 1].time = done - length
+                        points[k - 1].curve = .sCurve
+                        points[k].time = done
                     } else {
-                        guard points[k].time - lead > points[k - 1].time + 1e-6 else { continue }
-                        points[k].time -= lead
+                        points[k].time = done
+                        // The value held up to the ramp, then the ramp.
+                        points.insert(AutomationPoint(time: done - length, value: points[k - 1].value, curve: .sCurve), at: k)
+                        k += 1
                     }
                     moved = true
                 }
@@ -475,8 +516,9 @@ struct TransitionBuilder {
     /// filter (from `filter`) opens it up by bar `open`: a DJ brings a part
     /// in with the filter, never the fader, which is what makes a blend
     /// sound like a crossfade.
-    private mutating func bringIn(_ stem: StemKind, at: Double, filter: Double, open: Double) {
-        automate(.b, stem, .volume, [(at, 0, .hold), (at + 0.001, 1, .linear)])
+    /// - Parameter level: the fader it comes in at (1: whole).
+    private mutating func bringIn(_ stem: StemKind, at: Double, filter: Double, open: Double, level: Double = 1) {
+        automate(.b, stem, .volume, [(at, 0, .hold), (at + 0.001, level, .linear)])
         automate(.b, stem, .filter, [(at, filter, .sCurve), (open, 0.5, .linear)])
     }
 
@@ -547,11 +589,15 @@ struct TransitionBuilder {
     /// A's beat thins (a gentle high-pass lifts the kick's weight) and its
     /// last beat is thrown into the echo, so the switch lands as a release.
     /// - Parameter drumsContinue: A's drums play on past the switch (their
-    ///   own fade takes over), so the filter only eases back.
+    ///   own fade takes over from there).
     private mutating func buildUp(to at: Double, drumsContinue: Bool) {
         guard at >= 2 else { return }
-        automate(.a, .drums, .filter, [(at - 2, 0.5, .exponential), (at - 0.001, 0.63, .hold),
-                                       (at, drumsContinue ? 0.5 : 0.63, .linear)])
+        // (And stays there: where the drums play on, their low end is
+        // killed from the switch, so the filter has nothing left to hold
+        // back, and they thin out from where it is. Snapped off on the
+        // switch, it was one more filter jumping under the kick's tail as
+        // the low end changed hands.)
+        automate(.a, .drums, .filter, [(at - 2, 0.5, .exponential), (at, 0.63, .linear)])
         automate(.a, .drums, .delay, [(at - 1, 0, .exponential), (at - 0.25, 0.5, .hold), (at + 0.25, 0, .linear)])
     }
 
@@ -684,7 +730,6 @@ struct TransitionBuilder {
                 // beat and bass carry it there, not two melodies); A's then
                 // dissolves (low-pass sweep into a reverb wash), so there's
                 // never more than one song's harmony for long.
-                bringIn(.other, at: q, filter: 0.7, open: q + max(1, q / 2))
                 // (Up on the bar after A's last word where it falls silent
                 // bars before its cut: held under a voice that has stopped,
                 // with A's melody gone, the blend sagged 8 dB.)
@@ -692,14 +737,21 @@ struct TransitionBuilder {
                 if under > 0.25, lift > q + 0.01 {
                     // Under A's voice for as long as it sings, then up to
                     // full on the beat it leaves on: a step, not a fade.
+                    // (In at that level from its first note: let in whole
+                    // and taken down right after, it blipped at full for
+                    // the thirtieth of a second in between.)
                     let held = pow(10, -min(under, 12) / 20)
-                    automate(.b, .other, .volume, [(q + 0.002, held, .hold), (lift, held, .hold), (lift + 0.001, 1, .linear)])
+                    bringIn(.other, at: q, filter: 0.7, open: q + max(1, q / 2), level: held)
+                    automate(.b, .other, .volume, [(lift, held, .hold), (lift + 0.001, 1, .linear)])
+                } else {
+                    bringIn(.other, at: q, filter: 0.7, open: q + max(1, q / 2))
                 }
                 dissolveMelody(from: Self.melodyDissolve(preset, bars: bars, switchAt: sw, carry: carry))
             }
             if drumsLayer && drumsLinger && sw < n && !dropMoment {
                 // A's tops thin out and hand over.
-                automate(.a, .drums, .filter, [(3 * q, 0.5, .sCurve), (4 * q, 0.78, .linear)])
+                // (From where the build-up into the switch left the filter.)
+                automate(.a, .drums, .filter, [(3 * q, sw >= 2 ? 0.63 : 0.5, .sCurve), (4 * q, 0.78, .linear)])
                 automate(.a, .drums, .volume, [(3 * q, 1, .logarithmic), (4 * q, 0, .linear)])
             } else {
                 // One beat at a time: A's carries the build and hands

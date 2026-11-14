@@ -581,4 +581,52 @@ final class SetShapeTests: XCTestCase {
             XCTAssertGreaterThan(energies[order.last!], 0.5, "doesn't end on its gentlest")
         }
     }
+    /// Nothing a preset writes is switched in a step: every change of a
+    /// fader, a filter, an EQ band or a send takes at least the switch's
+    /// few milliseconds (see `TransitionBuilder.switchRamp`).
+    func testPresetsSwitchNothingInOneStep() {
+        for preset in TransitionPreset.allCases {
+            for (clash, layer, drop, hats) in [(false, true, false, false), (true, true, false, false),
+                                              (false, false, false, true), (false, true, true, false)] {
+                let made = TransitionBuilder.make(preset, lanes: Lane.allLanes(), start: 100, barSeconds: 1.9, bars: 16,
+                                                  keysClash: clash, lowSwap: 8, drumsLayer: layer, vocalIn: 8.37,
+                                                  vocalOut: 7.6, dropMoment: drop, room: 6, under: 4, hats: hats)
+                for lane in made.lanes {
+                    for parameter in LaneParameter.allCases {
+                        let points = lane[parameter].points
+                        for k in points.indices.dropFirst() where abs(points[k].value - points[k - 1].value) > 0.05 {
+                            let tag = "\(preset) \(lane.id) \(parameter.shortName) at \(points[k].time)"
+                            XCTAssertNotEqual(points[k - 1].curve, .hold, "a step: " + tag)
+                            XCTAssertGreaterThanOrEqual(points[k].time - points[k - 1].time, 0.0019, "too quick: " + tag)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A low kill let go under a ringing bass note gives the lows back
+    /// smoothly: no step in the wave where the filter comes off.
+    func testLowKillComesOffWithoutAStep() {
+        let sr = AudioIO.sampleRate
+        let n = Int(sr)
+        let tone = (0..<n).map { Float(0.5 * sin(2 * Double.pi * 55 * Double($0) / sr)) }
+        let stem = StemAudio(left: MappedChannel(samples: tone), right: MappedChannel(samples: tone))
+        var lane = Lane(side: .b, stem: .drums)
+        lane[.low].insert(AutomationPoint(time: 0, value: 0, curve: .linear))
+        lane[.low].insert(AutomationPoint(time: 0.5 - TransitionBuilder.lowRamp, value: 0, curve: .sCurve))
+        lane[.low].insert(AutomationPoint(time: 0.5, value: 0.5))
+        let renderer = MixRenderer(snapshot: MixSnapshot(lanes: [.init(audio: stem, offset: 0, envelopes: lane.envelopes, audible: true)],
+                                                         length: n, delaySeconds: 0.3, masterGain: 1))
+        var l = [Float](repeating: 0, count: n), r = l
+        renderer.render(left: &l, right: &r, count: n)
+        // Killed: next to nothing of a 55 Hz note. Let go: all of it.
+        XCTAssertLessThan(l[(n / 4)..<(n / 3)].map(abs).max()!, 0.005)
+        XCTAssertEqual(l[(3 * n / 4)..<n].map(abs).max()!, 0.5, accuracy: 0.01)
+        // The note's own steepest step from one frame to the next is
+        // 0.5 · 2π · 55 / sr; coming back, it never moves much faster.
+        let own = Float(0.5 * 2 * Double.pi * 55 / sr)
+        let steepest = zip(l, l.dropFirst()).map { abs($1 - $0) }.max()!
+        XCTAssertLessThan(steepest, 2 * own)
+    }
 }

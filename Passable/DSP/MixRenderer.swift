@@ -75,7 +75,16 @@ final class MixRenderer: @unchecked Sendable {
 
     private struct LaneDSP {
         var hp = Biquad(), lp = Biquad(), low = Biquad(), low2 = Biquad(), low3 = Biquad(), mid = Biquad(), high = Biquad()
+        /// The low band's boost (a shelf); its cut is the isolator
+        /// (`low`, `low2`, `low3`) blended in by `kill`.
+        var shelf = Biquad()
         var filterValue = -1.0, lowValue = -1.0, midValue = -1.0, highValue = -1.0
+        /// How much of the lane is the isolator's output rather than the
+        /// lane as it came (0…1), as the last block left it and as the
+        /// low band asks for now. Moved between the two across a block, so
+        /// a kill coming on or off is a crossfade, never a filter swapped
+        /// under a ringing note.
+        var kill: Float = 0, killTarget: Float = 0
     }
 
     private var snapshot: MixSnapshot
@@ -89,6 +98,14 @@ final class MixRenderer: @unchecked Sendable {
     private var dryL = [Float](repeating: 0, count: blockSize), dryR = [Float](repeating: 0, count: blockSize)
     private var revL = [Float](repeating: 0, count: blockSize), revR = [Float](repeating: 0, count: blockSize)
     private var dlyL = [Float](repeating: 0, count: blockSize), dlyR = [Float](repeating: 0, count: blockSize)
+    /// A lane through its isolator, next to the lane as it came (see `LaneDSP.kill`).
+    private let isoL = UnsafeMutablePointer<Float>.allocate(capacity: blockSize)
+    private let isoR = UnsafeMutablePointer<Float>.allocate(capacity: blockSize)
+
+    deinit {
+        isoL.deallocate()
+        isoR.deallocate()
+    }
 
     /// Render-thread position in master frames: of the mix going into the
     /// limiter, which plays it `Limiter.lookahead` frames later. After a
@@ -279,9 +296,36 @@ final class MixRenderer: @unchecked Sendable {
                 updateFilters(lane: i, envelopes: lane.envelopes, at: tm)
                 lanes[i].hp.process(ll, lr, count: n)
                 lanes[i].lp.process(ll, lr, count: n)
-                lanes[i].low.process(ll, lr, count: n)
-                lanes[i].low2.process(ll, lr, count: n)
-                lanes[i].low3.process(ll, lr, count: n)
+                // The low kill: the lane through the isolator, crossfaded
+                // with the lane as it came. Blended in and out over the
+                // blocks the low band's automation takes, it leaves no
+                // step in the lows it takes away or gives back.
+                let kill = lanes[i].kill, killTarget = lanes[i].killTarget
+                if kill > 0 || killTarget > 0 {
+                    isoL.update(from: ll, count: n)
+                    isoR.update(from: lr, count: n)
+                    lanes[i].low.process(isoL, isoR, count: n)
+                    lanes[i].low2.process(isoL, isoR, count: n)
+                    lanes[i].low3.process(isoL, isoR, count: n)
+                    if kill == 1 && killTarget == 1 {
+                        ll.update(from: isoL, count: n)
+                        lr.update(from: isoR, count: n)
+                    } else {
+                        let slope = (killTarget - kill) / Float(n)
+                        for j in 0..<n {
+                            let k = kill + slope * Float(j + 1)
+                            ll[j] += k * (isoL[j] - ll[j])
+                            lr[j] += k * (isoR[j] - lr[j])
+                        }
+                    }
+                    lanes[i].kill = killTarget
+                    if killTarget == 0 {
+                        lanes[i].low.bypass()
+                        lanes[i].low2.bypass()
+                        lanes[i].low3.bypass()
+                    }
+                }
+                lanes[i].shelf.process(ll, lr, count: n)
                 lanes[i].mid.process(ll, lr, count: n)
                 lanes[i].high.process(ll, lr, count: n)
 
@@ -294,17 +338,16 @@ final class MixRenderer: @unchecked Sendable {
                 vDSP_vadd(ll, 1, dL.baseAddress!, 1, dL.baseAddress!, 1, vDSP_Length(n))
                 vDSP_vadd(lr, 1, dR.baseAddress!, 1, dR.baseAddress!, 1, vDSP_Length(n))
 
-                var rev = LaneParameter.gain(value(lane.envelopes, .reverb, tm))
-                if rev > 0 {
+                // The sends, ramped across the block like the fader: a send
+                // moved in steps chops what it feeds the effect, and the
+                // echo repeats every tick it's given.
+                if Self.send(ll, lr, n, from: LaneParameter.gain(value(lane.envelopes, .reverb, t0)),
+                             to: LaneParameter.gain(value(lane.envelopes, .reverb, t1)), into: rL.baseAddress!, rR.baseAddress!) {
                     reverbFed = true
-                    vDSP_vsma(ll, 1, &rev, rL.baseAddress!, 1, rL.baseAddress!, 1, vDSP_Length(n))
-                    vDSP_vsma(lr, 1, &rev, rR.baseAddress!, 1, rR.baseAddress!, 1, vDSP_Length(n))
                 }
-                var dly = LaneParameter.gain(value(lane.envelopes, .delay, tm))
-                if dly > 0 {
+                if Self.send(ll, lr, n, from: LaneParameter.gain(value(lane.envelopes, .delay, t0)),
+                             to: LaneParameter.gain(value(lane.envelopes, .delay, t1)), into: eL.baseAddress!, eR.baseAddress!) {
                     delayFed = true
-                    vDSP_vsma(ll, 1, &dly, eL.baseAddress!, 1, eL.baseAddress!, 1, vDSP_Length(n))
-                    vDSP_vsma(lr, 1, &dly, eR.baseAddress!, 1, eR.baseAddress!, 1, vDSP_Length(n))
                 }
             }
 
@@ -329,6 +372,27 @@ final class MixRenderer: @unchecked Sendable {
             vDSP_vsmul(right, 1, &master, right, 1, vDSP_Length(n))
             limiter.process(left, right, count: n)
         }}}}}}}}
+    }
+
+    /// Adds a lane's block to a send bus at a gain going from `g0` to `g1`
+    /// across it; false if nothing was sent.
+    @inline(__always)
+    private static func send(_ l: UnsafePointer<Float>, _ r: UnsafePointer<Float>, _ n: Int, from g0: Float, to g1: Float,
+                             into busL: UnsafeMutablePointer<Float>, _ busR: UnsafeMutablePointer<Float>) -> Bool {
+        guard g0 > 0 || g1 > 0 else { return false }
+        if g0 == g1 {
+            var g = g0
+            vDSP_vsma(l, 1, &g, busL, 1, busL, 1, vDSP_Length(n))
+            vDSP_vsma(r, 1, &g, busR, 1, busR, 1, vDSP_Length(n))
+        } else {
+            let step = (g1 - g0) / Float(n)
+            for j in 0..<n {
+                let g = g0 + step * Float(j)
+                busL[j] += g * l[j]
+                busR[j] += g * r[j]
+            }
+        }
+        return true
     }
 
     /// A block of a stem that rolls: inside a roll, frames come from its
@@ -419,24 +483,34 @@ final class MixRenderer: @unchecked Sendable {
         // kill 50 Hz also takes 10 dB off 200 Hz, so a kill is an
         // isolator's steep high-pass instead, at the 150 Hz where the
         // planner splits low from high (6th-order Butterworth: −52 dB at
-        // 55, −33 at 80, −21 at 100, −0.6 at 175, −0.1 at 200); cuts
-        // short of that and boosts are the shelf.
+        // 55, −33 at 80, −21 at 100, −0.6 at 175, −0.1 at 200); a boost
+        // is a shelf.
+        // (A cut short of a kill is the same isolator, blended in by as
+        // much as takes the lows down that far: the band's whole way down
+        // is one crossfade, so an automated kill passes through no other
+        // filter on its way. It was a shelf down to the kill point and the
+        // isolator from there: a kill switched over a few milliseconds
+        // went through four shelves and then swapped filters under
+        // whatever low note was ringing.)
         let low = value(envelopes, .low, t)
         if abs(low - dsp.lowValue) > 1e-5 {
             dsp.lowValue = low
             let db = LaneParameter.eqDecibels(low)
-            if db <= Self.killDB {
-                dsp.low.set(.highPass(frequency: 150, q: 0.5176), sampleRate: sr)
-                dsp.low2.set(.highPass(frequency: 150, q: 0.7071), sampleRate: sr)
-                dsp.low3.set(.highPass(frequency: 150, q: 1.9319), sampleRate: sr)
-            } else if abs(db) < 0.05 {
-                dsp.low.bypass()
-                dsp.low2.bypass()
-                dsp.low3.bypass()
+            if db < -0.05 {
+                dsp.shelf.bypass()
+                dsp.killTarget = db <= Self.killDB ? 1 : Float(1 - pow(10, db / 20))
+                if dsp.low.isBypassed {
+                    dsp.low.set(.highPass(frequency: 150, q: 0.5176), sampleRate: sr)
+                    dsp.low2.set(.highPass(frequency: 150, q: 0.7071), sampleRate: sr)
+                    dsp.low3.set(.highPass(frequency: 150, q: 1.9319), sampleRate: sr)
+                }
             } else {
-                dsp.low.set(.lowShelf(frequency: 120, gainDB: db), sampleRate: sr)
-                dsp.low2.bypass()
-                dsp.low3.bypass()
+                dsp.killTarget = 0
+                if db > 0.05 {
+                    dsp.shelf.set(.lowShelf(frequency: 120, gainDB: db), sampleRate: sr)
+                } else {
+                    dsp.shelf.bypass()
+                }
             }
         }
         Self.updateBand(&dsp.mid, cached: &dsp.midValue, value(envelopes, .mid, t), sr) {

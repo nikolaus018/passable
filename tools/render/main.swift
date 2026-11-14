@@ -19,7 +19,7 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times", "--breaths": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks": break
     case "--dump-vocals", "--models", "--vocal-step", "--breaths-at": _ = args.removeFirst()
     case "--order": ordered = true
     case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot": _ = args.removeFirst()
@@ -1047,6 +1047,128 @@ if CommandLine.arguments.contains("--report") {
                  Double(rows.map(\.together).reduce(0, +)) / m, rows.filter { $0.together < 4 }.count,
                  rows.filter { $0.dip > 4 }.count, rows.filter { $0.hole > 6 }.count, rows.map(\.busy).reduce(0, +), rows.map(\.moves).max() ?? 0,
                  Double(rows.map(\.moves).reduce(0, +)) / m, rows.map(\.after).reduce(0, +) / m, rows.filter { $0.after > 4 }.count))
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--clicks") {
+    // Every hard switch a transition makes (a stem cut in or out, a filter
+    // or the low kill snapping on or off): how much it splatters, against
+    // the mix it plays in. A part switched in a millisecond or two, or a
+    // filter changed in one step, puts a broadband tick on the mix (the
+    // part's low notes chopped mid-wave); switched smoothly it puts none.
+    // Measured per lane: the lane as automated against the same lane
+    // staying as it was before the switch and as it is after it. Energy
+    // in a band at the switch that neither has there (6 dB over the louder)
+    // is the switch's own; it's heard if it comes near what the whole mix
+    // carries in that band around it (the click-to-mask ratio, dB).
+    let n = 256, hop = 32, fft = RealFFT(size: n)
+    let window = (0..<n).map { Float(0.5 - 0.5 * cos(2 * Double.pi * Double($0) / Double(n))) }
+    // Octave bands from 500 Hz to 16 kHz.
+    let edges = [500.0, 1000, 2000, 4000, 8000, 16000].map { Int($0 / sr * Double(n)) }
+    // (A send's switch is heard where the effect gives it back: an echo
+    // a dotted eighth on, so rendered from well before that.)
+    let lead = 1.2, half = 0.045
+    func render(_ snapshot: MixSnapshot, around t: Double) -> [Float] {
+        let renderer = MixRenderer(snapshot: snapshot)
+        renderer.setPositionImmediately(Int((t - lead) * sr))
+        let count = Int((lead + half) * sr)
+        var l = [Float](repeating: 0, count: count), r = l
+        renderer.render(left: &l, right: &r, count: count)
+        let from = Int((lead - half) * sr)
+        return (from..<count).map { 0.5 * (l[$0] + r[$0]) }
+    }
+    /// Power per band, frame by frame.
+    func bands(_ x: [Float]) -> [[Double]] {
+        var out: [[Double]] = []
+        var start = 0
+        while start + n <= x.count {
+            let mag = fft.magnitudes(of: (0..<n).map { x[start + $0] * window[$0] })
+            out.append((0..<(edges.count - 1)).map { b in (edges[b]..<edges[b + 1]).reduce(0.0) { $0 + Double(mag[$1] * mag[$1]) } })
+            start += hop
+        }
+        return out
+    }
+    struct Step { let track: Int, stem: StemKind, parameter: LaneParameter, arrives: Double, lane: String }
+    var all: [(db: Double, text: String)] = []
+    var perTransition: [Double] = []
+    for (i, t) in mix.transitions.enumerated() {
+        var steps: [Step] = []
+        for k in [t.from, t.to] {
+            for (stem, envelopes) in mix.tracks[k].envelopes {
+                for p in LaneParameter.allCases where p.rawValue < envelopes.count {
+                    let pts = envelopes[p.rawValue].points
+                    for j in pts.indices.dropFirst() where abs(pts[j].value - pts[j - 1].value) > 0.05
+                        && (pts[j].time - pts[j - 1].time <= 0.02 || pts[j - 1].curve == .hold)
+                        && pts[j].time > t.begins - t.barSeconds && pts[j].time < t.end + t.barSeconds {
+                        // (Sends each on their own, as a lane of their own.)
+                        let stemKey = p == .delay || p == .reverb ? stem.rawValue + " " + p.shortName : stem.rawValue
+                        steps.append(Step(track: k, stem: stem, parameter: p, arrives: pts[j].time, lane: "\(k) \(stemKey)"))
+                    }
+                }
+            }
+        }
+        // Switches of one lane within 15 ms are one move.
+        var worst = -120.0
+        let lanes = Set(steps.map(\.lane))
+        for lane in lanes.sorted() {
+            let mine = steps.filter { $0.lane == lane }.sorted { $0.arrives < $1.arrives }
+            var clusters: [[Step]] = []
+            for s in mine {
+                if let last = clusters.last?.last, s.arrives - last.arrives < 0.015 { clusters[clusters.count - 1].append(s) }
+                else { clusters.append([s]) }
+            }
+            for cluster in clusters {
+                let k = cluster[0].track, stem = cluster[0].stem
+                let first = cluster.map(\.arrives).min()!, last = cluster.map(\.arrives).max()!
+                // (Where it's heard: an echo's send a dotted eighth later,
+                // in its first repeat; a reverb's as its combs give it back.)
+                let heardAfter = cluster[0].parameter == .delay ? t.barSeconds / 4 * 0.75 : cluster[0].parameter == .reverb ? 0.03 : 0
+                let centre = (first + last) / 2 + heardAfter
+                func variant(_ keep: (LaneParameter, AutomationPoint) -> Bool) -> MixSnapshot {
+                    var m = mix
+                    var envelopes = m.tracks[k].envelopes[stem]!
+                    for p in Set(cluster.map(\.parameter)) {
+                        var e = Envelope()
+                        for point in envelopes[p.rawValue].points where keep(p, point) { e.insert(point) }
+                        envelopes[p.rawValue] = e
+                    }
+                    m.tracks[k].envelopes[stem] = envelopes
+                    return m.snapshot(masterGain: 1) { j, s in j == k && s == stem }
+                }
+                let auto = bands(render(mix.snapshot(masterGain: 1) { j, s in j == k && s == stem }, around: centre))
+                // (Each switched parameter staying where it was, and being
+                // where it ends up all along.)
+                let before = bands(render(variant { p, point in
+                    point.time < cluster.filter { $0.parameter == p }.map(\.arrives).min()! - 1e-9 }, around: centre))
+                let after = bands(render(variant { p, point in
+                    point.time >= cluster.filter { $0.parameter == p }.map(\.arrives).max()! - 1e-9 }, around: centre))
+                let whole = bands(render(snapshot, around: centre))
+                var best = (db: -120.0, band: 0)
+                for b in 0..<(edges.count - 1) {
+                    let mask = whole.map { $0[b] }.reduce(0, +) / Double(max(1, whole.count)) + 1e-12
+                    // (Frames that hold the switch: the 15 ms either side.)
+                    let near = auto.indices.filter { abs(Double($0 * hop + n / 2) / sr - half) < 0.015 + (last - first) / 2 }
+                    let own = near.map { max(0, auto[$0][b] - 4 * max(before[$0][b], after[$0][b])) }.max() ?? 0
+                    let db = 10 * log10(own / mask + 1e-12)
+                    if db > best.db { best = (db, b) }
+                }
+                worst = max(worst, best.db)
+                let what = Set(cluster.map { $0.parameter.shortName }).sorted().joined(separator: "+")
+                all.append((best.db, String(format: "%+6.1f dB  %02d %@ %@ %@ at bar %.2f (%.0f Hz band)  %@ → %@", best.db, i + 1,
+                                            k == t.from ? "A" : "B", stem.rawValue, what, (centre - t.start) / t.barSeconds,
+                                            Double(edges[best.band]) * sr / Double(n),
+                                            SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url))))
+            }
+        }
+        perTransition.append(worst)
+        print(String(format: "CROW\t%@\t%@\t%.1f", SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url), worst))
+    }
+    if CommandLine.arguments.contains("-v") { for row in all.sorted(by: { $0.db > $1.db }).prefix(40) { print(row.text) } }
+    func over(_ x: [Double], _ db: Double) -> Int { x.filter { $0 > db }.count }
+    let dbs = all.map(\.db)
+    print(String(format: "CLICKS %d switches in %d transitions: over 0 dB %d, over -10 dB %d, over -20 dB %d | transitions whose worst switch is over 0 dB: %d, over -10: %d, over -20: %d",
+                 dbs.count, perTransition.count, over(dbs, 0), over(dbs, -10), over(dbs, -20),
+                 over(perTransition, 0), over(perTransition, -10), over(perTransition, -20)))
     exit(0)
 }
 
