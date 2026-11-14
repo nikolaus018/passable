@@ -676,10 +676,12 @@ if CommandLine.arguments.contains("--steps") {
                 let pts = env.points
                 for j in pts.indices.dropFirst() {
                     let a = pts[j - 1], b = pts[j]
-                    guard b.time - a.time < 0.01, abs(b.value - a.value) > 0.5,
+                    guard b.time - a.time < 0.02, abs(b.value - a.value) > 0.5,
                           a.time > t.begins - t.barSeconds, a.time < t.end + t.barSeconds else { continue }
                     let opening = b.value > a.value
-                    let at = a.time
+                    // (A switch is a ramp of some milliseconds: an opening
+                    // is judged where it's done, a closing where it starts.)
+                    let at = opening ? b.time : a.time
                     let frame = Int(((at - track.stemOffset(at: at)) * sr).rounded())
                     func rms(_ from: Int, _ to: Int) -> Double {
                         var e = 0.0, n = 0
@@ -1158,6 +1160,43 @@ if CommandLine.arguments.contains("--clicks") {
                                             k == t.from ? "A" : "B", stem.rawValue, what, (centre - t.start) / t.barSeconds,
                                             Double(edges[best.band]) * sr / Double(n),
                                             SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url))))
+            }
+        }
+        // A loop's seams: each time A's looped beat turns round, the lane
+        // against the pass before it running on, and against the bars
+        // that lead into the loop's first one played straight through.
+        for (ri, roll) in mix.tracks[t.from].rolls.enumerated() where roll.seamless == true && roll.start > t.begins - t.barSeconds
+            && roll.start < t.end {
+            func variant(_ replace: Roll?) -> MixSnapshot {
+                var m = mix
+                m.tracks[t.from].rolls.remove(at: ri)
+                if let replace { m.tracks[t.from].rolls.append(replace) }
+                return m.snapshot(masterGain: 1) { j, s in j == t.from && s == roll.stem }
+            }
+            var turn = roll.start, pass = 0
+            while turn < roll.end - 0.05 {
+                let centre = turn + 0.004
+                let auto = bands(render(mix.snapshot(masterGain: 1) { j, s in j == t.from && s == roll.stem }, around: centre))
+                // (The first pass comes out of the song as it was playing.)
+                let before = bands(render(variant(pass == 0 ? nil : Roll(side: .a, stem: roll.stem, start: turn - roll.length, end: roll.end,
+                                                                         anchor: roll.anchor, length: 1000, seamless: true)), around: centre))
+                let after = bands(render(variant(Roll(side: .a, stem: roll.stem, start: turn - roll.length, end: roll.end,
+                                                      anchor: roll.anchor - roll.length, length: 1000, seamless: true)), around: centre))
+                let whole = bands(render(snapshot, around: centre))
+                var best = (db: -120.0, band: 0)
+                for b in 0..<(edges.count - 1) {
+                    let mask = whole.map { $0[b] }.reduce(0, +) / Double(max(1, whole.count)) + 1e-12
+                    let near = auto.indices.filter { abs(Double($0 * hop + n / 2) / sr - half) < 0.02 }
+                    let own = near.map { max(0, auto[$0][b] - 4 * max(before[$0][b], after[$0][b])) }.max() ?? 0
+                    let db = 10 * log10(own / mask + 1e-12)
+                    if db > best.db { best = (db, b) }
+                }
+                worst = max(worst, best.db)
+                all.append((best.db, String(format: "%+6.1f dB  %02d A %@ LOOP pass %d at bar %.2f (%.0f Hz band)  %@ → %@", best.db, i + 1,
+                                            roll.stem.rawValue, pass, (turn - t.start) / t.barSeconds, Double(edges[best.band]) * sr / Double(n),
+                                            SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url))))
+                turn += roll.length
+                pass += 1
             }
         }
         perTransition.append(worst)
