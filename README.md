@@ -18,6 +18,15 @@ leaves at the end of its line and B's takes over, the melodies swap, and the
 kick and bass change hands on one downbeat. Bottom: the set, ordered, with what
 each transition does.
 
+```mermaid
+flowchart LR
+    S[Songs] --> SEP[Stem separation<br/>HTDemucs + Mel-Band RoFormer]
+    SEP --> AN[Analysis<br/>beats, key, structure, vocal lines]
+    AN --> ORD[Set ordering]
+    ORD --> TR[Transition planning<br/>per stem automation]
+    TR --> OUT[Playback / render<br/>AAC, WAV, .passablemix]
+```
+
 ## Features
 
 - **Stem separation** into vocals, melody, drums and bass on Core ML: drums, bass and melody from HTDemucs v4, the voice from Mel-Band RoFormer, 2.9 dB closer to the true vocal (about 45 s for a 4-minute track the first time; cached after)
