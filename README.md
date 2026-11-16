@@ -1,35 +1,24 @@
-<h1 align="center">Passable</h1>
+# Passable
 
-<p align="center">
-  <b>Stem-based DJ transition builder for macOS.</b><br>
-  Drop in songs, get one continuous mix. Everything runs on-device.
-</p>
+[![CI](https://github.com/nikolaus018/passable/actions/workflows/ci.yml/badge.svg)](https://github.com/nikolaus018/passable/actions/workflows/ci.yml)
 
-<p align="center">
-  <b><a href="https://passable.ringtwo.win">Listen to transitions from a real set → passable.ringtwo.win</a></b>
-</p>
+A macOS app that mixes songs like a DJ, stem by stem. Add songs to a set and
+Passable puts them in an order that flows, plans every transition, and plays or
+renders one continuous mix. Any transition can be opened and edited by hand.
+Everything runs on your Mac.
 
-<p align="center">
-  <a href="https://github.com/nikolaus018/passable/actions/workflows/ci.yml"><img src="https://github.com/nikolaus018/passable/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/nikolaus018/passable" alt="MIT license"></a>
-  <img src="https://img.shields.io/badge/macOS-14%2B-blue" alt="macOS 14+">
-  <img src="https://img.shields.io/badge/Swift-SwiftUI-orange" alt="Swift, SwiftUI">
-  <img src="https://img.shields.io/badge/Core%20ML-HTDemucs%20%2B%20Mel--RoFormer-purple" alt="Core ML, HTDemucs and Mel-Band RoFormer">
-</p>
+[Listen to transitions from a real set](https://passable.ringtwo.win)
 
-<p align="center">
-  <img src="docs/screenshots/transition.png" alt="Transition editor: eight stem lanes with their automation, On The Floor into Dark Horse" width="900">
-</p>
+![Transition editor: eight stem lanes with their automation, On The Floor into Dark Horse](docs/screenshots/transition.png)
 
-<p align="center">
-  <img src="docs/screenshots/set.png" alt="A 59-song set, ordered, with every transition planned" width="900">
-</p>
+![A 59-song set, ordered, with every transition planned](docs/screenshots/set.png)
 
-<p align="center"><sub>Top: one transition of a 59-song set, as planned (Automatic): A's voice leaves at the end of its line and B's takes over, the melodies swap, and the kick and bass change hands on one downbeat. Bottom: the set, ordered, with what each transition does.</sub></p>
+Top: one transition of a 59-song set, as planned automatically. A's voice
+leaves at the end of its line and B's takes over, the melodies swap, and the
+kick and bass change hands on one downbeat. Bottom: the set, ordered, with what
+each transition does.
 
-A native macOS app that mixes songs like a DJ, stem by stem. Add songs to a set, and Passable puts them in the order that flows best, builds every transition and plays or renders one continuous mix. Any transition can be opened and shaped by hand.
-
-## Highlights
+## Features
 
 - **Stem separation** into vocals, melody, drums and bass on Core ML: drums, bass and melody from HTDemucs v4, the voice from Mel-Band RoFormer, 2.9 dB closer to the true vocal (about 45 s for a 4-minute track the first time; cached after)
 - **Analysis**: neural beat tracking, per-bar grids for songs with a drifting tempo, key detection, song structure and vocal line timing
