@@ -87,3 +87,12 @@ swiftc -O Tools/SendMix/main.swift ../Passable/Model/PassableMix.swift ../Passab
 ```
 
 (The simulator can't open files from `~/Documents` with `simctl openurl`; copy the file to `/tmp` first.)
+
+## Hub module
+
+The player's code is a Swift package, `ios/Packages/PassableKit`, so it also
+runs inside the [Hub](https://github.com/nikolaus018/hub) launcher;
+`hub-module.json` lists what the host app must declare. `PassableMix.swift` in
+the package is a symlink to the Mac app's file, so the format can't drift. The
+standalone app shows `PassableRootView()` and forwards opened files to
+`PassableRootView.open(_:)`.

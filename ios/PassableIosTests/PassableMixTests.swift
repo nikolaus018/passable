@@ -1,5 +1,5 @@
 import XCTest
-@testable import PassableIos
+@testable import PassableKit
 
 final class PassableMixTests: XCTestCase {
     private var root: URL!

@@ -1,0 +1,26 @@
+{
+  "id": "passable",
+  "name": "Passable",
+  "subtitle": "Play sets mixed on your Mac",
+  "symbol": "waveform",
+  "tint": "5C9EFF",
+  "product": "PassableKit",
+  "rootView": "PassableRootView",
+  "openFile": { "extensions": ["passablemix"], "handler": "PassableRootView.open" },
+  "minimumIOS": "17.0",
+  "backgroundModes": ["audio"],
+  "infoPlist": {
+    "NSLocalNetworkUsageDescription": "Passable receives sets from Passable on your Mac over your Wi-Fi.",
+    "NSBonjourServices": ["_passablemix._tcp", "_passablemix._udp"],
+    "LSSupportsOpeningDocumentsInPlace": false,
+    "CFBundleDocumentTypes": [
+      { "CFBundleTypeName": "Passable Mix", "CFBundleTypeRole": "Viewer", "LSHandlerRank": "Owner",
+        "LSItemContentTypes": ["com.nikolausmarek.passable.mix"] }
+    ],
+    "UTExportedTypeDeclarations": [
+      { "UTTypeIdentifier": "com.nikolausmarek.passable.mix", "UTTypeDescription": "Passable Mix",
+        "UTTypeConformsTo": ["public.data", "public.content"],
+        "UTTypeTagSpecification": { "public.filename-extension": ["passablemix"], "public.mime-type": ["application/x-passablemix"] } }
+    ]
+  }
+}

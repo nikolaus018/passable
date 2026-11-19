@@ -3,6 +3,9 @@ options:
   bundleIdPrefix: com.nikolausmarek
   deploymentTarget:
     iOS: "17.0"
+packages:
+  PassableKit:
+    path: Packages/PassableKit
 settings:
   MARKETING_VERSION: "1.0"
   CURRENT_PROJECT_VERSION: "1"
@@ -13,9 +16,9 @@ targets:
     platform: iOS
     sources:
       - PassableIos
-      # The .passablemix format: the Mac app's own file, so the two can't drift.
-      - path: ../Passable/Model/PassableMix.swift
-        group: Shared
+    dependencies:
+      # The player itself (with the Mac app's .passablemix format, symlinked).
+      - package: PassableKit
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.nikolausmarek.PassableIos
       PRODUCT_NAME: PassableIos
