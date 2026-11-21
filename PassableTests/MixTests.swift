@@ -629,4 +629,111 @@ final class SetShapeTests: XCTestCase {
         let steepest = zip(l, l.dropFirst()).map { abs($1 - $0) }.max()!
         XCTAssertLessThan(steepest, 2 * own)
     }
+
+    func testSVFSweepsCleanlyAndIsTransparentInBypass() {
+        let sr = AudioIO.sampleRate
+        var svf = SVF()
+        let n = 4096
+        let input = (0..<n).map { Float(0.4 * sin(2 * Double.pi * 440 * Double($0) / sr)) }
+        var l = input, r = input
+        l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+            svf.process(lp.baseAddress!, rp.baseAddress!, count: n)
+        } }
+        XCTAssertEqual(l, input, "bypass is bit-exact")
+
+        // Sweep HPF from 6 kHz down to 30 Hz across rapid 64-sample blocks:
+        // must remain bounded and glitch-free.
+        var peak: Float = 0
+        for b in stride(from: 0, to: n, by: 64) {
+            let t = Double(b) / Double(n)
+            let hz = 6000 * pow(30.0 / 6000, t)
+            svf.set(.highPass, frequency: hz, q: 0.85, sampleRate: sr)
+            l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+                svf.process(lp.baseAddress! + b, rp.baseAddress! + b, count: 64)
+            } }
+            for i in b..<(b + 64) { peak = max(peak, abs(l[i])) }
+        }
+        XCTAssertLessThan(peak, 0.7, "fast SVF sweep stays stable without ringing spikes")
+        XCTAssertGreaterThan(l[(n - 512)..<n].map(abs).max()!, 0.35, "440 Hz passes once HPF opens to 30 Hz")
+    }
+
+    func testFDNReverbIsStereoAndDecaysSmoothly() {
+        let sr = AudioIO.sampleRate
+        var rev = Reverb(sampleRate: sr)
+        let n = Int(sr * 2)
+        var l = [Float](repeating: 0, count: n), r = l
+        // 1 kHz burst in first 50 ms.
+        for i in 0..<Int(0.05 * sr) {
+            let v = Float(0.5 * sin(2 * Double.pi * 1000 * Double(i) / sr))
+            l[i] = v; r[i] = v
+        }
+        l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+            rev.process(lp.baseAddress!, rp.baseAddress!, count: n)
+        } }
+        let tailMid = l[Int(0.3 * sr)..<Int(0.6 * sr)].map(abs).max()!
+        let tailLate = l[Int(1.5 * sr)..<n].map(abs).max()!
+        XCTAssertGreaterThan(tailMid, 0.01, "reverb produces a tail")
+        XCTAssertLessThan(tailLate, tailMid, "tail decays over time")
+        // True stereo decorrelation: L and R differ in the tail.
+        let diff = (Int(0.3 * sr)..<Int(0.5 * sr)).map { abs(l[$0] - r[$0]) }.max()!
+        XCTAssertGreaterThan(diff, 0.005, "stereo width in the FDN tail")
+    }
+
+    func testWetReturnDucksBehindDryVocal() {
+        let sr = AudioIO.sampleRate
+        let n = Int(sr * 1.5)
+        // Lane A sends a 1 kHz burst into delay at t = 0..0.2s.
+        var aSamples = [Float](repeating: 0, count: n)
+        for i in 0..<Int(0.2 * sr) { aSamples[i] = Float(0.5 * sin(2 * Double.pi * 1000 * Double(i) / sr)) }
+        let stemA = StemAudio(left: MappedChannel(samples: aSamples), right: MappedChannel(samples: aSamples))
+        var laneA = Lane(side: .a, stem: .vocals)
+        laneA[.delay].insert(AutomationPoint(time: 0, value: 0.8))
+        laneA[.volume].insert(AutomationPoint(time: 0, value: 1, curve: .hold))
+        laneA[.volume].insert(AutomationPoint(time: 0.2, value: 0))
+
+        // Lane B: dry vocal singing from t = 0.25s onward.
+        var bSamples = [Float](repeating: 0, count: n)
+        for i in Int(0.25 * sr)..<n { bSamples[i] = Float(0.3 * sin(2 * Double.pi * 440 * Double(i) / sr)) }
+        let stemB = StemAudio(left: MappedChannel(samples: bSamples), right: MappedChannel(samples: bSamples))
+        let laneB = Lane(side: .b, stem: .vocals)
+
+        func renderWet(withDryVocal: Bool) -> Float {
+            var lanes: [MixSnapshot.LaneData] = [
+                .init(audio: stemA, offset: 0, envelopes: laneA.envelopes, audible: true, isVocal: true),
+            ]
+            if withDryVocal {
+                lanes.append(.init(audio: stemB, offset: 0, envelopes: laneB.envelopes, audible: true, isVocal: true))
+            }
+            let r = MixRenderer(snapshot: MixSnapshot(lanes: lanes, length: n, delaySeconds: 0.35, masterGain: 1))
+            var l = [Float](repeating: 0, count: n), rr = l
+            r.render(left: &l, right: &rr, count: n)
+            // Measure energy around the first echo repeat (0.35..0.55 s) minus
+            // dry vocal (subtracting dry B if present).
+            var e: Float = 0
+            for i in Int(0.36 * sr)..<Int(0.54 * sr) {
+                // MixRenderer prerolls `Limiter.lookahead`, so output frame `i`
+                // aligns directly with dry sample `i`.
+                let wet = withDryVocal ? l[i] - bSamples[i] : l[i]
+                e += wet * wet
+            }
+            return (e / Float(Int(0.18 * sr))).squareRoot()
+        }
+        let unducked = renderWet(withDryVocal: false)
+        let ducked = renderWet(withDryVocal: true)
+        XCTAssertGreaterThan(unducked, 0.05)
+        XCTAssertLessThan(ducked, unducked * 0.7, "dry incoming vocal ducks the wet delay tail")
+    }
+
+    func testVocalPitchShiftPreservesTimingAndPitch() {
+        let sr = AudioIO.sampleRate
+        let n = Int(sr * 4)
+        let tone = (0..<n).map { Float(0.4 * sin(2 * Double.pi * 330 * Double($0) / sr)) }
+        let out = TimeStretcher.process(StereoBuffer(left: tone, right: tone), map: .constant(1.03),
+                                        semitones: 2, percussive: false, vocal: true)
+        XCTAssertEqual(Double(out.count), Double(n) / 1.03, accuracy: 1)
+        var crossings = 0
+        for i in 44_101..<132_300 where (out.left[i - 1] < 0) != (out.left[i] < 0) { crossings += 1 }
+        let hz = Double(crossings) / 2 / (Double(132_300 - 44_101) / sr)
+        XCTAssertEqual(hz, 330 * pow(2, 2.0 / 12), accuracy: 2)
+    }
 }

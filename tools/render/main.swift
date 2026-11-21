@@ -241,7 +241,7 @@ if ordered {
     let t0 = Date()
     let hits = BeatAlign.attacks(of: tracks.map(\.loaded))
     let t1 = Date()
-    let costs = SetOrdering.costMatrix(analyses, drums: hits, remembered: true)
+    let costs = SetOrdering.costMatrix(analyses, drums: hits, remembered: true, urls: tracks.map(\.url))
     let t2 = Date()
     let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
     let shakes = CommandLine.arguments.firstIndex(of: "--shakes").map { Int(CommandLine.arguments[$0 + 1])! }
@@ -593,7 +593,8 @@ if CommandLine.arguments.contains("--renditions") {
         guard let m = t.matched, !t.map.isIdentity else { continue }
         for kind in StemKind.allCases {
             let fresh = TimeStretcher.process(t.loaded.stems[kind]!.copyStereo(), map: m.plan.map,
-                                              semitones: kind == .drums ? 0 : m.plan.semitones, percussive: kind == .drums)
+                                              semitones: kind == .drums ? 0 : m.plan.semitones, percussive: kind == .drums,
+                                              vocal: kind == .vocals)
             let saved = m.stems[kind]!
             let ok = fresh.count == saved.count && (0..<fresh.count).allSatisfy {
                 fresh.left[$0].bitPattern == saved.left.pointer[$0].bitPattern && fresh.right[$0].bitPattern == saved.right.pointer[$0].bitPattern

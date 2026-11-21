@@ -373,6 +373,7 @@ final class SetSession: ObservableObject {
         let fitIn = !added.isEmpty && placed.count > 1
         let analyses = ready.map { $0.analysis! }
         let songs = ready.compactMap(\.loaded)
+        let urls = ready.map(\.url)
         let ids = ready.map(\.id)
         // Every pair of songs is planned to price it: seconds for a long
         // set, so not on the main thread.
@@ -380,7 +381,7 @@ final class SetSession: ObservableObject {
         buildStatus = "Ordering songs…"
         orderTask = Task { [weak self] in
             let order = await Task.detached(priority: .userInitiated) {
-                let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: songs), remembered: true)
+                let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: songs), remembered: true, urls: urls)
                 let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
                 return fitIn ? SetOrdering.insert(added, into: placed, costs, washOuts: washOuts, energies: energies)
                     : SetOrdering.order(costs, washOuts: washOuts, energies: energies)

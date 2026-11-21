@@ -17,6 +17,10 @@ final class MixSnapshot: @unchecked Sendable {
         var trim: Float = 1
         /// Beat rolls on this stem, in master frames, sorted by start.
         var rolls: [FrameRoll] = []
+        /// Vocal lane: when singing dry (not feeding effects), gently ducks
+        /// the shared reverb/delay wet returns so outgoing tails tuck behind
+        /// the incoming voice instead of smearing over its first words.
+        var isVocal: Bool = false
     }
 
     /// A `Roll` on the master timeline, in frames.
@@ -74,7 +78,8 @@ final class MixRenderer: @unchecked Sendable {
     let sampleRate = AudioIO.sampleRate
 
     private struct LaneDSP {
-        var hp = Biquad(), lp = Biquad(), low = Biquad(), low2 = Biquad(), low3 = Biquad(), mid = Biquad(), high = Biquad()
+        var filter = SVF()
+        var low = Biquad(), low2 = Biquad(), low3 = Biquad(), mid = Biquad(), high = Biquad()
         /// The low band's boost (a shelf); its cut is the isolator
         /// (`low`, `low2`, `low3`) blended in by `kill`.
         var shelf = Biquad()
@@ -115,6 +120,15 @@ final class MixRenderer: @unchecked Sendable {
     private var needsPreroll = true
     /// The reverb's and the echo's tails have died away (see `renderBlock`).
     private var reverbIdle = true, delayIdle = true
+    /// Minimum frames to keep running reverb/delay after the last fed block
+    /// before checking for silence: a short throw (e.g. a 200 ms vocal word)
+    /// into a 350 ms delay is still silent at the delay's output when the
+    /// send closes, so checking silence immediately would kill the echo
+    /// before its first repeat ever arrives.
+    private var reverbTailFrames = 0, delayTailFrames = 0
+    /// Wet-bus sidechain ducking gain (1 = open, down to 0.5 when a dry
+    /// incoming vocal sings over an outgoing effect tail).
+    private var wetDuck: Float = 1
 
     /// Nothing over -120 dBFS in the block.
     private static func silent(_ l: UnsafePointer<Float>, _ r: UnsafePointer<Float>, _ n: Int) -> Bool {
@@ -239,6 +253,9 @@ final class MixRenderer: @unchecked Sendable {
         delay.reset()
         reverbIdle = true
         delayIdle = true
+        reverbTailFrames = 0
+        delayTailFrames = 0
+        wetDuck = 1
         limiter.reset()
         needsPreroll = true
         for i in lanes.indices { lanes[i] = LaneDSP() }
@@ -274,6 +291,7 @@ final class MixRenderer: @unchecked Sendable {
             eL.baseAddress!.update(repeating: 0, count: n)
             eR.baseAddress!.update(repeating: 0, count: n)
             var reverbFed = false, delayFed = false
+            var dryVocalEnergy: Float = 0
 
             for (i, lane) in snap.lanes.enumerated() {
                 guard lane.audible, let audio = lane.audio else { continue }
@@ -294,8 +312,7 @@ final class MixRenderer: @unchecked Sendable {
                 }
 
                 updateFilters(lane: i, envelopes: lane.envelopes, at: tm)
-                lanes[i].hp.process(ll, lr, count: n)
-                lanes[i].lp.process(ll, lr, count: n)
+                lanes[i].filter.process(ll, lr, count: n)
                 // The low kill: the lane through the isolator, crossfaded
                 // with the lane as it came. Blended in and out over the
                 // blocks the low band's automation takes, it leaves no
@@ -341,26 +358,69 @@ final class MixRenderer: @unchecked Sendable {
                 // The sends, ramped across the block like the fader: a send
                 // moved in steps chops what it feeds the effect, and the
                 // echo repeats every tick it's given.
-                if Self.send(ll, lr, n, from: LaneParameter.gain(value(lane.envelopes, .reverb, t0)),
-                             to: LaneParameter.gain(value(lane.envelopes, .reverb, t1)), into: rL.baseAddress!, rR.baseAddress!) {
+                let rev0 = LaneParameter.gain(value(lane.envelopes, .reverb, t0))
+                let rev1 = LaneParameter.gain(value(lane.envelopes, .reverb, t1))
+                let dly0 = LaneParameter.gain(value(lane.envelopes, .delay, t0))
+                let dly1 = LaneParameter.gain(value(lane.envelopes, .delay, t1))
+                if Self.send(ll, lr, n, from: rev0, to: rev1, into: rL.baseAddress!, rR.baseAddress!) {
                     reverbFed = true
                 }
-                if Self.send(ll, lr, n, from: LaneParameter.gain(value(lane.envelopes, .delay, t0)),
-                             to: LaneParameter.gain(value(lane.envelopes, .delay, t1)), into: eL.baseAddress!, eR.baseAddress!) {
+                if Self.send(ll, lr, n, from: dly0, to: dly1, into: eL.baseAddress!, eR.baseAddress!) {
                     delayFed = true
+                }
+                // Track dry vocal energy (an active vocal not currently
+                // throwing into effects) to gently duck lingering effect
+                // tails from the outgoing song.
+                if lane.isVocal, max(rev0, rev1, dly0, dly1) < 0.05 {
+                    var el: Float = 0, er: Float = 0
+                    vDSP_measqv(ll, 1, &el, vDSP_Length(n))
+                    vDSP_measqv(lr, 1, &er, vDSP_Length(n))
+                    dryVocalEnergy = max(dryVocalEnergy, (el + er) * 0.5)
                 }
             }
 
             // The reverb and the echo only run while something is sent to
             // them or their tail still sounds: most of a set sends nothing,
             // and they were most of the renderer's work.
-            if reverbFed || !reverbIdle {
+            let revActive = reverbFed || !reverbIdle
+            let dlyActive = delayFed || !delayIdle
+            if reverbFed { reverbTailFrames = Int(0.25 * sampleRate) }
+            if delayFed { delayTailFrames = Int((max(delaySeconds, 0.35) * 2 + 0.25) * sampleRate) }
+            if revActive {
                 reverb.process(rL.baseAddress!, rR.baseAddress!, count: n)
-                reverbIdle = !reverbFed && Self.silent(rL.baseAddress!, rR.baseAddress!, n)
+                reverbTailFrames = max(0, reverbTailFrames - n)
+                reverbIdle = !reverbFed && reverbTailFrames == 0 && Self.silent(rL.baseAddress!, rR.baseAddress!, n)
             }
-            if delayFed || !delayIdle {
+            if dlyActive {
                 delay.process(eL.baseAddress!, eR.baseAddress!, count: n)
-                delayIdle = !delayFed && Self.silent(eL.baseAddress!, eR.baseAddress!, n)
+                delayTailFrames = max(0, delayTailFrames - n)
+                delayIdle = !delayFed && delayTailFrames == 0 && Self.silent(eL.baseAddress!, eR.baseAddress!, n)
+            }
+            // Sidechain-duck the wet reverb & delay returns when a dry
+            // incoming vocal sings over them, so outgoing tails fill breaths
+            // and tuck cleanly behind the new singer's first words.
+            if revActive || dlyActive {
+                let rms = dryVocalEnergy.squareRoot()
+                let depth = min(1, max(0, (rms - 0.03) / 0.12))
+                let target: Float = 1 - 0.5 * depth  // down to -6 dB
+                let coef: Float = target < wetDuck
+                    ? Float(exp(-Double(n) / (0.015 * sampleRate)))
+                    : Float(exp(-Double(n) / (0.20 * sampleRate)))
+                let nextDuck = target + coef * (wetDuck - target)
+                if wetDuck < 0.9999 || nextDuck < 0.9999 {
+                    let slope = (nextDuck - wetDuck) / Float(n)
+                    if revActive {
+                        var g = wetDuck, s = slope
+                        vDSP_vrampmul2(rL.baseAddress!, rR.baseAddress!, 1, &g, &s, rL.baseAddress!, rR.baseAddress!, 1, vDSP_Length(n))
+                    }
+                    if dlyActive {
+                        var g = wetDuck, s = slope
+                        vDSP_vrampmul2(eL.baseAddress!, eR.baseAddress!, 1, &g, &s, eL.baseAddress!, eR.baseAddress!, 1, vDSP_Length(n))
+                    }
+                }
+                wetDuck = nextDuck
+            } else {
+                wetDuck = 1
             }
 
             vDSP_vadd(dL.baseAddress!, 1, rL.baseAddress!, 1, left, 1, vDSP_Length(n))
@@ -417,7 +477,10 @@ final class MixRenderer: @unchecked Sendable {
                     s = r.anchor - lane.offset + phase
                     if phase < r.crossfade {
                         tail = from
-                        tailGain = 1 - Float(phase) / Float(r.crossfade)
+                        // Raised-cosine crossfade: C1-smooth at both ends
+                        // (no slope discontinuity) and sums to unity.
+                        let u = Float(phase) / Float(r.crossfade)
+                        tailGain = 0.5 * (1 + cosf(Float.pi * u))
                     } else {
                         tail = -1
                     }
@@ -467,13 +530,11 @@ final class MixRenderer: @unchecked Sendable {
             dsp.filterValue = f
             switch LaneParameter.filter(f) {
             case .bypass:
-                dsp.hp.bypass(); dsp.lp.bypass()
+                dsp.filter.setBypass()
             case .lowPass(let hz):
-                dsp.hp.bypass()
-                dsp.lp.set(.lowPass(frequency: hz, q: 1.0), sampleRate: sr)
+                dsp.filter.set(.lowPass, frequency: hz, q: 0.85, sampleRate: sr)
             case .highPass(let hz):
-                dsp.lp.bypass()
-                dsp.hp.set(.highPass(frequency: hz, q: 1.0), sampleRate: sr)
+                dsp.filter.set(.highPass, frequency: hz, q: 0.85, sampleRate: sr)
             }
         }
         // Where a DJ mixer's low knob sits: a kill takes the kick and the

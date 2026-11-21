@@ -390,9 +390,11 @@ struct TrackStructure: Codable, Equatable {
         }
         let repeats = spread(Array(repetition[0..<blocks])) + [Float](repeating: 0, count: n - blocks)
         let reference = s.referenceLoudness
+        let lowGoing = s.lowEndGoing()
         let power: [Float] = (0..<n).map { b in
             let energy = min(1, max(0, (s.loudness[b] - (reference - 9)) / 9))
-            let full = min(1, drums[b]) * min(1, bass[b])
+            let lowAct: Float = lowGoing.map { b < $0.count && $0[b] ? 1 : 0 } ?? min(1, bass[b])
+            let full = min(1, drums[b]) * lowAct
             return 0.45 * repeats[b] + 0.35 * energy + 0.2 * full
         }
         func section(_ r: Range<Int>) -> Float {
@@ -423,12 +425,28 @@ struct TrackStructure: Codable, Equatable {
         }
     }
 
-    /// Below full power: a verse, a breakdown, the beat or the bass gone.
+    /// Per bar: the song's low end is going, from whichever parts carry it
+    /// (all stems below 150 Hz summed, within 6 dB of the song's 80th-percentile
+    /// bar). Tracks whose low end lives in an 808 kick (drums) or synth bass
+    /// (melody) read accurately instead of looking bass-less.
+    func lowEndGoing() -> [Bool]? {
+        guard let lows = stemLowLevel else { return nil }
+        let stems = lows.values.filter { !$0.isEmpty }
+        guard let n = stems.map(\.count).min(), n > 0 else { return nil }
+        let power = (0..<n).map { k in stems.reduce(Float(0)) { $0 + pow(10, $1[k] / 10) } }
+        let full = power.sorted()[Int(Double(n - 1) * 0.8)]
+        guard full > 0 else { return nil }
+        return power.map { $0 >= full * 0.25 }
+    }
+
+    /// Below full power: a verse, a breakdown, the beat or the low end gone.
     /// What cools a floor when a song plays it on its own.
-    func sags(_ bar: Int) -> Bool {
+    func sags(_ bar: Int, lowEnd: [Bool]? = nil) -> Bool {
         let drums = activity(.drums), bass = activity(.bass)
         guard bar >= 0, bar < loudness.count else { return false }
-        let full = bar < drums.count && bar < bass.count && min(drums[bar], bass[bar]) >= 0.4
+        let hasLow = (lowEnd ?? lowEndGoing()).map { bar < $0.count && $0[bar] }
+            ?? (bar < bass.count && bass[bar] >= 0.4)
+        let full = bar < drums.count && drums[bar] >= 0.4 && hasLow
         return loudness[bar] < referenceLoudness - 3.5 || !full
     }
 
@@ -465,6 +483,7 @@ struct TrackStructure: Codable, Equatable {
             guard let pauses else { return true }
             return (pauses.isQuiet(4 * x - 1) || pauses.isQuiet(4 * x)) && (pauses.isQuiet(4 * y - 1) || pauses.isQuiet(4 * y))
         }
+        let lowEnd = lowEndGoing()
         var best: (range: Range<Int>, score: Float)?
         for x in max(4, earliest)..<max(max(4, earliest), min(n, latest)) where ((x - phase) % 4 + 4) % 4 == 0 {
             for y in stride(from: x + 8, through: min(latest, n - 4), by: 4) {
@@ -473,7 +492,7 @@ struct TrackStructure: Codable, Equatable {
                       abs(mean(drums, x..<(x + 4)) - mean(drums, y..<(y + 4))) <= 0.25,
                       abs(mean(bass, x..<(x + 4)) - mean(bass, y..<(y + 4))) <= 0.25,
                       seamless(x, y) || sim >= 0.9 else { continue }
-                let sag = (x..<y).filter { sags($0) }.count
+                let sag = (x..<y).filter { sags($0, lowEnd: lowEnd) }.count
                 guard sag >= 6, 2 * sag >= y - x else { continue }
                 let score = sim + 0.05 * Float(sag)
                 if score > best?.score ?? -1 { best = (x..<y, score) }
@@ -851,9 +870,10 @@ extension TrackStructure {
     }
 
     /// Whether the `bars` bars before bar `entry` make a bed to loop: the
-    /// song at full power all through them, beat and bass line going.
+    /// song at full power all through them, beat and low end going.
     func loops(before entry: Int, bars: Int) -> Bool {
-        entry >= bars && ((entry - bars)..<entry).allSatisfy { !sags($0) }
+        let lowEnd = lowEndGoing()
+        return entry >= bars && ((entry - bars)..<entry).allSatisfy { !sags($0, lowEnd: lowEnd) }
     }
 }
 
@@ -1108,8 +1128,9 @@ enum AutoPlacement {
     /// - Parameter skipping: bars left out by a jump (not played at all).
     static func pacing(_ s: TrackStructure, from: Int, to: Int, barSeconds: Double,
                        skipping: Range<Int>? = nil) -> Float {
+        let lowEnd = s.lowEndGoing()
         let bars = (max(0, from)..<max(max(0, from), to)).filter { !(skipping?.contains($0) ?? false) }
-        let sag = bars.filter { s.sags($0) }.count
+        let sag = bars.filter { s.sags($0, lowEnd: lowEnd) }.count
         let seconds = Float(Double(bars.count) * barSeconds)
         return 0.1 * Float(sag) + 0.03 * max(0, seconds - 60) + 0.03 * max(0, 45 - seconds)
     }
@@ -1341,7 +1362,7 @@ enum AutoPlacement {
     /// bed for the next song, as a DJ loops the last bars of a chorus), but
     /// it's the DJ's doing, not the record's: where A's own bars carry the
     /// blend as well, they play.
-    static let loopCost: Float = 0.6
+    static let loopCost: Float = 1.2
 
     /// How far before the loop starts A's voice may leave, and how far
     /// into it (bars): on the last word of the part that ends there.
@@ -1559,6 +1580,41 @@ enum AutoPlacement {
         return [clash(overlap.before, lowEndIsAs: true), clash(overlap.after, lowEndIsAs: false)].compactMap { $0 }.max()
     }
 
+    /// Bar-by-bar harmonic roughness across `melodyOverlap`: two songs in
+    /// the same key can have zero aggregate clash while grinding IV against V
+    /// on every bar. Returns the mean and worst bar roughness over bars where
+    /// both sides have audible notes, or nil if fewer than two bars compare.
+    static func barByBarRoughness(a: TrackStructure, aShift: Int = 0, entry e: Int, b: TrackStructure, bShift: Int = 0,
+                                  cue c: Int, preset: TransitionPreset, bars n: Int,
+                                  lowSwap: Int?) -> (mean: Float, worst: Float, count: Int)? {
+        let overlap = melodyOverlap(preset, bars: n, lowSwap: lowSwap)
+        var sum: Float = 0, worst: Float = 0, count = 0
+        func scan(_ bars: Range<Int>, lowEndIsAs: Bool) {
+            for k in bars {
+                guard let na = notes(a, bars: (e + k)..<(e + k + 1), shift: aShift, melodyOnly: !lowEndIsAs),
+                      let nb = notes(b, bars: (c + k)..<(c + k + 1), shift: bShift, melodyOnly: lowEndIsAs)
+                else { continue }
+                let r = Harmony.roughness(na, nb)
+                sum += r
+                if r > worst { worst = r }
+                count += 1
+            }
+        }
+        scan(overlap.before, lowEndIsAs: true)
+        scan(overlap.after, lowEndIsAs: false)
+        guard count >= 2 else { return nil }
+        return (sum / Float(count), worst, count)
+    }
+
+    /// Circular distance in cents (−50…+50) between two tracks' concert pitch.
+    /// Above 25 cents (~a quarter-tone), layering melodies sounds audibly
+    /// out of tune even when both songs share the same key.
+    static func tuningClash(_ a: Float?, _ b: Float?) -> Bool {
+        guard let a, let b else { return false }
+        let diff = abs(a - b)
+        return min(diff, 100 - diff) > 25
+    }
+
     /// - Parameters:
     ///   - trimA, trimB: the decks' level matches (dB), so energies compare
     ///     as heard.
@@ -1740,19 +1796,30 @@ enum AutoPlacement {
         guard loop == 0 || !entries.isEmpty else {
             return Result(entryBar: max(0, barsA - n - 8), cueBar: 0, vocalHandoff: n, reason: "", score: -.infinity)
         }
-        func lowSwap(_ sa: TrackStructure, entry e: Int, cue c: Int) -> Int? {
+        let lowGoingB = sb.lowEndGoing()
+        let lowGoingWholeA = whole.lowEndGoing()
+        func hasLow(_ s: TrackStructure, _ going: [Bool]?, bars r: Range<Int>, threshold: Float) -> Bool {
+            if let going {
+                let clamped = r.clamped(to: 0..<going.count)
+                guard !clamped.isEmpty else { return false }
+                let share = Float(clamped.filter { going[$0] }.count) / Float(clamped.count)
+                return share > threshold
+            }
+            return s.meanActivity(.bass, bars: r) > threshold
+        }
+        func lowSwap(_ sa: TrackStructure, lowGoingA: [Bool]?, entry e: Int, cue c: Int) -> Int? {
             guard !echo else { return nil }
             // A Drop Swap flips everything half-way, low end included; a
             // Long Blend trades the lows half-way.
             if preset != .stemSwap { return Int(TransitionBuilder.switchBar(preset, bars: n, lowSwap: nil)) }
             let ready = stride(from: n / 2, to: n, by: step).first { k in
                 let r = (c + k)..<(c + k + 4)
-                return sb.meanActivity(.bass, bars: r) > 0.5 && sb.meanActivity(.drums, bars: r) > 0.5
+                return hasLow(sb, lowGoingB, bars: r, threshold: 0.5) && sb.meanActivity(.drums, bars: r) > 0.5
             } ?? n
             let aLeaves = (min(2, ready)..<ready).first { k in
                 let a = (e + k)..<(e + k + 2), b = (c + k)..<(c + k + 2)
-                return sa.meanActivity(.bass, bars: a) < 0.3 && sa.meanActivity(.drums, bars: a) < 0.3
-                    && sb.meanActivity(.bass, bars: b) > 0.5 && sb.meanActivity(.drums, bars: b) > 0.5
+                return !hasLow(sa, lowGoingA, bars: a, threshold: 0.3) && sa.meanActivity(.drums, bars: a) < 0.3
+                    && hasLow(sb, lowGoingB, bars: b, threshold: 0.5) && sb.meanActivity(.drums, bars: b) > 0.5
             }
             return aLeaves ?? ready
         }
@@ -1796,6 +1863,7 @@ enum AutoPlacement {
             guard from < to, let landing = lowB[from..<to].max() else { return 0 }
             return max(0, fullLowB - landing)
         }
+        let tuningClashes = AutoPlacement.tuningClash(a.tuningCents, b.tuningCents)
         /// Whether the melodies clash at this spot, heard in the notes both
         /// songs play where they'd overlap (as the builder will judge it on
         /// the audio), not only guessed from the two keys. Where they do,
@@ -1804,6 +1872,7 @@ enum AutoPlacement {
         func notesClash(_ sa: TrackStructure, e: Int, c: Int, sw: Int?) -> Bool {
             // A Wash Out never plays the two songs' notes together.
             guard !echo else { return false }
+            if tuningClashes { return true }
             // Songs analysed before per-bar notes existed: the keys are
             // all there is.
             guard whole.harmonyChroma ?? whole.barChroma != nil, sb.harmonyChroma ?? sb.barChroma != nil else { return keysClash }
@@ -1814,15 +1883,27 @@ enum AutoPlacement {
             // Or their notes grate, whatever scales they're in.
             let rough = overlapClash(a: sa, aShift: aShift, entry: e, b: sb, bShift: bShift, cue: c, preset: preset, bars: n,
                                      lowSwap: sw, measure: Harmony.roughness)
-            return rough.map { $0 > Harmony.roughTolerance } ?? false
+            if rough.map({ $0 > Harmony.roughTolerance }) ?? false { return true }
+            // Or individual bars grind against each other (e.g. IV against V
+            // in the same scale) even though the aggregate scale looks clean.
+            if let bars = barByBarRoughness(a: sa, aShift: aShift, entry: e, b: sb, bShift: bShift, cue: c,
+                                            preset: preset, bars: n, lowSwap: sw),
+               bars.mean > 0.24 && bars.worst > 0.30 {
+                return true
+            }
+            return false
         }
 
-        var best = (entry: entries.last ?? max(0, barsA - n), cue: cues.first ?? 0, handoff: vocalIn,
-                    lowSwap: lowSwap(playing(entries.last ?? 0), entry: entries.last ?? 0, cue: cues.first ?? 0),
+        let firstE = entries.last ?? max(0, barsA - n)
+        let firstSa = playing(firstE)
+        var best = (entry: firstE, cue: cues.first ?? 0, handoff: vocalIn,
+                    lowSwap: lowSwap(firstSa, lowGoingA: loop > 0 ? firstSa.lowEndGoing() : lowGoingWholeA,
+                                     entry: firstE, cue: cues.first ?? 0),
                     score: -Float.infinity)
         var bestHeard: Int?, bestVocal: Double?, bestCarry = false
         for e in entries.isEmpty ? [max(0, latest)] : entries {
             let sa = playing(e)
+            let lowGoingA = loop > 0 ? sa.lowEndGoing() : lowGoingWholeA
             let powerA = loop > 0 ? AutoPlacement.powers(sa, trim: trimA) : wholePower
             // A side: beat under the first half, energy before and during.
             let drumsA = min(1.2, sa.meanActivity(.drums, bars: e..<(e + max(1, span / 2))))
@@ -1871,8 +1952,15 @@ enum AutoPlacement {
                 }
                 score += 0.4 * bound(boundB, c) + 0.8 * bound(boundB, c + span)
                 score -= 0.4 * Float(c) / Float(max(1, barsB))
-                let sw = lowSwap(sa, entry: e, cue: c)
+                let sw = lowSwap(sa, lowGoingA: lowGoingA, entry: e, cue: c)
                 let clashHere = notesClash(sa, e: e, c: c, sw: sw)
+                // Bar-by-bar chord alignment: among phrase spots that don't
+                // clash, reward alignments whose chords lock bar for bar.
+                if !echo, !clashHere,
+                   let chordRough = barByBarRoughness(a: sa, aShift: aShift, entry: e, b: sb, bShift: bShift, cue: c,
+                                                      preset: preset, bars: n, lowSwap: sw) {
+                    score += max(-0.5, min(0.5, (0.18 - chordRough.mean) * 12))
+                }
                 // The payoff: B's hook lands right as B takes over (a Wash
                 // Out drops straight into it), or B has a real drop there.
                 let switchAt = switchBar(sw)
@@ -2034,7 +2122,18 @@ enum AutoPlacement {
                         func sitsOnA(from first: Int, until swap: Int) -> Bool {
                             guard swap > first, let chords = AutoPlacement.notes(sa, bars: (e + first)..<(e + swap)),
                                   let voice = AutoPlacement.vocalNotes(sb, bars: (c + first)..<(c + swap)) else { return true }
-                            return Harmony.clash(chords, voice) <= Harmony.fitTolerance
+                            guard Harmony.clash(chords, voice) <= Harmony.fitTolerance else { return false }
+                            // Bar-by-bar vocal-on-chords roughness check so B's
+                            // vocal doesn't grind against individual chord changes.
+                            var sum: Float = 0, count = 0
+                            for k in first..<swap {
+                                guard let ck = AutoPlacement.notes(sa, bars: (e + k)..<(e + k + 1), shift: aShift),
+                                      let vk = AutoPlacement.vocalNotes(sb, bars: (c + k)..<(c + k + 1)) else { continue }
+                                let shiftedV = bShift == 0 ? vk : Harmony.transposed(vk, by: bShift)
+                                sum += Harmony.roughness(ck, shiftedV)
+                                count += 1
+                            }
+                            return count == 0 || sum / Float(count) <= Harmony.roughTolerance
                         }
                         // Over A's beat looped, with A's voice gone, B's
                         // may come in with its melody a quarter in: the

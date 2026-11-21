@@ -1,78 +1,82 @@
 import Foundation
 
-/// Freeverb (Jezar's public-domain design): eight parallel damped combs and
-/// four series allpasses per channel, the right channel detuned for width.
-/// Tuned long and dark — it's for washing out a track's tail, not for rooms.
+/// 8-channel modulated Hadamard Feedback Delay Network (FDN) reverb, stereo.
+/// Tuned long and dark for washing out vocal and melody tails without the
+/// metallic comb ringing of an unmodulated Freeverb.
 struct Reverb {
-    private struct Comb {
+    private static let channels = 8
+    /// Mutually prime base delay lengths at 44.1 kHz (~26–73 ms), plus
+    /// modulation headroom.
+    private static let baseLengths = [1151, 1361, 1597, 1847, 2111, 2437, 2801, 3209]
+    /// Slow LFO rates (Hz) per channel, irrational-ish spacing to avoid beating.
+    private static let lfoRates: [Float] = [0.31, 0.43, 0.53, 0.61, 0.37, 0.47, 0.59, 0.71]
+    private static let modDepth: Float = 6.5
+
+    private struct Line {
         var buffer: [Float]
-        var index = 0
-        var store: Float = 0
-        init(_ size: Int) { buffer = [Float](repeating: 0, count: size) }
+        let baseDelay: Float
+        var write = 0
+        var dampState: Float = 0
+        var phase: Float
+        let phaseStep: Float
+
+        init(delay: Int, phase: Float, rate: Float, sampleRate: Double) {
+            let headroom = Int(Reverb.modDepth.rounded(.up)) + 4
+            let size = max(16, delay + headroom)
+            buffer = [Float](repeating: 0, count: size)
+            baseDelay = Float(delay)
+            self.phase = phase
+            phaseStep = Float(2 * Double.pi * Double(rate) / sampleRate)
+        }
 
         mutating func clear() {
             buffer.withUnsafeMutableBufferPointer { $0.update(repeating: 0) }
-            store = 0
+            dampState = 0
         }
 
-        mutating func process(_ x: Float, feedback: Float, damp: Float) -> Float {
-            let y = buffer[index]
-            store = y * (1 - damp) + store * damp
-            buffer[index] = x + store * feedback
-            index += 1
-            if index == buffer.count { index = 0 }
-            return y
-        }
-    }
-
-    private struct Allpass {
-        var buffer: [Float]
-        var index = 0
-        init(_ size: Int) { buffer = [Float](repeating: 0, count: size) }
-
-        mutating func clear() {
-            buffer.withUnsafeMutableBufferPointer { $0.update(repeating: 0) }
+        @inline(__always)
+        mutating func read(damp: Float) -> Float {
+            phase += phaseStep
+            if phase >= Float.pi * 2 { phase -= Float.pi * 2 }
+            let d = baseDelay + sinf(phase) * Reverb.modDepth
+            let size = buffer.count
+            var pos = Float(write) - d
+            if pos < 0 { pos += Float(size) }
+            let i0 = Int(pos) % size
+            let i1 = (i0 + 1) % size
+            let frac = pos - floorf(pos)
+            let raw = buffer[i0] + frac * (buffer[i1] - buffer[i0])
+            dampState = raw * (1 - damp) + dampState * damp
+            if abs(dampState) < 1e-20 { dampState = 0 }
+            return dampState
         }
 
-        mutating func process(_ x: Float) -> Float {
-            let b = buffer[index]
-            buffer[index] = x + b * 0.5
-            index += 1
-            if index == buffer.count { index = 0 }
-            return b - x
+        @inline(__always)
+        mutating func push(_ x: Float) {
+            buffer[write] = abs(x) < 1e-20 ? 0 : x
+            write += 1
+            if write == buffer.count { write = 0 }
         }
     }
 
-    private var combsL: [Comb]
-    private var combsR: [Comb]
-    private var allpassL: [Allpass]
-    private var allpassR: [Allpass]
+    private var lines: [Line]
     private var inputFilter = Biquad()
-    var feedback: Float = 0.9
-    var damp: Float = 0.35
+    /// Feedback per loop pass (~3.2 s RT60 on the mean delay length).
+    var feedback: Float = 0.87
+    var damp: Float = 0.38
 
     init(sampleRate: Double) {
         let scale = sampleRate / 44_100
-        let combs = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
-        let allpasses = [556, 441, 341, 225]
-        let spread = 23
-        combsL = combs.map { Comb(Int(Double($0) * scale)) }
-        combsR = combs.map { Comb(Int(Double($0 + spread) * scale)) }
-        allpassL = allpasses.map { Allpass(Int(Double($0) * scale)) }
-        allpassR = allpasses.map { Allpass(Int(Double($0 + spread) * scale)) }
+        lines = (0..<Self.channels).map { c in
+            let delay = max(16, Int((Double(Self.baseLengths[c]) * scale).rounded()))
+            return Line(delay: delay, phase: Float(c) * 0.785398, rate: Self.lfoRates[c], sampleRate: sampleRate)
+        }
         // Keep sub-bass out of the tail; a reverbed kick is mud.
         inputFilter.set(.highPass(frequency: 250, q: 0.707), sampleRate: sampleRate)
     }
 
     mutating func reset() {
-        for i in combsL.indices {
-            combsL[i].clear()
-            combsR[i].clear()
-        }
-        for i in allpassL.indices {
-            allpassL[i].clear()
-            allpassR[i].clear()
-        }
+        for i in lines.indices { lines[i].clear() }
         inputFilter.reset()
     }
 
@@ -80,19 +84,41 @@ struct Reverb {
     mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>, count: Int) {
         inputFilter.process(left, right, count: count)
         let fb = feedback, dp = damp
+        // Orthogonal 8x8 Walsh-Hadamard scaling (1 / sqrt(8)).
+        let hScale: Float = 0.35355339 * fb
+        // Calibrated to match the previous Freeverb's wet bus loudness.
+        let inGain: Float = 0.22
+        let outGain: Float = 0.45
         for i in 0..<count {
-            let input = (left[i] + right[i]) * 0.015
-            var outL: Float = 0, outR: Float = 0
-            for c in 0..<combsL.count {
-                outL += combsL[c].process(input, feedback: fb, damp: dp)
-                outR += combsR[c].process(input, feedback: fb, damp: dp)
-            }
-            for a in 0..<allpassL.count {
-                outL = allpassL[a].process(outL)
-                outR = allpassR[a].process(outR)
-            }
-            left[i] = outL
-            right[i] = outR
+            let xl = left[i] * inGain
+            let xr = right[i] * inGain
+            let d0 = lines[0].read(damp: dp), d1 = lines[1].read(damp: dp)
+            let d2 = lines[2].read(damp: dp), d3 = lines[3].read(damp: dp)
+            let d4 = lines[4].read(damp: dp), d5 = lines[5].read(damp: dp)
+            let d6 = lines[6].read(damp: dp), d7 = lines[7].read(damp: dp)
+
+            // Fast 8-point Walsh-Hadamard transform (3 butterfly stages).
+            let a0 = d0 + d1, a1 = d0 - d1, a2 = d2 + d3, a3 = d2 - d3
+            let a4 = d4 + d5, a5 = d4 - d5, a6 = d6 + d7, a7 = d6 - d7
+            let b0 = a0 + a2, b1 = a1 + a3, b2 = a0 - a2, b3 = a1 - a3
+            let b4 = a4 + a6, b5 = a5 + a7, b6 = a4 - a6, b7 = a5 - a7
+            let m0 = (b0 + b4) * hScale, m1 = (b1 + b5) * hScale
+            let m2 = (b2 + b6) * hScale, m3 = (b3 + b7) * hScale
+            let m4 = (b0 - b4) * hScale, m5 = (b1 - b5) * hScale
+            let m6 = (b2 - b6) * hScale, m7 = (b3 - b7) * hScale
+
+            // True-stereo injection with alternating signs for decorrelation.
+            lines[0].push(m0 + xl)
+            lines[1].push(m1 + xr)
+            lines[2].push(m2 - xl)
+            lines[3].push(m3 - xr)
+            lines[4].push(m4 + xl)
+            lines[5].push(m5 - xr)
+            lines[6].push(m6 - xl)
+            lines[7].push(m7 + xr)
+
+            left[i] = (d0 - d2 + d4 - d6) * outGain
+            right[i] = (d1 - d3 - d5 + d7) * outGain
         }
     }
 }
@@ -181,7 +207,9 @@ struct PingPongDelay {
 /// eight stems, not a mastering tool.
 struct Limiter {
     static let lookahead = 88  // 2 ms
-    private let release: Float
+    private let fastRelease: Float
+    private let slowRelease: Float
+    private let holdAlpha: Float
     private let ceiling: Float
     /// -0.3 dBFS: for playback.
     static let playbackCeiling: Float = 0.966
@@ -198,10 +226,16 @@ struct Limiter {
     private var pending = 0
     private var leastSum: Float
     private var gain: Float = 1
+    /// Smoothed gain reduction (0…1) to distinguish isolated transient
+    /// spikes (fast recovery, no pumping) from sustained dense limiting
+    /// (slower release, no distortion).
+    private var sustained: Float = 0
 
     init(sampleRate: Double, ceiling: Float = Limiter.playbackCeiling) {
         self.ceiling = ceiling
-        release = Float(exp(-1 / (0.15 * sampleRate)))
+        fastRelease = Float(exp(-1 / (0.04 * sampleRate)))
+        slowRelease = Float(exp(-1 / (0.15 * sampleRate)))
+        holdAlpha = Float(exp(-1 / (0.03 * sampleRate)))
         let n = Self.lookahead + 1
         delayL = [Float](repeating: 0, count: n)
         delayR = delayL
@@ -215,6 +249,7 @@ struct Limiter {
         for k in 0..<n { delayL[k] = 0; delayR[k] = 0; needed[k] = 1; least[k] = 1 }
         leastSum = Float(n)
         gain = 1
+        sustained = 0
         index = 0
         pending = 0
     }
@@ -237,7 +272,13 @@ struct Limiter {
             leastSum += m - least[index]
             least[index] = m
             let smooth = min(1, leastSum / Float(n))
-            gain = min(smooth, gain * release + (1 - release))
+            // Track sustained limiting density: isolated transient hits stay
+            // near 0 (fast 40 ms recovery); continuous dense limiting rises
+            // toward 1 (150 ms release).
+            let gr = 1 - smooth
+            sustained = holdAlpha * sustained + (1 - holdAlpha) * min(1, gr * 4)
+            let rel = fastRelease + sustained * (slowRelease - fastRelease)
+            gain = min(smooth, gain * rel + (1 - rel))
             // Out: the oldest frame in the delay (the one about to be
             // overwritten).
             let next = (index + 1) % n

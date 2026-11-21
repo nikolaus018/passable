@@ -180,4 +180,69 @@ struct KeyDetector {
         }
         return chroma
     }
+
+    /// Estimated concert-pitch tuning deviation from A4 = 440 Hz, in cents
+    /// (−50…+50). Tracks from vinyl rips or non-440 masters can sit 25–45
+    /// cents off standard pitch; layering two "same-key" songs that far
+    /// apart sounds audibly out of tune.
+    static func tuningCents(samples: [Float], sampleRate: Double) -> Float {
+        let factor = 4, frameSize = 8192, hopSize = 8192
+        let count = samples.count / factor
+        guard count >= frameSize else { return 0 }
+        var slow = [Float](repeating: 0, count: count)
+        let mean = [Float](repeating: 1 / Float(factor), count: factor)
+        vDSP_desamp(samples, vDSP_Stride(factor), mean, &slow, vDSP_Length(count), vDSP_Length(factor))
+
+        let fft = RealFFT(size: frameSize)
+        var window = [Float](repeating: 0, count: frameSize)
+        vDSP_hann_window(&window, vDSP_Length(frameSize), Int32(vDSP_HANN_NORM))
+        let binHz = sampleRate / Double(factor) / Double(frameSize)
+        let first = max(1, Int((110 / binHz).rounded(.up))), last = min(frameSize / 2 - 2, Int(1500 / binHz))
+        var frame = [Float](repeating: 0, count: frameSize)
+        // Circular 100-bin histogram (−50…+49 cents), smoothed slightly so
+        // peak finding handles wrap-around at ±50 cents cleanly.
+        var hist = [Double](repeating: 0, count: 100)
+        var total = 0.0
+
+        var offset = 0
+        while offset + frameSize <= count {
+            slow.withUnsafeBufferPointer {
+                vDSP_vmul($0.baseAddress! + offset, 1, window, 1, &frame, 1, vDSP_Length(frameSize))
+            }
+            offset += hopSize
+            let m = fft.magnitudes(of: frame)
+            var strongest: Float = 0
+            for k in first...last where m[k] > m[k - 1] && m[k] >= m[k + 1] { strongest = max(strongest, m[k]) }
+            guard strongest > 0 else { continue }
+            for k in first...last where m[k] > m[k - 1] && m[k] >= m[k + 1] && m[k] > 0.05 * strongest {
+                let a = log(Double(m[k - 1]) + 1e-12), b = log(Double(m[k])), c = log(Double(m[k + 1]) + 1e-12)
+                let curve = a - 2 * b + c
+                let bin = Double(k) + (curve < 0 ? max(-0.5, min(0.5, 0.5 * (a - c) / curve)) : 0)
+                let midi = 69 + 12 * log2(bin * binHz / 440)
+                let cents = (midi - midi.rounded()) * 100 // -50…+50
+                let idx = (Int((cents + 50).rounded()) % 100 + 100) % 100
+                let w = Double(m[k])
+                hist[idx] += w
+                total += w
+            }
+        }
+        guard total > 0 else { return 0 }
+        // Smooth over ±3 cents and pick the mode.
+        var bestIdx = 0, bestVal = -1.0
+        for i in 0..<100 {
+            var s = 0.0
+            for d in -3...3 { s += hist[(i + d + 100) % 100] }
+            if s > bestVal { bestVal = s; bestIdx = i }
+        }
+        // Circular weighted mean within ±15 cents of the mode.
+        var sumC = 0.0, sumW = 0.0
+        for d in -15...15 {
+            let w = hist[(bestIdx + d + 100) % 100]
+            sumC += Double(d) * w
+            sumW += w
+        }
+        let refined = Double(bestIdx) + (sumW > 0 ? sumC / sumW : 0) - 50
+        let wrapped = ((refined + 50).truncatingRemainder(dividingBy: 100) + 100).truncatingRemainder(dividingBy: 100) - 50
+        return Float(wrapped)
+    }
 }

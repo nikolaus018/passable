@@ -174,6 +174,10 @@ final class TrackProcessor: @unchecked Sendable {
                 cached.structure?.heardReference = TrackStructure.heardReference(stems: stems, grid: cached.grid)
                 StemCache.saveAnalysis(cached, to: directory)
             }
+            if cached.tuningCents == nil {
+                cached.tuningCents = TrackAnalyzer.tuningCents(stems: stems)
+                StemCache.saveAnalysis(cached, to: directory)
+            }
             // (Lines put on the grid another way: again, from the
             // words already heard.)
             if let structure = cached.structure, structure.vocalLines?.isEmpty == false,
@@ -292,7 +296,7 @@ final class TrackProcessor: @unchecked Sendable {
             let start = map.rampStart.isFinite ? String(Int(map.rampStart.rounded())) : "inf"
             let exit = map.hasExit
                 ? String(format: "-x%.9f-%d-%d", map.exitRate, Int(map.exitStart.rounded()), Int(map.exitLength.rounded())) : ""
-            return String(format: "v3-%.9f-%@-%d-%+d", map.rate, start, Int(map.rampLength.rounded()), semitones) + exit
+            return String(format: "v4-%.9f-%@-%d-%+d", map.rate, start, Int(map.rampLength.rounded()), semitones) + exit
         }
 
         func isSame(as other: MatchPlan) -> Bool {
@@ -343,7 +347,8 @@ final class TrackProcessor: @unchecked Sendable {
                         if ticket.isCancelled { throw CancellationError() }
                         let shift = kind == .drums ? 0 : plan.semitones
                         let matched = TimeStretcher.process(loaded.stems[kind]!.copyStereo(), map: plan.map,
-                                                            semitones: shift, percussive: kind == .drums)
+                                                            semitones: shift, percussive: kind == .drums,
+                                                            vocal: kind == .vocals)
                         if ticket.isCancelled { throw CancellationError() }
                         // (Sharing the song's file where it plays unchanged.)
                         try StemAudio.saveRendition(matched, source: loaded.stems[kind]!, sourceDirectory: loaded.directory,

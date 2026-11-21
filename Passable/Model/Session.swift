@@ -924,7 +924,8 @@ final class Session: ObservableObject {
                 audible: !lane.isMuted && (!anySolo || lane.isSoloed) && including(lane),
                 trim: Float(pow(10, trimDB(lane.side) / 20)),
                 rolls: rolls.filter { $0.side == lane.side && $0.stem == lane.stem }.sorted { $0.start < $1.start }
-                    .compactMap { MixSnapshot.FrameRoll($0, sampleRate: sr) })
+                    .compactMap { MixSnapshot.FrameRoll($0, sampleRate: sr) },
+                isVocal: lane.stem == .vocals)
         }
         // Dotted-eighth echo: syncopated against the grid, so repeats sit
         // between the kicks instead of on top of them.

@@ -14,6 +14,9 @@ struct TrackAnalysis: Codable, Equatable {
     /// checked on load.
     var tempoCheck: Int?
     static let tempoCheck = 5
+    /// Concert-pitch deviation from A4 = 440 Hz, in cents (−50…+50). Optional
+    /// so analyses cached before it existed still decode; filled on load.
+    var tuningCents: Float?
 
     static let currentVersion = 6
 
@@ -46,9 +49,17 @@ enum TrackAnalyzer {
         var grid = TempoEstimator.estimate(rhythm: rhythm, harmony: harmony, layers: layers, heard: heard, sampleRate: sr)
         if let heard { grid = bars(of: grid, heard: heard, duration: duration, stems: stems) }
         let key = KeyDetector.detect(samples: harmony, sampleRate: sr)
+        let tuning = KeyDetector.tuningCents(samples: harmony, sampleRate: sr)
         return TrackAnalysis(grid: grid, key: key, duration: duration,
                              structure: TrackStructure.measure(stems: stems, grid: grid),
-                             version: TrackAnalysis.currentVersion, tempoCheck: heard != nil ? TrackAnalysis.tempoCheck : nil)
+                             version: TrackAnalysis.currentVersion, tempoCheck: heard != nil ? TrackAnalysis.tempoCheck : nil,
+                             tuningCents: tuning)
+    }
+
+    /// Concert-pitch deviation from A4 = 440 Hz for stems already separated.
+    static func tuningCents(stems: [StemKind: StemAudio]) -> Float {
+        let harmony = sum(of: [stems[.bass], stems[.other]].compactMap { $0 })
+        return KeyDetector.tuningCents(samples: harmony, sampleRate: AudioIO.sampleRate)
     }
 
     /// `analysis` with its tempo checked for steadiness, for one made

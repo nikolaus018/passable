@@ -134,7 +134,7 @@ struct TransitionPanel: View {
             .frame(width: 120)
             .help(session.preset.summary)
             Picker("", selection: Binding(get: { session.transitionBars }, set: { session.chooseBars($0) })) {
-                ForEach([1, 2, 4, 8, 16, 32, 64], id: \.self) { Text("\($0) bars").tag($0) }
+                ForEach([1, 2, 4, 8, 16, 24, 32, 64], id: \.self) { Text("\($0) bars").tag($0) }
             }
             .labelsHidden()
             .frame(width: 86)

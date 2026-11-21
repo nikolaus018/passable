@@ -57,7 +57,7 @@ enum Lyrics {
 
     /// The languages tried, in this order, where their models are on the
     /// Mac (macOS installs them with dictation; the app asks for none).
-    static let locales = ["en-US", "de-DE"]
+    static let locales = ["en-US", "de-DE", "es-ES", "es-MX", "fr-FR", "it-IT", "pt-BR", "ja-JP", "ko-KR", "nl-NL", "tr-TR"]
 
     /// Off for a run that shouldn't wait for it (unit tests of the loader).
     nonisolated(unsafe) static var isEnabled = true

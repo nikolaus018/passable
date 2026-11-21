@@ -1227,4 +1227,114 @@ final class PayoffTests: XCTestCase {
                                            drumsLayer: false).lanes.first { $0.side == .b && $0.stem == .drums }!
         XCTAssertEqual(plain.value(.volume, at: 10), 0, accuracy: 0.01)
     }
+
+    func testTuningCentsDetectsDetunedTrack() {
+        let sr = AudioIO.sampleRate
+        let n = Int(sr * 4)
+        func tone(_ hz: Double) -> [Float] {
+            (0..<n).map { Float(0.4 * sin(2 * Double.pi * hz * Double($0) / sr)) }
+        }
+        let standard = KeyDetector.tuningCents(samples: tone(440), sampleRate: sr)
+        let sharp35 = KeyDetector.tuningCents(samples: tone(440 * pow(2, 35.0 / 1200)), sampleRate: sr)
+        XCTAssertEqual(standard, 0, accuracy: 3)
+        XCTAssertEqual(sharp35, 35, accuracy: 3)
+        XCTAssertTrue(AutoPlacement.tuningClash(standard, sharp35))
+        XCTAssertFalse(AutoPlacement.tuningClash(standard, 8))
+    }
+
+    func testBarByBarRoughnessCatchesSameKeyChordGrind() {
+        // Two songs both in C major: A alternates F major (5,9,0) and G major (7,11,2),
+        // B alternates G major and F major. Aggregate chroma is identical, yet every
+        // single bar grinds F+A+C against G+B+D.
+        func chord(_ pcs: [Int]) -> [Float] { (0..<12).map { pcs.contains($0) ? 10 : 0 } }
+        let fMaj = chord([5, 9, 0]), gMaj = chord([7, 11, 2])
+        let bars = 32
+        var sa = TrackStructure(activity: ["drums": [Float](repeating: 1, count: bars),
+                                           "other": [Float](repeating: 1, count: bars)],
+                                loudness: [Float](repeating: -10, count: bars))
+        sa.stemLevel = ["other": [Float](repeating: -14, count: bars), "bass": [Float](repeating: -14, count: bars)]
+        sa.harmonyChroma = (0..<bars).map { $0 % 2 == 0 ? fMaj : gMaj }
+        sa.melodyChroma = sa.harmonyChroma
+
+        var sbAligned = sa
+        var sbGrinding = sa
+        sbGrinding.harmonyChroma = (0..<bars).map { $0 % 2 == 0 ? gMaj : fMaj }
+        sbGrinding.melodyChroma = sbGrinding.harmonyChroma
+
+        let aligned = AutoPlacement.barByBarRoughness(a: sa, entry: 8, b: sbAligned, cue: 0,
+                                                      preset: .stemSwap, bars: 16, lowSwap: 8)
+        let grinding = AutoPlacement.barByBarRoughness(a: sa, entry: 8, b: sbGrinding, cue: 0,
+                                                       preset: .stemSwap, bars: 16, lowSwap: 8)
+        XCTAssertNotNil(aligned)
+        XCTAssertNotNil(grinding)
+        XCTAssertLessThan(aligned!.mean, 0.05)
+        XCTAssertGreaterThan(grinding!.mean, 0.15)
+    }
+
+    func testCombinedLowEndUsedInSags() {
+        let bars = 32
+        var s = TrackStructure(activity: ["drums": [Float](repeating: 1, count: bars),
+                                          "bass": [Float](repeating: 0.05, count: bars)],
+                               loudness: [Float](repeating: -10, count: bars))
+        // 808 kick carries full low end inside the drums stem.
+        s.stemLowLevel = ["drums": [Float](repeating: -12, count: bars),
+                          "bass": [Float](repeating: -70, count: bars),
+                          "other": [Float](repeating: -70, count: bars),
+                          "vocals": [Float](repeating: -70, count: bars)]
+        XCTAssertFalse(s.sags(10), "808 kick in drums counts as full low end")
+        XCTAssertTrue(s.loops(before: 16, bars: 4), "can loop an 808 track's full bars")
+    }
+
+    func testBuildStylesWriteCleanAutomation() {
+        for style in TransitionBuilder.BuildStyle.allCases {
+            let made = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 100, barSeconds: 2, bars: 16,
+                                              lowSwap: 8, dropMoment: true, buildStyle: style)
+            for lane in made.lanes {
+                for p in LaneParameter.allCases {
+                    let pts = lane[p].points
+                    for k in pts.indices.dropFirst() where abs(pts[k].value - pts[k - 1].value) > 0.05 {
+                        XCTAssertNotEqual(pts[k - 1].curve, .hold, "\(style) \(lane.id) \(p.shortName)")
+                        XCTAssertGreaterThanOrEqual(pts[k].time - pts[k - 1].time, 0.0019, "\(style) \(lane.id) \(p.shortName)")
+                    }
+                }
+            }
+        }
+    }
+
+    func testWordTargetedEchoThrowAndMashupPocket() {
+        // Word-targeted echo: delay stays closed until the last word (~7.75).
+        let targeted = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16,
+                                              lowSwap: 8, vocalOut: 8, vocalThrowStart: 7.75)
+        let vocalA = targeted.lanes.first { $0.side == .a && $0.stem == .vocals }!
+        XCTAssertEqual(vocalA.value(.delay, at: 2 * 7.2), 0, accuracy: 1e-6, "silent before the last word")
+        XCTAssertGreaterThan(vocalA.value(.delay, at: 2 * 7.85), 0.7, "open on the last word")
+
+        // Mashup melody pocket: A's melody mids dip while B's vocal sings over A.
+        let mash = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16,
+                                          vocalBar: 4, lowSwap: 8, vocalIn: 4, mashup: true, mashupUnder: 5)
+        let otherA = mash.lanes.first { $0.side == .a && $0.stem == .other }!
+        XCTAssertLessThan(LaneParameter.eqDecibels(otherA.value(.mid, at: 2 * 5.5)), -4, "A's melody mids pocketed under B's vocal")
+    }
+
+    func testBeatAlignSubdivisionClashAndDrift() {
+        let sr = AudioIO.sampleRate, seconds = 12, beat = 0.5
+        func pattern(_ offsets: [Double]) -> [Float] {
+            var x = [Float](repeating: 0, count: Int(Double(seconds) * sr))
+            for b in 0..<(seconds * 2) {
+                for o in offsets {
+                    let at = Int((Double(b) * beat + o * beat) * sr)
+                    for i in 0..<120 where at + i < x.count {
+                        x[at + i] += Float(sin(Double(i) * 0.7) * exp(-Double(i) / 30))
+                    }
+                }
+            }
+            return x
+        }
+        let straight = pattern([0, 0.25, 0.5, 0.75])
+        let triplet = pattern([0, 1.0 / 3, 2.0 / 3])
+        XCTAssertTrue(BeatAlign.subdivisionClash(a: straight, b: triplet, beatSeconds: beat))
+        XCTAssertFalse(BeatAlign.subdivisionClash(a: straight, b: straight, beatSeconds: beat))
+        XCTAssertTrue(BeatAlign.drifts([0.0, 0.006, 0.013, 0.020]))
+        XCTAssertFalse(BeatAlign.drifts([0.002, -0.001, 0.003, 0.001]))
+    }
 }
