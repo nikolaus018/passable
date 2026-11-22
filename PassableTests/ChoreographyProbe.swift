@@ -152,7 +152,7 @@ final class ChoreographyProbe: XCTestCase {
         // crossfade over `lowRamp` (18 ms) so they never tick: see
         // `TransitionBuilder.switchBeforeTheBeat`.)
         let lead = TransitionBuilder.switchLead / 1
-        let lowRamp = TransitionBuilder.lowRamp / 1
+        let lowRamp = max(TransitionBuilder.lowRamp, TransitionBuilder.melodyRamp) / 1
         let vocalCloseLead = (TransitionBuilder.switchLead + TransitionBuilder.vocalRelease) / 1
         let from = echo ? -Double(min(n, 8)) - 2 : -2.0
         let to = Double(n) + 6
