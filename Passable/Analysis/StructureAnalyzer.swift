@@ -90,10 +90,63 @@ final class StructureAnalyzer: @unchecked Sendable {
     }
 
     private func predict(specs: [[Float]], frames: Int) throws -> (section: [Float], function: [Float]) {
+        let targetFrames = fixedFrames ?? frames
+        if frames <= targetFrames {
+            return try predictWindow(specs: specs, offset: 0, runFrames: frames, targetFrames: targetFrames)
+        }
+        return try Self.stitchWindows(totalFrames: frames, windowFrames: targetFrames, numLabels: Self.labels.count) { offset, runFrames in
+            try self.predictWindow(specs: specs, offset: offset, runFrames: runFrames, targetFrames: targetFrames)
+        }
+    }
+
+    /// Runs overlapping `windowFrames` inference windows over a long track
+    /// (`totalFrames > windowFrames`, e.g. >7 min extended club mixes) and
+    /// crossfades their overlap zones linearly so predictions stay seamless
+    /// to the end of the song.
+    static func stitchWindows(totalFrames: Int, windowFrames: Int, numLabels: Int,
+                              predict: (Int, Int) throws -> (section: [Float], function: [Float])) throws -> (section: [Float], function: [Float]) {
+        let overlap = min(6_000, max(1, windowFrames / 4))
+        let stride = max(1, windowFrames - overlap)
+        var section = [Float](repeating: 0, count: totalFrames)
+        var function = [Float](repeating: 0, count: numLabels * totalFrames)
+        var weights = [Float](repeating: 0, count: totalFrames)
+
+        var offsets: [Int] = []
+        var off = 0
+        while off + windowFrames < totalFrames {
+            offsets.append(off)
+            off += stride
+        }
+        offsets.append(max(0, totalFrames - windowFrames))
+
+        for (idx, start) in offsets.enumerated() {
+            let run = min(windowFrames, totalFrames - start)
+            let (sec, fn) = try predict(start, run)
+            let fadeIn = idx > 0 ? min(overlap, run / 2) : 0
+            let fadeOut = idx + 1 < offsets.count ? min(overlap, run / 2) : 0
+            for t in 0..<run {
+                let wIn: Float = fadeIn > 0 && t < fadeIn ? Float(t + 1) / Float(fadeIn + 1) : 1
+                let wOut: Float = fadeOut > 0 && t >= run - fadeOut ? Float(run - t) / Float(fadeOut + 1) : 1
+                let w = min(wIn, wOut)
+                let dst = start + t
+                section[dst] += sec[t] * w
+                weights[dst] += w
+                for c in 0..<numLabels {
+                    function[c * totalFrames + dst] += fn[c * run + t] * w
+                }
+            }
+        }
+        for t in 0..<totalFrames where weights[t] > 0 {
+            let inv = 1.0 / weights[t]
+            section[t] *= inv
+            for c in 0..<numLabels { function[c * totalFrames + t] *= inv }
+        }
+        return (section, function)
+    }
+
+    private func predictWindow(specs: [[Float]], offset: Int, runFrames: Int, targetFrames: Int) throws -> (section: [Float], function: [Float]) {
         let numLabels = Self.labels.count
         let bands = Self.bands
-        let targetFrames = fixedFrames ?? frames
-        let runFrames = min(frames, targetFrames)
         let input = try MLMultiArray(shape: [1, 4, NSNumber(value: targetFrames), NSNumber(value: bands)],
                                      dataType: .float32)
         let ptr = input.dataPointer.assumingMemoryBound(to: Float.self)
@@ -101,7 +154,7 @@ final class StructureAnalyzer: @unchecked Sendable {
         for k in 0..<4 {
             let dst = ptr + k * targetFrames * bands
             specs[k].withUnsafeBufferPointer { src in
-                dst.update(from: src.baseAddress!, count: runFrames * bands)
+                dst.update(from: src.baseAddress! + offset * bands, count: runFrames * bands)
             }
         }
         lock.lock()
@@ -117,18 +170,18 @@ final class StructureAnalyzer: @unchecked Sendable {
               let fnArr = out.featureValue(for: "function")?.multiArrayValue else {
             throw PassableError.message("Structure model returned incomplete outputs.")
         }
-        var section = [Float](repeating: 0, count: frames)
+        var section = [Float](repeating: 0, count: runFrames)
         let secStride = secArr.strides.last?.intValue ?? 1
         for t in 0..<runFrames {
             section[t] = secArr[t * secStride].floatValue
         }
         // function shape: [1, 10, T]
-        var function = [Float](repeating: 0, count: numLabels * frames)
+        var function = [Float](repeating: 0, count: numLabels * runFrames)
         let fnStrides = fnArr.strides.map(\.intValue)
         let cStride = fnStrides.count >= 2 ? fnStrides[fnStrides.count - 2] : targetFrames
         let tStride = fnStrides.last ?? 1
         for c in 0..<numLabels {
-            let row = c * frames
+            let row = c * runFrames
             let base = c * cStride
             for t in 0..<runFrames {
                 function[row + t] = fnArr[base + t * tStride].floatValue
@@ -157,8 +210,9 @@ final class StructureAnalyzer: @unchecked Sendable {
         let n = fftSize, half = n / 2
         guard count > 0 else { return [] }
         let frames = (count + hop - 1) / hop
-        var window = [Float](repeating: 0, count: n)
-        vDSP_hann_window(&window, vDSP_Length(n), Int32(vDSP_HANN_DENORM))
+        // Symmetric Hann window matching `np.hanning(2048)` used by madmom.
+        let denom = Double(n - 1)
+        let window = (0..<n).map { Float(0.5 - 0.5 * cos(2.0 * Double.pi * Double($0) / denom)) }
         let log2n = vDSP_Length(log2(Double(n)))
         let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))!
         defer { vDSP_destroy_fftsetup(setup) }

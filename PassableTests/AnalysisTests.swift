@@ -375,3 +375,69 @@ final class HandoverPriceTests: XCTestCase {
         }
     }
 }
+
+final class StructureAnalyzerTests: XCTestCase {
+    func testFilterbankHas81NormalizedBands() {
+        let fb = StructureAnalyzer.filterbank
+        XCTAssertEqual(fb.count, StructureAnalyzer.bands)
+        for band in fb {
+            XCTAssertGreaterThanOrEqual(band.startBin, 0)
+            XCTAssertLessThanOrEqual(band.startBin + band.weights.count, StructureAnalyzer.fftBins)
+            XCTAssertEqual(band.weights.reduce(0, +), 1.0, accuracy: 1e-4)
+        }
+    }
+
+    func testLogFilteredSpectrogramMatchesExpectedDimensionsAndPeak() {
+        let sr = StructureAnalyzer.sampleRate
+        let n = Int(sr * 1.0)
+        // Pure 440 Hz sine wave: should light up the band nearest 440 Hz and stay finite/non-negative.
+        let mono = (0..<n).map { Float(0.5 * sin(2.0 * Double.pi * 440.0 * Double($0) / sr)) }
+        let spec = StructureAnalyzer.logFilteredSpectrogram(mono)
+        let expectedFrames = (n + StructureAnalyzer.hop - 1) / StructureAnalyzer.hop
+        XCTAssertEqual(spec.count, expectedFrames * StructureAnalyzer.bands)
+        XCTAssertTrue(spec.allSatisfy { $0.isFinite && $0 >= 0 })
+        // Middle frame peak should sit on the band whose filter peaks at 440 Hz (~bin 20).
+        let targetBin = Int((440.0 * Double(StructureAnalyzer.fftSize) / sr).rounded())
+        let expectedBand = StructureAnalyzer.filterbank.indices.max { a, b in
+            func weight(_ i: Int) -> Float {
+                let f = StructureAnalyzer.filterbank[i]
+                let j = targetBin - f.startBin
+                return (j >= 0 && j < f.weights.count) ? f.weights[j] : 0
+            }
+            return weight(a) < weight(b)
+        }!
+        let mid = (expectedFrames / 2) * StructureAnalyzer.bands
+        let row = Array(spec[mid..<(mid + StructureAnalyzer.bands)])
+        let peakBand = row.indices.max { row[$0] < row[$1] }!
+        XCTAssertTrue(abs(peakBand - expectedBand) <= 1, "expected 440 Hz peak near band \(expectedBand), got \(peakBand)")
+        XCTAssertGreaterThan(row[peakBand], 0.5)
+    }
+
+    func testStitchWindowsCoversLongTracksSeamlessly() throws {
+        // Simulate a 10-minute track (60,000 frames) with a 42,000-frame model window.
+        let total = 60_000, window = 42_000, numLabels = 10
+        var calls: [(Int, Int)] = []
+        let (sec, fn) = try StructureAnalyzer.stitchWindows(totalFrames: total, windowFrames: window, numLabels: numLabels) { offset, run in
+            calls.append((offset, run))
+            // Return an exact linear ramp of frame index / total so any stitching error shows up.
+            let s = (0..<run).map { Float(offset + $0) / Float(total) }
+            var f = [Float](repeating: 0, count: numLabels * run)
+            for c in 0..<numLabels {
+                for t in 0..<run {
+                    f[c * run + t] = Float(c) * 0.05 + Float(offset + t) / Float(total)
+                }
+            }
+            return (s, f)
+        }
+        XCTAssertEqual(calls.count, 2, "60k frames with 42k window and 6k overlap needs 2 windows")
+        XCTAssertEqual(sec.count, total)
+        XCTAssertEqual(fn.count, numLabels * total)
+        for t in stride(from: 0, to: total, by: 997) {
+            let expected = Float(t) / Float(total)
+            XCTAssertEqual(sec[t], expected, accuracy: 1e-5, "frame \(t)")
+            XCTAssertEqual(fn[9 * total + t], 0.45 + expected, accuracy: 1e-5, "chorus frame \(t)")
+        }
+        // Last frame (past 7 minutes!) is faithfully populated, not zeroed.
+        XCTAssertEqual(sec[total - 1], Float(total - 1) / Float(total), accuracy: 1e-5)
+    }
+}

@@ -71,11 +71,11 @@ enum MixMath {
     nonisolated(unsafe) static var cutCost = 15.0
 
     /// What a pair whose keys clash (melodies swap, never layer) costs
-    /// the order on top. Gently raised to 3.5 so large sets prefer Camelot-
-    /// compatible neighbors, unlocking more harmonic blends and club mashups
-    /// without introducing extra tempo cuts.
+    /// the order on top. Raised to 5.0 (still well below `cutCost = 15.0`
+    /// so it adds zero extra tempo cuts) so Auto-Order strongly prefers
+    /// harmonic neighbors and avoids swap-only pairs.
     /// Variable only for passable-render's trials.
-    nonisolated(unsafe) static var clashCost = 3.5
+    nonisolated(unsafe) static var clashCost = 5.0
 
     /// Up to this (each song no more than 4 % off its own tempo) a blend
     /// may run long. Past it the blend is a quick one: both songs are off
@@ -320,27 +320,26 @@ struct PairPlan: Equatable {
         }
         if preset == .stemSwap {
             options.append((.stemSwap, 8, length(8), 0))
-            options.append((.dropSwap, 16, length(16) - 0.2, 0))
-            options.append((.dropSwap, 8, length(8) - 0.2, 0))
-            // Electronic / low-vocal groove pairs at close tempos and
-            // compatible keys can ride a lush 24-bar Long Blend.
-            if MixMath.stretch(rate) < 0.04, !clash(0),
-               let sa = a.structure, let sb = b.structure {
-                let vA = sa.meanActivity(.vocals, bars: (sa.loudness.count / 2)..<sa.loudness.count)
-                let vB = sb.meanActivity(.vocals, bars: 0..<max(4, sb.loudness.count / 4))
-                if (vA < 0.40 && vB < 0.50) || (vA < 0.50 && vB < 0.40) {
-                    options.append((.longBlend, 24, length(24) - 0.1, 0))
+            options.append((.dropSwap, 16, length(16) - 0.1, 0))
+            options.append((.dropSwap, 8, length(8) - 0.1, 0))
+            // Groove-led harmonic pairs at close tempos can ride a 16- or
+            // 24-bar Long Blend; placement checks vocal density on the actual
+            // bars being mixed rather than a whole-song average.
+            if MixMath.stretch(rate) < 0.05, !clash(0) {
+                options.append((.longBlend, 16, length(16), 0))
+                if Double(24) * barSeconds <= MixMath.maxBlendSeconds {
+                    options.append((.longBlend, 24, length(24) + 0.1, 0))
                 }
             }
             // Full club mashup candidates (16 or 24 bars, with or without A's
             // 4-bar groove looped underneath) when tempos and keys fit.
             // Placement strictly verifies B's vocal presence and chord fit.
             if allowMashup, !clash(0), MixMath.stretch(rate) < MixMath.mashupStretch {
-                options.append((.mashup, 16, length(16) + 0.15, 0))
-                if loops { options.append((.mashup, 16, length(16) + 0.15, MixMath.loopBars)) }
+                options.append((.mashup, 16, length(16) + 0.25, 0))
+                if loops { options.append((.mashup, 16, length(16) + 0.25, MixMath.loopBars)) }
                 if Double(24) * barSeconds <= MixMath.maxBlendSeconds {
-                    options.append((.mashup, 24, length(24) + 0.05, 0))
-                    if loops { options.append((.mashup, 24, length(24) + 0.05, MixMath.loopBars)) }
+                    options.append((.mashup, 24, length(24) + 0.15, 0))
+                    if loops { options.append((.mashup, 24, length(24) + 0.15, MixMath.loopBars)) }
                 }
             }
             // And each Stem Swap over A's beat looped (see
@@ -436,16 +435,17 @@ struct PairPlan: Equatable {
         default: cost = 0.15 + 0.14 * (stretch - 3)
         }
         // Clashing songs can't blend, only swap: next to each other they
-        // sound like two songs in a row. (A Wash Out never plays the two
-        // together, and is priced as what it is above.)
-        if keysClash, preset != .echoOut { cost += MixMath.clashCost }
+        // sound like two songs in a row. When their drum grooves don't lock
+        // either, nothing can overlap before the swap at all.
+        if keysClash, preset != .echoOut {
+            cost += MixMath.clashCost + (drumsLock ? 0 : 1.5)
+        }
         // Nor can a blend where placement already knows the two are hardly
         // heard together (a short one, B's intro too thin under A): as much
         // two songs in a row as a clash, so priced like one.
-        // (0.4 a bar short: at 0.2 a 58-song set ordered itself into 14
-        // such pairs where a set ordered by hand had 10.)
         if preset != .echoOut, let together = placement.together {
-            cost += 0.4 * Double(max(0, min(6, bars / 2 + 2) - together))
+            let short = max(0, min(6, bars / 2 + 2) - together)
+            cost += 0.55 * Double(short) + 0.6 * Double(max(0, 4 - together))
         }
         // A song a semitone off its own key, for all of its time in the
         // set: only worth it where nothing else sits.
@@ -473,7 +473,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "33"
+    static let planner = "34"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -2232,7 +2232,8 @@ enum VocalPhrasing {
             if silent(gap) {
                 kind = silent(gap - 1) || silent(gap + 1) || near ? .line : .word
             } else if opening ? level(k) - level(k - 1) >= 10 : level(k - 1) - level(k) >= 10 {
-                (kind, extra) = near ? (.line, 0.1) : (.word, 0.25)
+                let quietSide = level(gap) < reference - 12
+                (kind, extra) = near && quietSide ? (.line, 0.1) : (.word, 0.25)
             } else if turn {
                 // (A breath, where there is one as near, is still the
                 // cleaner cut. Where the voice stops or starts a sixteenth
@@ -2484,7 +2485,7 @@ enum VocalPhrasing {
             winMax[k] = m
             if let sung {
                 let t = lo + Double(k) * step
-                free[k] = m < localP90 - 18 || !sung(t)
+                free[k] = m < localP90 - 15 || !sung(t)
             }
         }
         let useFree = free.contains(true)
@@ -2495,18 +2496,44 @@ enum VocalPhrasing {
             if winMax[k] < bestVal { bestVal = winMax[k]; bestIdx = k }
         }
         guard bestVal.isFinite else { return nil }
+        // If Whisper's word-boundary mask forced a hot cut (> -15 dB), check
+        // whether an acoustic valley exists nearby unrestricted; real silence
+        // in the stem beats ±125 ms recognizer jitter.
+        if useFree && sung != nil && bestVal > localP90 - 15 {
+            var anyVal: Float = .infinity, anyIdx = 0
+            for k in 0..<candCount where winMax[k] < anyVal { anyVal = winMax[k]; anyIdx = k }
+            if anyVal <= min(bestVal - 4, localP90 - 16) || anyVal <= localP90 - 19 {
+                bestVal = anyVal; bestIdx = anyIdx
+            }
+        }
         let chosen: Int
         if bestVal <= localP90 - 20 {
             let thresh = min(localP90 - 20, max(bestVal + 3, localP90 - 26))
             if opening {
-                chosen = (0..<candCount).last { (!useFree || free[$0]) && winMax[$0] <= thresh } ?? bestIdx
+                chosen = (0..<candCount).last { (!useFree || free[$0] || winMax[$0] <= localP90 - 16) && winMax[$0] <= thresh } ?? bestIdx
             } else {
-                chosen = (0..<candCount).first { (!useFree || free[$0]) && winMax[$0] <= thresh } ?? bestIdx
+                chosen = (0..<candCount).first { (!useFree || free[$0] || winMax[$0] <= localP90 - 16) && winMax[$0] <= thresh } ?? bestIdx
             }
         } else {
             chosen = bestIdx
         }
         return (lo + Double(chosen) * step, winMax[chosen])
+    }
+
+    /// Fallback acoustic valley finder when `cut(...)` returns nil: scans
+    /// `±reach` around `target` (clamped to `earliest...latest`) and picks the
+    /// nearest point whose switch window stays quiet (`<= p90 - 16 dB`), or
+    /// the quietest moment available if none is that deep.
+    static func cleanNear(_ stem: StemAudio, offset: Double, opening: Bool, target: Double,
+                          earliest: Double, latest: Double, bar: Double, reach: Double = 0.35) -> Double {
+        let lo = max(earliest, target - reach * bar)
+        let hi = min(latest, target + reach * bar)
+        guard hi > lo else { return min(latest, max(earliest, target)) }
+        let p90 = localFiveMsP90(stem, offset: offset, around: target, bar: bar)
+        guard let placed = placeCleanCut(stem, offset: offset, from: lo, to: hi, opening: opening, localP90: p90) else {
+            return min(latest, max(earliest, target))
+        }
+        return min(latest, max(earliest, placed.time))
     }
 
     /// The breath's edge in the audio near `time` (master seconds, within
@@ -2647,10 +2674,10 @@ enum VocalPhrasing {
                 }
                 if var placed = placeCleanCut(stem, offset: offset, from: lo, to: hi, opening: opening, localP90: p90) {
                     if placed.worstDB > p90 - 15 {
-                        let wideLo = max(earliest, anchor - 2 * slot)
-                        let wideHi = min(latest, anchor + 2 * slot)
+                        let wideLo = max(earliest, anchor - 8 * slot)
+                        let wideHi = min(latest, anchor + 8 * slot)
                         if let alt = placeCleanCut(stem, offset: offset, from: wideLo, to: wideHi, opening: opening, localP90: p90),
-                           alt.worstDB <= placed.worstDB - 4 || alt.worstDB <= p90 - 17 {
+                           alt.worstDB <= placed.worstDB - 4 || alt.worstDB <= p90 - 16 {
                             placed = alt
                         }
                     }
@@ -2679,14 +2706,14 @@ enum VocalPhrasing {
                 worstDB = p90
             }
             // Acoustic trough safeguard: if the chosen switch window still lands
-            // inside hot vocal energy (>-16 dB vs local 5 ms p90), widen locally
-            // (±5 sixteenths within earliest...latest) and shift only if a
-            // genuinely quiet valley is found.
-            if worstDB > p90 - 16 {
-                let wideLo = max(earliest, t - 5 * slot)
-                let wideHi = min(latest, t + 5 * slot)
+            // inside hot vocal energy (>-15 dB vs local 5 ms p90), widen locally
+            // (±8 sixteenths = half a bar within earliest...latest) and shift if
+            // a genuinely quiet valley is found.
+            if worstDB > p90 - 15 {
+                let wideLo = max(earliest, t - 8 * slot)
+                let wideHi = min(latest, t + 8 * slot)
                 if let alt = placeCleanCut(stem, offset: offset, from: wideLo, to: wideHi, opening: opening, localP90: p90),
-                   alt.worstDB <= min(worstDB - 5, p90 - 17) || alt.worstDB <= p90 - 20 {
+                   alt.worstDB <= min(worstDB - 4, p90 - 16) || alt.worstDB <= p90 - 18 {
                     t = alt.time
                 }
             }
@@ -2793,6 +2820,7 @@ enum SetBuilder {
         let acapellaBridge: Bool
         let allowFakeout: Bool
         let allowTease: Bool
+        let allowTurntableDrop: Bool
         let pacing: SetPacing?
         let moves: AutoMoves
     }
@@ -2802,7 +2830,7 @@ enum SetBuilder {
     static let dropMomentBars = 16
 
     /// Bars with nobody singing over a loop that make it not worth looping.
-    static let loopVoicelessBars = 2.0
+    static let loopVoicelessBars = 1.5
 
     /// dB under A's own level (as the automation predicts it, which reads
     /// shallower than the audio) that makes a bar of the blend a hole, and
@@ -2877,9 +2905,9 @@ enum SetBuilder {
             let hits = BeatAlign.attacks(of: tracks.map(\.loaded))
             // Semitones each track plays shifted by.
             var shifts = [0]
-            // Space full automatic club mashups at least 4 tracks apart so they
+            // Space full automatic club mashups at least 3 tracks apart so they
             // land as special set highlights rather than running back to back.
-            var sinceMashup = 4
+            var sinceMashup = 3
             for k in 1..<tracks.count {
                 if Task.isCancelled { throw CancellationError() }
                 progress("Planning \(k)/\(tracks.count - 1)")
@@ -2918,19 +2946,19 @@ enum SetBuilder {
                                       : hits[k - 1].flatMap { x in hits[k].map { (a: x, b: $0) } },
                                   fixed: chosen, clashing: clashed.contains(key),
                                   locking: locked.contains(key) && !unlocked.contains(key),
-                                  loops: loops, allowMashup: sinceMashup >= 4,
+                                  loops: loops, allowMashup: sinceMashup >= 3,
                                   targetSoloSeconds: soloSecondsFor(a.analysis))
                 }
                 var plan = planned(loops: true)
                 // A's voice leaves as its beat starts to loop: where B's
-                // wouldn't arrive for two bars or more, nobody sings over
-                // the loop. Played without one instead, if that still
-                // blends the two songs as well.
+                // wouldn't arrive for 1.5 bars or more, nobody sings over
+                // the loop. Played without one instead whenever the plain
+                // blend still gives a solid overlap.
                 if !byHand, chosen == nil, plan.placement.loopBars > 0,
                    let due = plan.placement.expectedVocalIn, due >= Self.loopVoicelessBars {
                     let plain = planned(loops: false)
                     if plain.preset != .echoOut,
-                       (plain.placement.together ?? 0) >= (plan.placement.together ?? 0) {
+                       (plain.placement.together ?? 0) >= min(4, plan.placement.together ?? 0) {
                         plan = plain
                     }
                 }
@@ -3032,6 +3060,7 @@ enum SetBuilder {
         var cutFxIndex = 0
         var sinceFakeout = 4
         var sinceTease = 3
+        var sinceTurntable = 12
         // Pairs planned for grooves that lock which turned out not to, and
         // for melodies that layer which turned out to clash.
         var broken: Set<PairKey> = [], clashing: Set<PairKey> = [], locking: Set<PairKey> = []
@@ -3109,6 +3138,7 @@ enum SetBuilder {
             if cutEligible { cutFxIndex += 1 }
             let allowFakeout = drops && sinceFakeout >= 4 && moves.contains(.fakeouts)
             let allowTease = !byHand && sinceTease >= 3 && moves.contains(.vocalTeases)
+            let allowTurntableDrop = drops && sinceTurntable >= 12 && moves.contains(.turntable)
             let buildKey = BuildKey(a: a.url, b: tracks[k].url, analysisA: a.loaded.analysis, analysisB: b.analysis,
                                     renditionA: plans[k - 1], rateB: map.rate, rampStartB: map.rampStart,
                                     rampLengthB: map.rampLength, skip: skippedBars > 0 ? draft.skip : nil, plan: plan,
@@ -3116,7 +3146,8 @@ enum SetBuilder {
                                     barSeconds: blendBar, shiftA: shifts[k - 1], drops: drops,
                                     lastStyle: drops ? lastBuildStyle : nil, vinylBrake: vinylBrake,
                                     spinback: spinback, acapellaBridge: acapellaBridge,
-                                    allowFakeout: allowFakeout, allowTease: allowTease, pacing: pacing, moves: moves)
+                                    allowFakeout: allowFakeout, allowTease: allowTease,
+                                    allowTurntableDrop: allowTurntableDrop, pacing: pacing, moves: moves)
             if let previous, let old = previous.transitions.first(where: { $0.made?.key == buildKey }), let made = old.made,
                previous.tracks.indices.contains(old.to) {
                 // Built before from exactly this: the same transition, at
@@ -3138,6 +3169,8 @@ enum SetBuilder {
                     : drops ? 0 : sinceDrop + 1
                 if drops {
                     if old.payoff.contains("fakeout drop") { lastBuildStyle = .fakeoutDrop; sinceFakeout = 0 }
+                    else if old.payoff.contains("spinback into the drop") { lastBuildStyle = .spinbackDrop; sinceTurntable = 0 }
+                    else if old.payoff.contains("vinyl brake into the drop") { lastBuildStyle = .brakeDrop; sinceTurntable = 0 }
                     else if old.payoff.contains("3/16 poly-roll into the drop") { lastBuildStyle = .polyRoll }
                     else if old.payoff.contains("stutter gate into the drop") { lastBuildStyle = .stutterGate }
                     else if old.payoff.contains("a cappella break into the drop") { lastBuildStyle = .acappellaBreak }
@@ -3147,6 +3180,9 @@ enum SetBuilder {
                     else if old.payoff.contains("roll into the drop") { lastBuildStyle = .snareRoll }
                 }
                 if !old.payoff.contains("fakeout drop") { sinceFakeout += 1 }
+                if !old.payoff.contains("spinback into the drop") && !old.payoff.contains("vinyl brake into the drop") {
+                    sinceTurntable += 1
+                }
                 sinceTease = old.payoff.contains("vocal tease") ? 0 : sinceTease + 1
                 continue
             }
@@ -3499,7 +3535,7 @@ enum SetBuilder {
                 /// a beat it grooves with: a voice phrased against another
                 /// groove sounds off time.
                 func carries(until: Double) -> Bool {
-                    loop == 0 && !keysClash && align.grooves && until > sw
+                    loop == 0 && !keysClash && (align.grooves || hats) && until > sw
                         && Harmony.fits([vocalsA], aOffset: aOffset,
                                         [matched.stems[.other], matched.stems[.bass]].compactMap { $0 },
                                         bOffset: offset + nudge, from: start + sw * bar, to: start + min(until, n) * bar)
@@ -3557,15 +3593,22 @@ enum SetBuilder {
                         // (From half a bar before it's due where that's
                         // allowed: a line often starts with a pickup
                         // ahead of its bar.)
+                        let aSingsAtAim = saPlays?.isActive(.vocals, bar: edit.entryBar + Int(aim)) ?? true
+                        let alone = loop > 0 || keysClash || !aSingsAtAim
+                        let earliestIn = start + max(0, aim - (keysClash ? 0 : 0.5)) * bar - (keysClash ? 0.05 : 0)
+                        let latestIn = start + AutoPlacement.entryLatest(bCounted.structure, aim: aim, bars: edit.bars, alone: alone) * bar
                         if let cut = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: ref, opening: true,
                                                        target: start + aim * bar,
-                                                       earliest: start + max(0, aim - (keysClash ? 0 : 0.5)) * bar,
-                                                       latest: start + AutoPlacement.entryLatest(bCounted.structure, aim: aim, bars: edit.bars, alone: loop > 0) * bar,
+                                                       earliest: earliestIn,
+                                                       latest: latestIn,
                                                        bar: bar, lines: linesB(start + aim * bar)) {
                             vocalIn = (cut.time - start) / bar
                             vocalInKind = cut.kind == .line ? "breath" : cut.kind.rawValue
                         } else {
-                            vocalIn = aim
+                            let cleanT = VocalPhrasing.cleanNear(vocalsB, offset: offset + nudge, opening: true,
+                                                                 target: start + aim * bar,
+                                                                 earliest: earliestIn, latest: latestIn, bar: bar)
+                            vocalIn = (cleanT - start) / bar
                         }
                     }
                     // A's vocal sings on over B's beat until B's own arrives
@@ -3603,13 +3646,23 @@ enum SetBuilder {
                     let target = acappella ? untilB : AutoPlacement.phraseEnd(before: min(untilB, sw))
                     if let refA, loop == 0 {
                         let after = acappella || keysClash ? 0 : target >= sw ? 0.5 : 2
+                        let earliestOut = start + (target - min(AutoPlacement.exitBack, target)) * bar
+                        let latestOut = start + min(target + after, max(target, untilB), n) * bar
                         let cut = VocalPhrasing.cut(vocalsA, offset: aOffset, reference: refA, opening: false,
                                                     target: start + target * bar,
-                                                    earliest: start + (target - min(AutoPlacement.exitBack, target)) * bar,
-                                                    latest: start + min(target + after, max(target, untilB), n) * bar, bar: bar, lines: linesA(start + target * bar))
-                        // (No cut to be found: on the nearest downbeat.)
-                        vocalOut = cut.map { ($0.time - start) / bar } ?? min(max(target.rounded(), 0), max(target, untilB), n)
-                        vocalOutKind = cut?.kind.rawValue
+                                                    earliest: earliestOut,
+                                                    latest: latestOut, bar: bar, lines: linesA(start + target * bar))
+                        if let cut {
+                            vocalOut = (cut.time - start) / bar
+                            vocalOutKind = cut.kind.rawValue
+                        } else {
+                            let fallbackBar = min(max(target.rounded(), 0), max(target, untilB), n)
+                            let cleanT = VocalPhrasing.cleanNear(vocalsA, offset: aOffset, opening: false,
+                                                                 target: start + fallbackBar * bar,
+                                                                 earliest: earliestOut, latest: latestOut, bar: bar)
+                            vocalOut = (cleanT - start) / bar
+                            vocalOutKind = nil
+                        }
                     }
                 }
             }
@@ -3668,22 +3721,32 @@ enum SetBuilder {
                         : preferred.filter { $0 != .stutterGate && $0 != .polyRoll }
                     let varied = usable.filter { $0 != lastBuildStyle }
                     let pool = varied.isEmpty ? usable : varied
+                    let canTurntableDrop = allowTurntableDrop && !aSingsIntoDrop && !bSingsIntoDrop
+                        && (vocalOut ?? switchBar) <= switchBar - 0.5
+                        && SetOrdering.energy(b.analysis) >= 0.58
                     // A fakeout wherever one fits (B's hook on the drop, at
-                    // most one in four transitions): rotated through the
-                    // pool with the rest, it was almost never the one picked.
-                    buildStyle = canFakeout && lastBuildStyle != .fakeoutDrop
-                        ? .fakeoutDrop : pool[k % min(3, pool.count)]
+                    // most one in four transitions); rare turntable flair
+                    // (spinback or vinyl brake into B's drop) at most once
+                    // every 12 transitions when A's vocal has already exited.
+                    if canFakeout && lastBuildStyle != .fakeoutDrop {
+                        buildStyle = .fakeoutDrop
+                    } else if canTurntableDrop && lastBuildStyle != .spinbackDrop && lastBuildStyle != .brakeDrop {
+                        buildStyle = (k % 2 == 0) ? .spinbackDrop : .brakeDrop
+                    } else {
+                        buildStyle = pool[k % min(3, pool.count)]
+                    }
                     lastBuildStyle = buildStyle
                 }
                 sinceFakeout = (dropMoment && buildStyle == .fakeoutDrop) ? 0 : sinceFakeout + 1
-                // Word-aligned ghost-hook vocal tease: on 16-bar harmonic blends
-                // where A's vocal is quiet 4 bars before the swap and B has a
-                // singing hook landing near the swap whose notes fit A's actual
-                // chords AT `teaseAt`, preview a complete word/phrase (1–3 beats)
-                // of B's vocal through a radio filter + echo 4 bars early.
+                sinceTurntable = (dropMoment && (buildStyle == .spinbackDrop || buildStyle == .brakeDrop)) ? 0 : sinceTurntable + 1
+                // Word-aligned ghost-hook vocal tease: on 8+ bar harmonic blends
+                // where A's vocal is silent (or has already exited!) before the
+                // swap and B has a singing hook landing near the swap whose notes
+                // fit A's actual chords AT `teaseAt`, preview a complete word/phrase
+                // (1–3 beats) of B's vocal through a radio filter + echo early.
                 var vocalTease: (at: Double, from: Double, duration: Double)?
                 if allowTease, edit.preset == .stemSwap || edit.preset == .dropSwap,
-                   edit.bars >= 16, !keysClash, !mashup, switchBar >= 8,
+                   edit.bars >= 8, !keysClash, !mashup, switchBar >= 4,
                    let vocalsA = a.stems[.vocals], let vocalsB = matched.stems[.vocals],
                    let refA = VocalPhrasing.reference(a.loaded.analysis.structure),
                    let refB = VocalPhrasing.reference(bCounted.structure) {
@@ -3715,9 +3778,10 @@ enum SetBuilder {
                     // B's vocal WHERE THE HOOK IS SAMPLED (`hookFrom`), checking both
                     // scale clash and note-against-note roughness.
                     func teaseFits(at teaseAt: Double) -> Bool {
-                        guard !VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: refA,
-                                                      at: start + (teaseAt - 0.125) * blendBar,
-                                                      beat: 1.0 * blendBar) else { return false }
+                        let aMuted = vocalOut.map { teaseAt >= $0 + 0.125 } ?? false
+                        if !aMuted, VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: refA,
+                                                           at: start + (teaseAt - 0.0625) * blendBar,
+                                                           beat: 0.75 * blendBar) { return false }
                         guard let ca = Harmony.chroma([aStems[.other], aStems[.bass]].compactMap { $0 }, offset: aPlays,
                                                       from: start + teaseAt * blendBar, to: start + (teaseAt + 1) * blendBar),
                               let cb = Harmony.chroma([vocalsB], offset: offset + nudge,
@@ -3725,9 +3789,9 @@ enum SetBuilder {
                         else { return true }
                         return Harmony.fits(ca, cb) && Harmony.roughness(ca, cb) <= Harmony.roughTolerance
                     }
-                    // Wherever A leaves it a clean bar, nearest four before the swap.
-                    let spot = [4.0, 3, 5, 6].map { switchBar - $0 }.first {
-                        $0 >= 0.5 && hookFrom >= $0 + 2 && teaseFits(at: $0)
+                    // Wherever A leaves a clean bar, nearest four before the swap.
+                    let spot = [4.0, 3, 2, 5, 6].map { switchBar - $0 }.first {
+                        $0 >= 0.5 && hookFrom >= $0 + 1.5 && teaseFits(at: $0)
                     }
                     if bSingsAtHook, let teaseAt = spot {
                         // Snap duration (0.25…0.75 bars) to a real word end in B so
@@ -3794,7 +3858,7 @@ enum SetBuilder {
                     mashupUnder = AutoPlacement.under(a: pb, e: cueCounted, b: pa, c: edit.entryBar,
                                                       from: max(0, from), to: max(from + 1, Int(switchBar.rounded(.up))))
                 }
-                var holdMelody = false
+                var holdMelody = plan.placement.holdMelody
                 func make(outFade: Double, inFade: Double, room: Double, start: Double? = nil,
                           barSeconds: Double? = nil, voiceStep: Double = 0,
                           underUntil: Double? = nil) -> TransitionBuilder.Made {
@@ -3823,8 +3887,9 @@ enum SetBuilder {
                    let sb = bCounted.structure,
                    let pa = AutoPlacement.powers(sa, trim: Float(MixMath.trimDB(a.loaded.analysis))),
                    let pb = AutoPlacement.powers(sb, trim: Float(MixMath.trimDB(b.analysis))) {
-                    under = AutoPlacement.under(a: pa, e: edit.entryBar, b: pb, c: cueCounted, from: max(1, edit.bars / 4),
-                                                to: Int((vocalOut ?? switchBar).rounded(.up)))
+                    let rawUnder = AutoPlacement.under(a: pa, e: edit.entryBar, b: pb, c: cueCounted, from: max(1, edit.bars / 4),
+                                                       to: Int((vocalOut ?? switchBar).rounded(.up)))
+                    under = (plan.placement.carry || loop > 0) ? min(rawUnder, 4) : rawUnder
                 }
                 // Room for B: A's EQ gives way as much as B's parts need to
                 // be heard, judged on the blend as it will play (B through
@@ -3858,24 +3923,32 @@ enum SetBuilder {
                                                                     carry: carried).rounded(.down))
                     let to = Int(switchBar.rounded(.up))
                     if to > from {
-                        func levels(hold: Bool) -> [Float] {
+                        func eval(hold: Bool) -> (levels: [Float], busy: Int) {
                             holdMelody = hold
                             let shape = TransitionShape(lanes: make(outFade: 0, inFade: 0, room: room, start: 0, barSeconds: 1).lanes,
                                                         preset: edit.preset, bars: edit.bars)
-                            return (max(from, shape.first)..<min(to, shape.last)).map {
+                            let lvls = (max(from, shape.first)..<min(to, shape.last)).map {
                                 shape.mixLevel($0, a: pa, e: edit.entryBar, b: pb, c: cueCounted)
                             }
+                            let busyCount = (shape.first..<shape.last).filter {
+                                shape.busy($0, a: pa, e: edit.entryBar, b: pb, c: cueCounted)
+                            }.count
+                            return (lvls, busyCount)
                         }
-                        let plain = levels(hold: false), held = levels(hold: true)
+                        let plain = eval(hold: false), held = eval(hold: true)
                         let before = (0..<max(1, from)).compactMap { k -> Float? in
                             let bar = edit.entryBar + k
                             guard bar < (pa[.drums]?.count ?? 0) else { return nil }
                             let power = StemKind.allCases.reduce(Float(0)) { $0 + (pa[$1]?[bar].high ?? 0) + (pa[$1]?[bar].low ?? 0) }
                             return 10 * log10(max(power, 1e-9))
                         }.max()
-                        if let lowPlain = plain.min(), let before, !plain.isEmpty, plain.count == held.count {
-                            let gain = zip(plain, held).reduce(Float(0)) { $0 + ($1.1 - $1.0) } / Float(plain.count)
-                            holdMelody = lowPlain < before - Self.melodyHoleDB && gain >= Self.melodyHoldGainDB
+                        if let lowPlain = plain.levels.min(), let before, !plain.levels.isEmpty, plain.levels.count == held.levels.count {
+                            let gain = zip(plain.levels, held.levels).reduce(Float(0)) { $0 + ($1.1 - $1.0) } / Float(plain.levels.count)
+                            // Hold A's melody only when it closes a real dip
+                            // without adding busy clutter to the blend.
+                            holdMelody = lowPlain < before - Self.melodyHoleDB
+                                && gain >= Self.melodyHoldGainDB
+                                && held.busy <= plain.busy
                         } else {
                             holdMelody = false
                         }
@@ -3970,6 +4043,8 @@ enum SetBuilder {
                     case .fakeoutDrop: styleNote = "fakeout drop"
                     case .stutterGate: styleNote = "stutter gate into the drop"
                     case .polyRoll: styleNote = "3/16 poly-roll into the drop"
+                    case .spinbackDrop: styleNote = "spinback into the drop"
+                    case .brakeDrop: styleNote = "vinyl brake into the drop"
                     }
                     payoff.append(styleNote)
                     dropAt = start + switchBar * blendBar

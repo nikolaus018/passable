@@ -964,4 +964,55 @@ final class SetShapeTests: XCTestCase {
         XCTAssertLessThan(l[Int(0.995 * sr)..<Int(1.0 * sr)].map(abs).max()!, 0.02)
         XCTAssertFalse(l.contains { $0.isNaN || $0.isInfinite })
     }
+
+    func testAllBuildStylesCutFlavorsTeaseAndMashupRespectInvariants() {
+        for preset in [TransitionPreset.stemSwap, .dropSwap, .mashup, .longBlend] {
+            for style in TransitionBuilder.BuildStyle.allCases {
+                let n = preset == .dropSwap ? 8 : 16
+                let made = TransitionBuilder.make(
+                    preset, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: n,
+                    vocalBar: preset == .mashup ? 0 : n / 2, keysClash: false,
+                    lowSwap: preset == .stemSwap ? 8 : nil, drumsLayer: true, drumsLinger: false,
+                    vocalIn: preset == .mashup ? 0 : 8, vocalOut: preset == .mashup ? 0 : 8,
+                    mashup: preset == .mashup, dropMoment: preset != .longBlend, buildStyle: style)
+                for lane in made.lanes {
+                    if lane.side == .a {
+                        XCTAssertLessThan(lane.value(.volume, at: 2 * Double(n) + 1), 0.01, "\(preset) \(style) A \(lane.stem)")
+                    } else {
+                        XCTAssertGreaterThan(lane.value(.volume, at: 2 * Double(n) + 10), 0.99, "\(preset) \(style) B \(lane.stem)")
+                    }
+                }
+            }
+        }
+        // Cut flavors finish A cleanly before B's opening switch ramp.
+        for (vinyl, spin, bridge) in [(true, false, false), (false, true, false), (false, false, true)] {
+            let made = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 10, barSeconds: 2, bars: 1,
+                                              vinylBrake: vinyl, spinback: spin, acapellaBridge: bridge)
+            let aDrums = made.lanes.first { $0.side == .a && $0.stem == .drums }!
+            let bDrums = made.lanes.first { $0.side == .b && $0.stem == .drums }!
+            XCTAssertLessThan(aDrums.value(.volume, at: 10 - 0.05), 0.01)
+            XCTAssertGreaterThan(bDrums.value(.volume, at: 10 + 0.05), 0.99)
+        }
+        // Vocal tease resets its radio filter back to neutral before vocalEntry.
+        let teased = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16,
+                                            vocalBar: 8, lowSwap: 8, vocalIn: 8, vocalOut: 2,
+                                            vocalTease: (at: 4, from: 8, duration: 0.5))
+        let bVoc = teased.lanes.first { $0.side == .b && $0.stem == .vocals }!
+        XCTAssertEqual(bVoc.value(.filter, at: 2 * 7.5), 0.5, accuracy: 0.01)
+        XCTAssertTrue(teased.rolls.contains { $0.side == .b && $0.stem == .vocals })
+    }
+
+    @MainActor
+    func testAutoMovesMenuOptionsToggleCleanlyInSetSession() {
+        let session = SetSession(persists: false)
+        XCTAssertEqual(session.moves, .all)
+        XCTAssertEqual(AutoMoves.named.count, 4)
+        for item in AutoMoves.named {
+            XCTAssertTrue(session.moves.contains(item.move))
+            session.moves.remove(item.move)
+            XCTAssertFalse(session.moves.contains(item.move))
+            session.moves.insert(item.move)
+            XCTAssertTrue(session.moves.contains(item.move))
+        }
+    }
 }

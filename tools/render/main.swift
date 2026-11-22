@@ -33,6 +33,16 @@ while !args.isEmpty {
     default: songs.append(URL(fileURLWithPath: a))
     }
 }
+func directoryBytes(at root: URL, key: URLResourceKey) -> Int {
+    guard let en = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [key]) else { return 0 }
+    var total = 0
+    while let f = en.nextObject() as? URL {
+        let v = try? f.resourceValues(forKeys: [key])
+        total += (key == .totalFileAllocatedSizeKey ? v?.totalFileAllocatedSize : v?.fileSize) ?? 0
+    }
+    return total
+}
+
 if CommandLine.arguments.contains("--prune-dry") || CommandLine.arguments.contains("--prune-now") {
     // What the app's launch would clear from the cache (nothing is deleted),
     // or, with --prune-now, every folder of a song that's neither in the
@@ -43,9 +53,7 @@ if CommandLine.arguments.contains("--prune-dry") || CommandLine.arguments.contai
     let gone = StemCache.prune(keeping: keeping, dryRun: true, days: now ? 0 : StemCache.unusedDays)
     var bytes = 0
     for dir in gone {
-        for case let f as URL in FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey]) ?? FileManager.DirectoryEnumerator() {
-            bytes += (try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) ?? 0
-        }
+        bytes += directoryBytes(at: dir, key: .fileSizeKey)
     }
     let kept = Set(keeping.compactMap { try? StemCache.folder(for: $0).lastPathComponent })
     print("keeping \(keeping.count) songs' folders (\(kept.count) found); would clear \(gone.count) folders, \(bytes / 1_000_000_000) GB")
@@ -609,9 +617,7 @@ if CommandLine.arguments.contains("--renditions") {
         }
         let dir = t.loaded.directory.appendingPathComponent(TrackProcessor.renditionFolder).appendingPathComponent(m.plan.cacheName)
         if FileManager.default.fileExists(atPath: dir.appendingPathComponent("drums.layout").path) { shared += 1 }
-        for case let f as URL in FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.totalFileAllocatedSizeKey]) ?? FileManager.DirectoryEnumerator() {
-            bytes += (try? f.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize ?? 0) ?? 0
-        }
+        bytes += directoryBytes(at: dir, key: .totalFileAllocatedSizeKey)
     }
     print("renditions: \(same) stems identical, \(differ) differ; \(shared) songs share the song's file; on disk \(bytes / 1_000_000) MB of \(full / 1_000_000) MB written whole")
     exit(0)
