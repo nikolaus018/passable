@@ -1337,4 +1337,51 @@ final class PayoffTests: XCTestCase {
         XCTAssertTrue(BeatAlign.drifts([0.0, 0.006, 0.013, 0.020]))
         XCTAssertFalse(BeatAlign.drifts([0.002, -0.001, 0.003, 0.001]))
     }
+
+    func testDelayAndReverbThrowsStayIndependentAndMelodyReverbPeaksEarly() {
+        let made = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16,
+                                          lowSwap: 8, vocalOut: 8)
+        let vocalA = made.lanes.first { $0.side == .a && $0.stem == .vocals }!
+        let otherA = made.lanes.first { $0.side == .a && $0.stem == .other }!
+        // Vocal delay throw AND melody reverb wash both survive on separate buses.
+        XCTAssertGreaterThan(vocalA.value(.delay, at: 2 * 7.8), 0.7, "vocal delay throw survives")
+        XCTAssertGreaterThan(otherA.value(.reverb, at: 2 * 8.2), 0.7, "melody reverb wash survives alongside vocal delay")
+        // Melody still has body (>0.5 volume) when reverb send peaks so post-fader tail actually blooms.
+        XCTAssertGreaterThan(otherA.value(.volume, at: 2 * 8.2), 0.7)
+    }
+
+    func testVinylBrakeCutWritesBrakeRollsAndCleanAutomation() {
+        let made = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 100, barSeconds: 2, bars: 1,
+                                          vinylBrake: true)
+        let brakeStems = Set(made.rolls.filter { $0.brake == true && $0.side == .a }.map(\.stem))
+        XCTAssertEqual(brakeStems, [.drums, .bass, .other])
+        for lane in made.lanes {
+            for p in LaneParameter.allCases {
+                let pts = lane[p].points
+                for k in pts.indices.dropFirst() where abs(pts[k].value - pts[k - 1].value) > 0.05 {
+                    XCTAssertNotEqual(pts[k - 1].curve, .hold, "vinyl brake \(lane.id) \(p.shortName)")
+                    XCTAssertGreaterThanOrEqual(pts[k].time - pts[k - 1].time, 0.0019, "vinyl brake \(lane.id) \(p.shortName)")
+                }
+            }
+        }
+    }
+
+    func testTrackStructureTimbreSeparatesBrightFromSubHeavy() {
+        let sr = AudioIO.sampleRate
+        let n = Int(sr * 6)
+        func stem(_ hz: Double, amp: Float) -> StemAudio {
+            let s = (0..<n).map { Float(Double(amp) * sin(2 * Double.pi * hz * Double($0) / sr)) }
+            return StemAudio(left: MappedChannel(samples: s), right: MappedChannel(samples: s))
+        }
+        let silent = StemAudio(left: MappedChannel(samples: [Float](repeating: 0, count: n)),
+                               right: MappedChannel(samples: [Float](repeating: 0, count: n)))
+        let bright = TrackStructure.measureTimbre(stems: [
+            .drums: stem(4000, amp: 0.2), .bass: silent, .other: stem(3500, amp: 0.4), .vocals: silent,
+        ])
+        let darkSub = TrackStructure.measureTimbre(stems: [
+            .drums: stem(60, amp: 0.35), .bass: stem(55, amp: 0.5), .other: stem(220, amp: 0.08), .vocals: silent,
+        ])
+        XCTAssertEqual(TrackStructure.timbreDistance(bright, bright)!, 0, accuracy: 1e-6)
+        XCTAssertGreaterThan(TrackStructure.timbreDistance(bright, darkSub)!, 0.35)
+    }
 }

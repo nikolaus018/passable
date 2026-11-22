@@ -61,9 +61,9 @@ struct Reverb {
 
     private var lines: [Line]
     private var inputFilter = Biquad()
-    /// Feedback per loop pass (~3.2 s RT60 on the mean delay length).
-    var feedback: Float = 0.87
-    var damp: Float = 0.38
+    /// Feedback per loop pass (~3.8 s RT60 on the mean delay length).
+    var feedback: Float = 0.89
+    var damp: Float = 0.34
 
     init(sampleRate: Double) {
         let scale = sampleRate / 44_100
@@ -86,9 +86,10 @@ struct Reverb {
         let fb = feedback, dp = damp
         // Orthogonal 8x8 Walsh-Hadamard scaling (1 / sqrt(8)).
         let hScale: Float = 0.35355339 * fb
-        // Calibrated to match the previous Freeverb's wet bus loudness.
-        let inGain: Float = 0.22
-        let outGain: Float = 0.45
+        // Lush enough to bloom visibly on melody dissolves and risers without
+        // swamping the dry beat.
+        let inGain: Float = 0.27
+        let outGain: Float = 0.50
         for i in 0..<count {
             let xl = left[i] * inGain
             let xr = right[i] * inGain
@@ -289,5 +290,72 @@ struct Limiter {
             right[i] = outR * gain
             index = next
         }
+    }
+}
+
+/// Gentle VCA-style bus glue compressor engaged only while two songs overlap
+/// (`blendTarget > 0`). Glues layered tops/mids into one cohesive mix and takes
+/// pressure off the peak limiter, while staying bit-exact bypassed during solo
+/// playback.
+struct BusGlue {
+    private let attackCoef: Float
+    private let releaseCoef: Float
+    private let blendCoef: Float
+    private let scHpCoef: Float
+    private var scPrev: Float = 0, scState: Float = 0
+    private var env: Float = 0
+    private var blend: Float = 0
+
+    init(sampleRate: Double) {
+        attackCoef = Float(exp(-1.0 / (0.025 * sampleRate)))
+        releaseCoef = Float(exp(-1.0 / (0.120 * sampleRate)))
+        blendCoef = Float(exp(-1.0 / (0.120 * sampleRate)))
+        scHpCoef = Float(exp(-2.0 * Double.pi * 120.0 / sampleRate))
+    }
+
+    mutating func reset() {
+        scPrev = 0; scState = 0; env = 0; blend = 0
+    }
+
+    mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>,
+                          count: Int, active: Bool) {
+        let target: Float = active ? 1 : 0
+        guard blend > 1e-4 || target > 0, count > 0 else { return }
+        let atk = attackCoef, rel = releaseCoef, bCoef = blendCoef, hp = scHpCoef
+        // Threshold −9 dBFS (~0.355), soft knee 4 dB, ratio 2:1, max −3.5 dB GR.
+        let threshDB: Float = -9.0
+        let knee: Float = 4.0
+        let invRatioDiff: Float = 0.5 // 1 - 1/2
+        var curBlend = blend, curEnv = env, curPrev = scPrev, curHp = scState
+        for i in 0..<count {
+            curBlend = target + bCoef * (curBlend - target)
+            let mono = 0.5 * (left[i] + right[i])
+            curHp = hp * (curHp + mono - curPrev)
+            curPrev = mono
+            let det = max(abs(curHp), 0.7 * max(abs(left[i]), abs(right[i])))
+            let c = det > curEnv ? atk : rel
+            curEnv = det + c * (curEnv - det)
+            let db = 20 * log10f(max(curEnv, 1e-6))
+            let over = db - threshDB
+            let grDB: Float
+            if over <= -knee * 0.5 {
+                grDB = 0
+            } else if over < knee * 0.5 {
+                let x = over + knee * 0.5
+                grDB = invRatioDiff * x * x / (2 * knee)
+            } else {
+                grDB = invRatioDiff * over
+            }
+            let applied = min(3.5, grDB) * curBlend
+            if applied > 1e-4 {
+                let g = powf(10, -applied / 20)
+                left[i] *= g
+                right[i] *= g
+            }
+        }
+        blend = curBlend < 1e-4 && !active ? 0 : curBlend
+        env = curEnv < 1e-20 ? 0 : curEnv
+        scPrev = abs(curPrev) < 1e-20 ? 0 : curPrev
+        scState = abs(curHp) < 1e-20 ? 0 : curHp
     }
 }

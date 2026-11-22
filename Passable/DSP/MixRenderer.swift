@@ -21,6 +21,13 @@ final class MixSnapshot: @unchecked Sendable {
         /// the shared reverb/delay wet returns so outgoing tails tuck behind
         /// the incoming voice instead of smearing over its first words.
         var isVocal: Bool = false
+        /// Track index within a set (−1 in single-lane tests): used to engage
+        /// blend-only bus glue, inter-deck kick pocketing, and vocal-bleed
+        /// mid-dipping only while two songs overlap, keeping solo playback
+        /// bit-exact.
+        var trackIndex: Int = -1
+        var isOther: Bool = false
+        var isDrums: Bool = false
     }
 
     /// A `Roll` on the master timeline, in frames.
@@ -30,6 +37,8 @@ final class MixSnapshot: @unchecked Sendable {
         /// what the pass before runs on into; 0 for a stutter, whose
         /// repeats start from nothing.
         let crossfade: Int
+        /// Vinyl brake / tape stop decelerating to 0 speed across `start..<end`.
+        let brake: Bool
 
         /// nil when it's too short to play.
         init?(_ roll: Roll, sampleRate: Double) {
@@ -37,8 +46,9 @@ final class MixSnapshot: @unchecked Sendable {
             end = Int((roll.end * sampleRate).rounded())
             anchor = Int((roll.anchor * sampleRate).rounded())
             length = Int((roll.length * sampleRate).rounded())
-            guard end > start, length >= 2 * MixRenderer.declick else { return nil }
-            crossfade = roll.seamless == true ? min(MixRenderer.loopCrossfade, length / 4) : 0
+            brake = roll.brake == true
+            guard end > start, brake || length >= 2 * MixRenderer.declick else { return nil }
+            crossfade = roll.seamless == true && !brake ? min(MixRenderer.loopCrossfade, length / 4) : 0
         }
     }
 
@@ -78,24 +88,18 @@ final class MixRenderer: @unchecked Sendable {
     let sampleRate = AudioIO.sampleRate
 
     private struct LaneDSP {
-        var filter = SVF()
-        var low = Biquad(), low2 = Biquad(), low3 = Biquad(), mid = Biquad(), high = Biquad()
-        /// The low band's boost (a shelf); its cut is the isolator
-        /// (`low`, `low2`, `low3`) blended in by `kill`.
-        var shelf = Biquad()
+        var filter = DJFilter()
+        var lowIsolator = LowIsolator()
+        var mid = Biquad(), high = Biquad()
+        var midVocalDipper = MidVocalDipper()
         var filterValue = -1.0, lowValue = -1.0, midValue = -1.0, highValue = -1.0
-        /// How much of the lane is the isolator's output rather than the
-        /// lane as it came (0…1), as the last block left it and as the
-        /// low band asks for now. Moved between the two across a block, so
-        /// a kill coming on or off is a crossfade, never a filter swapped
-        /// under a ringing note.
-        var kill: Float = 0, killTarget: Float = 0
     }
 
     private var snapshot: MixSnapshot
     private var lanes: [LaneDSP] = []
     private var reverb: Reverb
     private var delay: PingPongDelay
+    private var glue: BusGlue
     private var limiter: Limiter
     private var delaySeconds = 0.0
 
@@ -103,14 +107,6 @@ final class MixRenderer: @unchecked Sendable {
     private var dryL = [Float](repeating: 0, count: blockSize), dryR = [Float](repeating: 0, count: blockSize)
     private var revL = [Float](repeating: 0, count: blockSize), revR = [Float](repeating: 0, count: blockSize)
     private var dlyL = [Float](repeating: 0, count: blockSize), dlyR = [Float](repeating: 0, count: blockSize)
-    /// A lane through its isolator, next to the lane as it came (see `LaneDSP.kill`).
-    private let isoL = UnsafeMutablePointer<Float>.allocate(capacity: blockSize)
-    private let isoR = UnsafeMutablePointer<Float>.allocate(capacity: blockSize)
-
-    deinit {
-        isoL.deallocate()
-        isoR.deallocate()
-    }
 
     /// Render-thread position in master frames: of the mix going into the
     /// limiter, which plays it `Limiter.lookahead` frames later. After a
@@ -129,6 +125,13 @@ final class MixRenderer: @unchecked Sendable {
     /// Wet-bus sidechain ducking gain (1 = open, down to 0.5 when a dry
     /// incoming vocal sings over an outgoing effect tail).
     private var wetDuck: Float = 1
+    /// Inter-deck kick sidechain state: smooth ducking (up to −2.5 dB) on the
+    /// non-low-owning track's melody stem during blends so both tracks breathe
+    /// with the active kick.
+    private var kickLpState: Float = 0
+    private var kickDuck: Float = 1
+    private var prevKickDuck: Float = 1
+    private var kickOwnerTrack: Int = -1
 
     /// Nothing over -120 dBFS in the block.
     private static func silent(_ l: UnsafePointer<Float>, _ r: UnsafePointer<Float>, _ n: Int) -> Bool {
@@ -151,6 +154,7 @@ final class MixRenderer: @unchecked Sendable {
         self.snapshot = snapshot
         reverb = Reverb(sampleRate: sampleRate)
         delay = PingPongDelay(sampleRate: sampleRate)
+        glue = BusGlue(sampleRate: sampleRate)
         limiter = Limiter(sampleRate: sampleRate, ceiling: ceiling)
         retired.reserveCapacity(256)
         // Sized up front (four lanes a song, sets of up to 128 songs) so no
@@ -251,11 +255,16 @@ final class MixRenderer: @unchecked Sendable {
     private func resetTails() {
         reverb.reset()
         delay.reset()
+        glue.reset()
         reverbIdle = true
         delayIdle = true
         reverbTailFrames = 0
         delayTailFrames = 0
         wetDuck = 1
+        kickLpState = 0
+        kickDuck = 1
+        prevKickDuck = 1
+        kickOwnerTrack = -1
         limiter.reset()
         needsPreroll = true
         for i in lanes.indices { lanes[i] = LaneDSP() }
@@ -275,6 +284,34 @@ final class MixRenderer: @unchecked Sendable {
         let t1 = Double(position + n) / sampleRate
         let tm = (t0 + t1) / 2
 
+        // Fast zero-allocation pre-scan: detect whether two tracks overlap
+        // right now (engaging blend-only glue, kick pocketing, and vocal-bleed
+        // de-centering while keeping solo playback bit-exact) and which tracks
+        // have their vocals deliberately muted.
+        var activeTrack0 = -1, activeTrack1 = -1
+        var mutedVocalTrack0 = -1, mutedVocalTrack1 = -1
+        for lane in snap.lanes where lane.audible && lane.trackIndex >= 0 {
+            guard let audio = lane.audio else { continue }
+            let src = position - lane.offset
+            let inBounds = src + n > 0 && (src < audio.count || lane.rolls.contains { $0.start - Self.declick < position + n && $0.end + Self.declick > position })
+            guard inBounds else { continue }
+            let vol = LaneParameter.gain(value(lane.envelopes, .volume, tm))
+            if vol > 0.01 {
+                if activeTrack0 == -1 || activeTrack0 == lane.trackIndex {
+                    activeTrack0 = lane.trackIndex
+                } else if activeTrack1 == -1 || activeTrack1 == lane.trackIndex {
+                    activeTrack1 = lane.trackIndex
+                }
+            } else if lane.isVocal {
+                if mutedVocalTrack0 == -1 || mutedVocalTrack0 == lane.trackIndex {
+                    mutedVocalTrack0 = lane.trackIndex
+                } else if mutedVocalTrack1 == -1 || mutedVocalTrack1 == lane.trackIndex {
+                    mutedVocalTrack1 = lane.trackIndex
+                }
+            }
+        }
+        let isBlending = activeTrack0 >= 0 && activeTrack1 >= 0
+
         laneL.withUnsafeMutableBufferPointer { lL in
         laneR.withUnsafeMutableBufferPointer { lR in
         dryL.withUnsafeMutableBufferPointer { dL in
@@ -292,6 +329,8 @@ final class MixRenderer: @unchecked Sendable {
             eR.baseAddress!.update(repeating: 0, count: n)
             var reverbFed = false, delayFed = false
             var dryVocalEnergy: Float = 0
+            var kickEnergy: Float = 0
+            var newKickOwner = -1
 
             for (i, lane) in snap.lanes.enumerated() {
                 guard lane.audible, let audio = lane.audio else { continue }
@@ -313,44 +352,48 @@ final class MixRenderer: @unchecked Sendable {
 
                 updateFilters(lane: i, envelopes: lane.envelopes, at: tm)
                 lanes[i].filter.process(ll, lr, count: n)
-                // The low kill: the lane through the isolator, crossfaded
-                // with the lane as it came. Blended in and out over the
-                // blocks the low band's automation takes, it leaves no
-                // step in the lows it takes away or gives back.
-                let kill = lanes[i].kill, killTarget = lanes[i].killTarget
-                if kill > 0 || killTarget > 0 {
-                    isoL.update(from: ll, count: n)
-                    isoR.update(from: lr, count: n)
-                    lanes[i].low.process(isoL, isoR, count: n)
-                    lanes[i].low2.process(isoL, isoR, count: n)
-                    lanes[i].low3.process(isoL, isoR, count: n)
-                    if kill == 1 && killTarget == 1 {
-                        ll.update(from: isoL, count: n)
-                        lr.update(from: isoR, count: n)
-                    } else {
-                        let slope = (killTarget - kill) / Float(n)
-                        for j in 0..<n {
-                            let k = kill + slope * Float(j + 1)
-                            ll[j] += k * (isoL[j] - ll[j])
-                            lr[j] += k * (isoR[j] - lr[j])
-                        }
-                    }
-                    lanes[i].kill = killTarget
-                    if killTarget == 0 {
-                        lanes[i].low.bypass()
-                        lanes[i].low2.bypass()
-                        lanes[i].low3.bypass()
-                    }
-                }
-                lanes[i].shelf.process(ll, lr, count: n)
+                lanes[i].lowIsolator.process(ll, lr, count: n)
                 lanes[i].mid.process(ll, lr, count: n)
                 lanes[i].high.process(ll, lr, count: n)
+
+                // During a blend, dip the center-panned vocal presence band on
+                // an `other` stem whose deck's vocal stem is muted, hiding
+                // leftover vocal separation bleed while keeping stereo synths wide.
+                if lane.isOther {
+                    let vocalMuted = isBlending && lane.trackIndex >= 0
+                        && (lane.trackIndex == mutedVocalTrack0 || lane.trackIndex == mutedVocalTrack1)
+                    lanes[i].midVocalDipper.process(ll, lr, count: n, target: vocalMuted ? 1 : 0, sampleRate: sampleRate)
+                }
 
                 // Fader, ramped across the block so fades are sample-smooth.
                 var g0 = LaneParameter.gain(value(lane.envelopes, .volume, t0)) * lane.trim
                 var step = (LaneParameter.gain(value(lane.envelopes, .volume, t1)) * lane.trim - g0) / Float(n)
                 guard g0 > 0 || step != 0 else { continue }
                 vDSP_vrampmul2(ll, lr, 1, &g0, &step, ll, lr, 1, vDSP_Length(n))
+
+                // Inter-deck kick sidechain pocketing during blends: measure
+                // sub-130 Hz kick energy from whichever deck owns the low end,
+                // and subtly groove-pocket the opposing deck's melody (~2.2 dB).
+                if isBlending, lane.isDrums, lane.trackIndex >= 0, value(lane.envelopes, .low, tm) >= 0.45 {
+                    let lpCoef = Float(exp(-2.0 * Double.pi * 130.0 / sampleRate))
+                    var lp = kickLpState, sumSq: Float = 0
+                    for j in 0..<n {
+                        let m = 0.5 * (ll[j] + lr[j])
+                        lp = m + lpCoef * (lp - m)
+                        sumSq += lp * lp
+                    }
+                    kickLpState = abs(lp) < 1e-20 ? 0 : lp
+                    let e = sumSq / Float(n)
+                    if e >= kickEnergy {
+                        kickEnergy = e
+                        newKickOwner = lane.trackIndex
+                    }
+                } else if lane.isOther, lane.trackIndex >= 0, kickOwnerTrack >= 0,
+                          lane.trackIndex != kickOwnerTrack, (prevKickDuck < 0.999 || kickDuck < 0.999) {
+                    var dk = prevKickDuck
+                    var dkStep = (kickDuck - prevKickDuck) / Float(n)
+                    vDSP_vrampmul2(ll, lr, 1, &dk, &dkStep, ll, lr, 1, vDSP_Length(n))
+                }
 
                 vDSP_vadd(ll, 1, dL.baseAddress!, 1, dL.baseAddress!, 1, vDSP_Length(n))
                 vDSP_vadd(lr, 1, dR.baseAddress!, 1, dR.baseAddress!, 1, vDSP_Length(n))
@@ -377,6 +420,23 @@ final class MixRenderer: @unchecked Sendable {
                     vDSP_measqv(lr, 1, &er, vDSP_Length(n))
                     dryVocalEnergy = max(dryVocalEnergy, (el + er) * 0.5)
                 }
+            }
+
+            // Update inter-deck kick ducking envelope for the next block.
+            prevKickDuck = kickDuck
+            if isBlending && newKickOwner >= 0 {
+                kickOwnerTrack = newKickOwner
+                let rms = kickEnergy.squareRoot()
+                let depth = min(1, max(0, (rms - 0.05) / 0.22))
+                let target: Float = 1 - 0.22 * depth // up to -2.2 dB groove pocket
+                let coef: Float = target < kickDuck
+                    ? Float(exp(-Double(n) / (0.010 * sampleRate)))
+                    : Float(exp(-Double(n) / (0.110 * sampleRate)))
+                kickDuck = target + coef * (kickDuck - target)
+            } else {
+                let rel = Float(exp(-Double(n) / (0.080 * sampleRate)))
+                kickDuck = 1 + rel * (kickDuck - 1)
+                if kickDuck > 0.9995 { kickDuck = 1; kickOwnerTrack = -1; kickLpState = 0 }
             }
 
             // The reverb and the echo only run while something is sent to
@@ -427,6 +487,9 @@ final class MixRenderer: @unchecked Sendable {
             vDSP_vadd(left, 1, eL.baseAddress!, 1, left, 1, vDSP_Length(n))
             vDSP_vadd(dR.baseAddress!, 1, rR.baseAddress!, 1, right, 1, vDSP_Length(n))
             vDSP_vadd(right, 1, eR.baseAddress!, 1, right, 1, vDSP_Length(n))
+            // Blend-only VCA bus glue: welds overlapping tracks together and
+            // eases limiter pumping without touching solo playback.
+            glue.process(left, right, count: n, active: isBlending)
             var master = snap.masterGain
             vDSP_vsmul(left, 1, &master, left, 1, vDSP_Length(n))
             vDSP_vsmul(right, 1, &master, right, 1, vDSP_Length(n))
@@ -456,20 +519,36 @@ final class MixRenderer: @unchecked Sendable {
     }
 
     /// A block of a stem that rolls: inside a roll, frames come from its
-    /// loop; everywhere else from where the stem really is. Every jump is
-    /// faded out and back in over `declick` frames.
+    /// loop (or decelerating vinyl brake); everywhere else from where the stem
+    /// really is. Every jump is faded out and back in over `declick` frames.
     private static func copyRolled(_ lane: MixSnapshot.LaneData, audio: StemAudio, from position: Int, count n: Int,
                                    left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>) {
         let xf = Float(declick)
         for j in 0..<n {
             let p = position + j
             var s = p - lane.offset
+            var fracPos: Double? = nil
             var g: Float = 1
             // A loop's seam: the frame the pass before would have carried
             // on with, and how much of it is still in (1…0).
             var tail = -1, tailGain: Float = 0
             for r in lane.rolls {
-                if p >= r.start && p < r.end, r.crossfade > 0 {
+                if r.brake, p >= r.start && p < r.end {
+                    let span = Double(r.end - r.start)
+                    let u = Double(p - r.start) / span
+                    // Speed v(u) = (1 - u)^2 → integrated position D * (1 - (1 - u)^3) / 3.
+                    // Starts at speed 1.0 (seamless from normal playback) and coasts to 0.
+                    let oneMinusU = 1.0 - u
+                    let travelled = span * (1.0 - oneMinusU * oneMinusU * oneMinusU) / 3.0
+                    fracPos = Double(r.anchor - lane.offset) + travelled
+                    tail = -1
+                    if u > 0.82 {
+                        let fu = Float((u - 0.82) / 0.18)
+                        g = min(g, 0.5 * (1 + cosf(Float.pi * fu)))
+                    }
+                } else if r.brake {
+                    // Seamless start from playback; tail already faded to 0 by r.end.
+                } else if p >= r.start && p < r.end, r.crossfade > 0 {
                     let phase = (p - r.start) % r.length
                     // The first pass comes out of the stem where it really
                     // was; the later ones out of the loop's own end.
@@ -499,7 +578,17 @@ final class MixRenderer: @unchecked Sendable {
                 }
             }
             var l: Float = 0, r: Float = 0
-            if s >= 0 && s < audio.count {
+            if let fp = fracPos {
+                let i0 = Int(floor(fp))
+                let frac = Float(fp - Double(i0))
+                if i0 >= 0 && i0 + 1 < audio.count {
+                    l = audio.left.pointer[i0] + frac * (audio.left.pointer[i0 + 1] - audio.left.pointer[i0])
+                    r = audio.right.pointer[i0] + frac * (audio.right.pointer[i0 + 1] - audio.right.pointer[i0])
+                } else if i0 >= 0 && i0 < audio.count {
+                    l = audio.left.pointer[i0]
+                    r = audio.right.pointer[i0]
+                }
+            } else if s >= 0 && s < audio.count {
                 l = audio.left.pointer[s]
                 r = audio.right.pointer[s]
             }
@@ -532,47 +621,20 @@ final class MixRenderer: @unchecked Sendable {
             case .bypass:
                 dsp.filter.setBypass()
             case .lowPass(let hz):
-                dsp.filter.set(.lowPass, frequency: hz, q: 0.85, sampleRate: sr)
+                dsp.filter.set(.lowPass, frequency: hz, sampleRate: sr)
             case .highPass(let hz):
-                dsp.filter.set(.highPass, frequency: hz, q: 0.85, sampleRate: sr)
+                dsp.filter.set(.highPass, frequency: hz, sampleRate: sr)
             }
         }
-        // Where a DJ mixer's low knob sits: a kill takes the kick and the
-        // bass line (what only one song may own at a time) and leaves the
-        // body of everything else, so a song under the other still sounds
-        // like itself rather than a thin shadow. A shelf deep enough to
-        // kill 50 Hz also takes 10 dB off 200 Hz, so a kill is an
-        // isolator's steep high-pass instead, at the 150 Hz where the
-        // planner splits low from high (6th-order Butterworth: −52 dB at
-        // 55, −33 at 80, −21 at 100, −0.6 at 175, −0.1 at 200); a boost
-        // is a shelf.
-        // (A cut short of a kill is the same isolator, blended in by as
-        // much as takes the lows down that far: the band's whole way down
-        // is one crossfade, so an automated kill passes through no other
-        // filter on its way. It was a shelf down to the kill point and the
-        // isolator from there: a kill switched over a few milliseconds
-        // went through four shelves and then swapped filters under
-        // whatever low note was ringing.)
+        // 6th-order Butterworth Cytomic ZDF SVF low isolator/shelf: monotonic
+        // and phase-coherent across the entire +6 dB to −54 dB kill range with
+        // zero dry/wet comb-filtering notch and bit-exact 0° phase at 0 dB.
         let low = value(envelopes, .low, t)
         if abs(low - dsp.lowValue) > 1e-5 {
             dsp.lowValue = low
             let db = LaneParameter.eqDecibels(low)
-            if db < -0.05 {
-                dsp.shelf.bypass()
-                dsp.killTarget = db <= Self.killDB ? 1 : Float(1 - pow(10, db / 20))
-                if dsp.low.isBypassed {
-                    dsp.low.set(.highPass(frequency: 150, q: 0.5176), sampleRate: sr)
-                    dsp.low2.set(.highPass(frequency: 150, q: 0.7071), sampleRate: sr)
-                    dsp.low3.set(.highPass(frequency: 150, q: 1.9319), sampleRate: sr)
-                }
-            } else {
-                dsp.killTarget = 0
-                if db > 0.05 {
-                    dsp.shelf.set(.lowShelf(frequency: 120, gainDB: db), sampleRate: sr)
-                } else {
-                    dsp.shelf.bypass()
-                }
-            }
+            let mapped = db < 0 ? max(LowIsolator.killDecibels, db * (LowIsolator.killDecibels / -40.0)) : db
+            dsp.lowIsolator.set(gainDB: mapped, sampleRate: sr)
         }
         Self.updateBand(&dsp.mid, cached: &dsp.midValue, value(envelopes, .mid, t), sr) {
             // Broad, like a DJ mixer's mid: from the low mids to the

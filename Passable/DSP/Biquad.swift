@@ -209,3 +209,263 @@ struct SVF {
         }
     }
 }
+
+/// 24 dB/oct DJ filter: two cascaded Cytomic ZDF SVFs with gentle dynamic
+/// resonance mid-sweep (~+1.6 dB total at cutoff) that flattens cleanly into
+/// bypass at the extremes.
+struct DJFilter {
+    private var stage1 = SVF()
+    private var stage2 = SVF()
+
+    var isBypassed: Bool { stage1.isBypassed && stage2.isBypassed }
+
+    mutating func reset() {
+        stage1.reset()
+        stage2.reset()
+    }
+
+    mutating func setBypass() {
+        stage1.setBypass()
+        stage2.setBypass()
+    }
+
+    /// Musical resonance curve: flat Butterworth (0.707) near bypass and at
+    /// sub/air extremes, rising gently to ~0.92 per stage in the sweet spot
+    /// (200 Hz–4 kHz) like an analog DJ mixer filter.
+    static func resonance(for frequency: Double, mode: SVF.Mode) -> Double {
+        let logF = log2(max(20, min(20_000, frequency)))
+        // Peak resonance around 300 Hz–3 kHz (log2 ≈ 8.2–11.5), tapering smoothly
+        // to 0.707 near 20 Hz and 18 kHz.
+        let lowEdge = mode == .highPass ? 5.0 : 6.0   // ~32 Hz / 64 Hz
+        let highEdge = mode == .lowPass ? 13.8 : 13.5 // ~14 kHz / 11.5 kHz
+        guard logF > lowEdge, logF < highEdge else { return 0.7071 }
+        let u = (logF - lowEdge) / (highEdge - lowEdge)
+        let bell = sin(Double.pi * u)
+        return 0.7071 + 0.213 * bell * bell
+    }
+
+    mutating func set(_ mode: SVF.Mode, frequency: Double, sampleRate: Double) {
+        let q = Self.resonance(for: frequency, mode: mode)
+        stage1.set(mode, frequency: frequency, q: q, sampleRate: sampleRate)
+        stage2.set(mode, frequency: frequency, q: q, sampleRate: sampleRate)
+    }
+
+    mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>, count: Int) {
+        guard !isBypassed else { return }
+        stage1.process(left, right, count: count)
+        stage2.process(left, right, count: count)
+    }
+}
+
+/// 6th-order Butterworth Cytomic ZDF SVF low-end isolator/shelf (105 Hz).
+///
+/// Unlike crossfading dry audio against a high-pass filter (which notches out
+/// 150–250 Hz via phase cancellation whenever partially cut), every gain from
+/// +6 dB down to a −54 dB sub kill is a monotonic, phase-coherent shelf whose
+/// transfer function is identically `1.0` (0° phase shift) at 0 dB.
+struct LowIsolator {
+    static let frequency = 105.0
+    static let killDecibels = -54.0
+    private static let qs: [Double] = [0.51763809, 0.70710678, 1.93185165]
+
+    private struct Stage {
+        let k: Float
+        var s1L: Float = 0, s2L: Float = 0, s1R: Float = 0, s2R: Float = 0
+        var g: Float = 0, m1: Float = 0, m2: Float = 0
+        var gTarget: Float = 0, m1Target: Float = 0, m2Target: Float = 0
+        var active = false
+
+        init(q: Double, sampleRate: Double) {
+            k = Float(1.0 / q)
+            let g0 = Float(tan(Double.pi * LowIsolator.frequency / sampleRate))
+            g = g0; gTarget = g0
+        }
+
+        mutating func reset(sampleRate: Double) {
+            s1L = 0; s2L = 0; s1R = 0; s2R = 0
+            let g0 = Float(tan(Double.pi * LowIsolator.frequency / sampleRate))
+            g = g0; gTarget = g0
+            m1 = 0; m2 = 0; m1Target = 0; m2Target = 0
+            active = false
+        }
+
+        mutating func set(gainDB: Double, sampleRate: Double) {
+            let clamped = max(-20.0, min(6.0, gainDB))
+            let a = pow(10.0, clamped / 40.0)
+            let newG = Float(tan(Double.pi * LowIsolator.frequency / sampleRate) / sqrt(a))
+            let newM1 = k * Float(a - 1.0)
+            let newM2 = Float(a * a - 1.0)
+            if !active {
+                g = newG
+                s1L = 0; s2L = 0; s1R = 0; s2R = 0
+            }
+            gTarget = newG
+            m1Target = newM1
+            m2Target = newM2
+            if abs(newM1) > 1e-6 || abs(newM2) > 1e-6 { active = true }
+        }
+
+        mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>, count: Int) {
+            guard active, count > 0 else { return }
+            let invN = 1 / Float(count)
+            let dg = (gTarget - g) * invN
+            let dm1 = (m1Target - m1) * invN
+            let dm2 = (m2Target - m2) * invN
+            var curG = g, curM1 = m1, curM2 = m2
+            let kk = k
+            var z1L = s1L, z2L = s2L, z1R = s1R, z2R = s2R
+
+            if dg == 0 && dm1 == 0 && dm2 == 0 {
+                let a1 = 1 / (1 + curG * (curG + kk))
+                let a2 = curG * a1
+                let a3 = curG * a2
+                for i in 0..<count {
+                    let xl = left[i]
+                    let v3L = xl - z2L
+                    let v1L = a1 * z1L + a2 * v3L
+                    let v2L = z2L + a2 * z1L + a3 * v3L
+                    z1L = 2 * v1L - z1L
+                    z2L = 2 * v2L - z2L
+                    left[i] = xl + curM1 * v1L + curM2 * v2L
+
+                    let xr = right[i]
+                    let v3R = xr - z2R
+                    let v1R = a1 * z1R + a2 * v3R
+                    let v2R = z2R + a2 * z1R + a3 * v3R
+                    z1R = 2 * v1R - z1R
+                    z2R = 2 * v2R - z2R
+                    right[i] = xr + curM1 * v1R + curM2 * v2R
+                }
+            } else {
+                for i in 0..<count {
+                    curG += dg
+                    curM1 += dm1
+                    curM2 += dm2
+                    let a1 = 1 / (1 + curG * (curG + kk))
+                    let a2 = curG * a1
+                    let a3 = curG * a2
+
+                    let xl = left[i]
+                    let v3L = xl - z2L
+                    let v1L = a1 * z1L + a2 * v3L
+                    let v2L = z2L + a2 * z1L + a3 * v3L
+                    z1L = 2 * v1L - z1L
+                    z2L = 2 * v2L - z2L
+                    left[i] = xl + curM1 * v1L + curM2 * v2L
+
+                    let xr = right[i]
+                    let v3R = xr - z2R
+                    let v1R = a1 * z1R + a2 * v3R
+                    let v2R = z2R + a2 * z1R + a3 * v3R
+                    z1R = 2 * v1R - z1R
+                    z2R = 2 * v2R - z2R
+                    right[i] = xr + curM1 * v1R + curM2 * v2R
+                }
+            }
+
+            g = gTarget; m1 = m1Target; m2 = m2Target
+            if abs(m1Target) < 1e-6 && abs(m2Target) < 1e-6 {
+                active = false
+                s1L = 0; s2L = 0; s1R = 0; s2R = 0
+            } else {
+                s1L = abs(z1L) < 1e-20 ? 0 : z1L
+                s2L = abs(z2L) < 1e-20 ? 0 : z2L
+                s1R = abs(z1R) < 1e-20 ? 0 : z1R
+                s2R = abs(z2R) < 1e-20 ? 0 : z2R
+            }
+        }
+    }
+
+    private var s0: Stage
+    private var s1: Stage
+    private var s2: Stage
+    private var currentDB = 0.0
+
+    var isBypassed: Bool { !s0.active && !s1.active && !s2.active }
+
+    init(sampleRate: Double = AudioIO.sampleRate) {
+        s0 = Stage(q: Self.qs[0], sampleRate: sampleRate)
+        s1 = Stage(q: Self.qs[1], sampleRate: sampleRate)
+        s2 = Stage(q: Self.qs[2], sampleRate: sampleRate)
+    }
+
+    mutating func reset(sampleRate: Double = AudioIO.sampleRate) {
+        s0.reset(sampleRate: sampleRate)
+        s1.reset(sampleRate: sampleRate)
+        s2.reset(sampleRate: sampleRate)
+        currentDB = 0
+    }
+
+    /// Sets the low band gain in dB (0 = transparent bypass, down to `killDecibels`
+    /// for a full sub kill, up to +6 dB for boost).
+    mutating func set(gainDB: Double, sampleRate: Double) {
+        let target = abs(gainDB) < 0.05 ? 0.0 : gainDB
+        guard abs(target - currentDB) > 1e-4 else { return }
+        currentDB = target
+        let perStage = target / 3.0
+        s0.set(gainDB: perStage, sampleRate: sampleRate)
+        s1.set(gainDB: perStage, sampleRate: sampleRate)
+        s2.set(gainDB: perStage, sampleRate: sampleRate)
+    }
+
+    mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>, count: Int) {
+        guard !isBypassed else { return }
+        s0.process(left, right, count: count)
+        s1.process(left, right, count: count)
+        s2.process(left, right, count: count)
+    }
+}
+
+/// Mid-channel vocal-band dipper: attenuates center-panned 400 Hz–3.5 kHz
+/// energy by up to ~4.5 dB while leaving the stereo Side channel completely
+/// untouched. Used on an `other` stem during a blend when that song's vocal
+/// stem is muted, hiding leftover separation bleed without thinning wide
+/// synths or guitars.
+struct MidVocalDipper {
+    private var b0: Float = 1, b1: Float = 0, b2: Float = 0, a1: Float = 0, a2: Float = 0
+    private var z1: Float = 0, z2: Float = 0
+    private var amount: Float = 0
+
+    init(sampleRate: Double = AudioIO.sampleRate) {
+        let a = pow(10.0, -4.5 / 40.0)
+        let w = 2 * Double.pi * 1_500 / sampleRate
+        let cw = cos(w), alpha = sin(w) / (2 * 0.65)
+        let d0 = 1 + alpha / a
+        b0 = Float((1 + alpha * a) / d0)
+        b1 = Float((-2 * cw) / d0)
+        b2 = Float((1 - alpha * a) / d0)
+        a1 = Float((-2 * cw) / d0)
+        a2 = Float((1 - alpha / a) / d0)
+    }
+
+    mutating func reset() {
+        z1 = 0; z2 = 0
+        amount = 0
+    }
+
+    mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>,
+                          count: Int, target: Float, sampleRate: Double) {
+        guard amount > 1e-4 || target > 1e-4, count > 0 else { return }
+        let alpha = Float(exp(-Double(count) / (0.04 * sampleRate)))
+        let next = target + alpha * (amount - target)
+        let slope = (next - amount) / Float(count)
+        var cur = amount, s1 = z1, s2 = z2
+        for i in 0..<count {
+            cur += slope
+            let origMid = 0.5 * (left[i] + right[i])
+            let y = b0 * origMid + s1
+            s1 = b1 * origMid - a1 * y + s2
+            s2 = b2 * origMid - a2 * y
+            let delta = cur * (y - origMid)
+            left[i] += delta
+            right[i] += delta
+        }
+        amount = next < 1e-4 && target == 0 ? 0 : next
+        if amount == 0 {
+            z1 = 0; z2 = 0
+        } else {
+            z1 = abs(s1) < 1e-20 ? 0 : s1
+            z2 = abs(s2) < 1e-20 ? 0 : s2
+        }
+    }
+}

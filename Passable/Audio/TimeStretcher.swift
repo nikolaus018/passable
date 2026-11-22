@@ -27,9 +27,12 @@ enum TimeStretcher {
         let fade = 2048
         // Shorter window for vocals (~46 ms vs 93 ms) preserves plosives and
         // consonant clarity while keeping ~21.5 Hz harmonic resolution.
+        // 8× overlap on vocals and tonal stems cuts STFT pre-echo and phasiness
+        // sharply; drums keep 4× since TransientCopy replaces hits directly.
         let size = (percussive || vocal) ? 2048 : 4096
+        let overlap = percussive ? 4 : 8
         let mono = input.mono()
-        let onsets = Onsets.detect(mono, sensitivity: percussive ? 0.06 : vocal ? 0.14 : 0.25)
+        let onsets = Onsets.detect(mono, sensitivity: percussive ? 0.06 : vocal ? 0.14 : 0.22)
         let preserveLowPhase = !percussive
 
         if pitch != 1 {
@@ -38,9 +41,9 @@ enum TimeStretcher {
             // no untouched stretch of a shifted song.
             let taps = Resampler.halfWidth(step: pitch) + 2
             let zCount = Int((Double(total) * pitch).rounded(.up)) + taps
-            let z = PhaseVocoder(size: size).process(input, count: zCount, source: { map.source($0 / pitch) },
-                                                     onsets: onsets, preserveLowPhase: preserveLowPhase,
-                                                     formantRatio: vocal ? pitch : 1)
+            let z = PhaseVocoder(size: size, overlap: overlap).process(input, count: zCount, source: { map.source($0 / pitch) },
+                                                                       onsets: onsets, preserveLowPhase: preserveLowPhase,
+                                                                       formantRatio: vocal ? pitch : 1)
             return StereoBuffer(left: Resampler.resample(z.left, step: pitch, count: total),
                                 right: Resampler.resample(z.right, step: pitch, count: total))
         }
@@ -56,8 +59,8 @@ enum TimeStretcher {
             if end - start > 2 * fade { verbatim = (start, end, offset) }
         }
         guard let verbatim else {
-            var out = PhaseVocoder(size: size).process(input, count: total, source: map.source, onsets: onsets,
-                                                       preserveLowPhase: preserveLowPhase)
+            var out = PhaseVocoder(size: size, overlap: overlap).process(input, count: total, source: map.source, onsets: onsets,
+                                                                         preserveLowPhase: preserveLowPhase)
             if percussive { TransientCopy.apply(to: &out, source: input, map: map, onsets: onsets, until: total) }
             return out
         }
@@ -65,8 +68,8 @@ enum TimeStretcher {
         var out = StereoBuffer(left: [Float](repeating: 0, count: total), right: [Float](repeating: 0, count: total))
         if verbatim.start > 0 {
             let count = min(total, verbatim.start + fade + size)
-            let head = PhaseVocoder(size: size).process(input, count: count, source: map.source, onsets: onsets,
-                                                        preserveLowPhase: preserveLowPhase)
+            let head = PhaseVocoder(size: size, overlap: overlap).process(input, count: count, source: map.source, onsets: onsets,
+                                                                          preserveLowPhase: preserveLowPhase)
             out.left.replaceSubrange(0..<count, with: head.left)
             out.right.replaceSubrange(0..<count, with: head.right)
             if percussive {
@@ -93,9 +96,9 @@ enum TimeStretcher {
             // And out of it again, into the way out: the vocoder starts on
             // the source's own phases, so the two are the same sound there.
             let from = max(verbatim.start, verbatim.end - fade)
-            let tail = PhaseVocoder(size: size).process(input, count: total - from,
-                                                        source: { map.source($0 + Double(from)) }, onsets: onsets,
-                                                        preserveLowPhase: preserveLowPhase)
+            let tail = PhaseVocoder(size: size, overlap: overlap).process(input, count: total - from,
+                                                                          source: { map.source($0 + Double(from)) }, onsets: onsets,
+                                                                          preserveLowPhase: preserveLowPhase)
             for y in from..<total {
                 let u = y - from
                 let g = u < fade ? Float(0.5 - 0.5 * cos(Double.pi * Double(u) / Double(fade))) : 1
@@ -119,9 +122,10 @@ enum TimeStretcher {
     static func warp(_ input: StereoBuffer, count: Int, source: (Double) -> Double,
                      output: (Double) -> Double, percussive: Bool, vocal: Bool = false) -> StereoBuffer {
         let size = (percussive || vocal) ? 2048 : 4096
-        let onsets = Onsets.detect(input.mono(), sensitivity: percussive ? 0.06 : vocal ? 0.14 : 0.25)
-        var out = PhaseVocoder(size: size).process(input, count: count, source: source, onsets: onsets,
-                                                   preserveLowPhase: !percussive)
+        let overlap = percussive ? 4 : 8
+        let onsets = Onsets.detect(input.mono(), sensitivity: percussive ? 0.06 : vocal ? 0.14 : 0.22)
+        var out = PhaseVocoder(size: size, overlap: overlap).process(input, count: count, source: source, onsets: onsets,
+                                                                     preserveLowPhase: !percussive)
         if percussive { TransientCopy.apply(to: &out, source: input, output: output, onsets: onsets, until: count) }
         out.left.removeSubrange(min(count, out.left.count)...)
         out.right.removeSubrange(min(count, out.right.count)...)
@@ -144,10 +148,30 @@ enum Onsets {
             let lo = max(0, i - w), hi = min(flux.count, i + w + 1)
             return max(0, flux[i] - 1.2 * (prefix[hi] - prefix[lo]) / Float(hi - lo))
         }
-        let threshold = sensitivity * (novelty.max() ?? 0)
-        guard threshold > 0 else { return [] }
+        let globalMax = novelty.max() ?? 0
+        guard globalMax > 0 else { return [] }
+        // Local adaptive peak over ±2 s (~200 hops) with a global noise floor:
+        // one loud crash or drop no longer blinds onset detection across quiet
+        // verses, piano plucks, or ghost hi-hats.
+        let globalFloor = 0.08 * sensitivity * globalMax
+        let localHalf = 200
+        let block = 40
+        let blockCount = (novelty.count + block - 1) / block
+        var blockMax = [Float](repeating: 0, count: blockCount)
+        for b in 0..<blockCount {
+            let lo = b * block, hi = min(novelty.count, lo + block)
+            var m: Float = 0
+            for j in lo..<hi where novelty[j] > m { m = novelty[j] }
+            blockMax[b] = m
+        }
         var result: [Int] = []
-        for i in novelty.indices where novelty[i] > threshold {
+        for i in novelty.indices {
+            let bLo = max(0, (i - localHalf) / block)
+            let bHi = min(blockCount - 1, (i + localHalf) / block)
+            var localPeak: Float = 0
+            for b in bLo...bHi where blockMax[b] > localPeak { localPeak = blockMax[b] }
+            let threshold = max(globalFloor, sensitivity * localPeak)
+            guard novelty[i] > threshold else { continue }
             let lo = max(0, i - 3), hi = min(novelty.count - 1, i + 3)
             if (lo...hi).allSatisfy({ novelty[$0] <= novelty[i] }) && (lo..<i).allSatisfy({ novelty[$0] < novelty[i] }) {
                 result.append(i * TempoEstimator.hop)
@@ -515,8 +539,12 @@ enum TransientCopy {
                 guard s >= 0 && s < source.count else { continue }
                 let u = t - start, v = stop - t
                 var g: Float = 1
-                if u < fadeIn { g = Float(u) / Float(fadeIn) }
-                if v < fadeOut { g = min(g, Float(v) / Float(fadeOut)) }
+                if u < fadeIn {
+                    g = 0.5 * (1 - cosf(Float.pi * Float(u) / Float(fadeIn)))
+                }
+                if v < fadeOut {
+                    g = min(g, 0.5 * (1 - cosf(Float.pi * Float(v) / Float(fadeOut))))
+                }
                 out.left[t] = out.left[t] * (1 - g) + source.left[s] * g
                 out.right[t] = out.right[t] * (1 - g) + source.right[s] * g
             }

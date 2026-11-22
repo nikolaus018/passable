@@ -88,6 +88,11 @@ struct TrackStructure: Codable, Equatable {
     /// put on (see `VocalPhrasing.cut`).
     var vocalBreaths: [Double]?
     var breathSpans: [Double]?
+    /// Compact 4-element sonic/timbre fingerprint in 0…1:
+    /// `[brightness, lowWeight, drumPunch, harmonicBalance]`, used by
+    /// Auto-Order to group tracks with compatible sonic texture. Optional so
+    /// cached structures decode and lazily backfill on load.
+    var timbre: [Float]?
 
     /// How loud the track is when it's going: the level of its loud bars
     /// (80th percentile), which is what a DJ matches with the trim knob.
@@ -351,8 +356,120 @@ struct TrackStructure: Codable, Equatable {
         structure.vocalBreaths = stems[.vocals].map(breaths) ?? []
         structure.vocalChroma = stems[.vocals].map { chromaPerBar([$0], normalised: false) } ?? []
         structure.heardReference = heardReference(stems: stems, grid: grid)
+        structure.timbre = measureTimbre(stems: stems)
         structure.activityMeasure = Self.activityMeasure
         return structure
+    }
+
+    /// Measures a 4-dimensional sonic texture fingerprint in 0…1 from the
+    /// stems: `[brightness (>2.5 kHz share), lowWeight (bass + sub share),
+    /// drumPunch (transient crest), harmonicBalance (melody vs drums)]`.
+    static func measureTimbre(stems: [StemKind: StemAudio]) -> [Float] {
+        let sr = AudioIO.sampleRate
+        let count = stems.values.map(\.count).min() ?? 0
+        guard count > Int(sr * 2) else { return [0.5, 0.5, 0.5, 0.5] }
+        let slices = 12
+        let win = min(Int(sr * 0.5), count / max(1, slices + 2))
+        guard win >= 512 else { return [0.5, 0.5, 0.5, 0.5] }
+        let startMin = Int(Double(count) * 0.12)
+        let span = max(1, Int(Double(count) * 0.76) - win)
+
+        var hpBright = Biquad()
+        hpBright.set(.highPass(frequency: 2_500, q: 0.707), sampleRate: sr)
+        var lpSub = Biquad()
+        lpSub.set(.lowPass(frequency: 150, q: 0.707), sampleRate: sr)
+
+        var brightNum: Double = 0, brightDen: Double = 0
+        var lowNum: Double = 0, lowDen: Double = 0
+        var otherSum: Double = 0, drumsSum: Double = 0
+        var crests: [Float] = []
+
+        var bufL = [Float](repeating: 0, count: win), bufR = [Float](repeating: 0, count: win)
+        var tmpL = [Float](repeating: 0, count: win), tmpR = [Float](repeating: 0, count: win)
+
+        for s in 0..<slices {
+            let pos = startMin + (slices > 1 ? s * span / (slices - 1) : 0)
+            guard pos + win <= count else { continue }
+            var dPow: Double = 0, bPow: Double = 0, oPow: Double = 0
+            if let d = stems[.drums] {
+                var l: Float = 0, r: Float = 0
+                vDSP_measqv(d.left.pointer + pos, 1, &l, vDSP_Length(win))
+                vDSP_measqv(d.right.pointer + pos, 1, &r, vDSP_Length(win))
+                dPow = Double(l + r) * 0.5
+                drumsSum += dPow.squareRoot()
+                if dPow > 1e-6 {
+                    var peakL: Float = 0, peakR: Float = 0
+                    vDSP_maxmgv(d.left.pointer + pos, 1, &peakL, vDSP_Length(win))
+                    vDSP_maxmgv(d.right.pointer + pos, 1, &peakR, vDSP_Length(win))
+                    let crest = max(peakL, peakR) / max(1e-5, Float(dPow.squareRoot()))
+                    crests.append(crest)
+                }
+                // Sub-150 Hz drum kick energy
+                memcpy(&tmpL, d.left.pointer + pos, win * MemoryLayout<Float>.size)
+                memcpy(&tmpR, d.right.pointer + pos, win * MemoryLayout<Float>.size)
+                lpSub.reset()
+                lpSub.process(&tmpL, &tmpR, count: win)
+                var sl: Float = 0, srPow: Float = 0
+                vDSP_measqv(tmpL, 1, &sl, vDSP_Length(win))
+                vDSP_measqv(tmpR, 1, &srPow, vDSP_Length(win))
+                lowNum += Double(sl + srPow) * 0.5
+            }
+            if let b = stems[.bass] {
+                var l: Float = 0, r: Float = 0
+                vDSP_measqv(b.left.pointer + pos, 1, &l, vDSP_Length(win))
+                vDSP_measqv(b.right.pointer + pos, 1, &r, vDSP_Length(win))
+                bPow = Double(l + r) * 0.5
+                lowNum += bPow
+            }
+            if let o = stems[.other] {
+                var l: Float = 0, r: Float = 0
+                vDSP_measqv(o.left.pointer + pos, 1, &l, vDSP_Length(win))
+                vDSP_measqv(o.right.pointer + pos, 1, &r, vDSP_Length(win))
+                oPow = Double(l + r) * 0.5
+                otherSum += oPow.squareRoot()
+            }
+            let totPow = dPow + bPow + oPow
+            lowDen += totPow
+
+            // Brightness (>2.5 kHz) of other + drums
+            vDSP_vclr(&bufL, 1, vDSP_Length(win))
+            vDSP_vclr(&bufR, 1, vDSP_Length(win))
+            if let o = stems[.other] {
+                vDSP_vadd(bufL, 1, o.left.pointer + pos, 1, &bufL, 1, vDSP_Length(win))
+                vDSP_vadd(bufR, 1, o.right.pointer + pos, 1, &bufR, 1, vDSP_Length(win))
+            }
+            if let d = stems[.drums] {
+                vDSP_vadd(bufL, 1, d.left.pointer + pos, 1, &bufL, 1, vDSP_Length(win))
+                vDSP_vadd(bufR, 1, d.right.pointer + pos, 1, &bufR, 1, vDSP_Length(win))
+            }
+            var bl: Float = 0, br: Float = 0
+            vDSP_measqv(bufL, 1, &bl, vDSP_Length(win))
+            vDSP_measqv(bufR, 1, &br, vDSP_Length(win))
+            brightDen += Double(bl + br) * 0.5
+            hpBright.reset()
+            hpBright.process(&bufL, &bufR, count: win)
+            var hl: Float = 0, hr: Float = 0
+            vDSP_measqv(bufL, 1, &hl, vDSP_Length(win))
+            vDSP_measqv(bufR, 1, &hr, vDSP_Length(win))
+            brightNum += Double(hl + hr) * 0.5
+        }
+
+        let brightRatio = brightDen > 1e-9 ? (brightNum / brightDen).squareRoot() : 0.25
+        let brightness = Float(min(1, max(0, brightRatio / 0.55)))
+        let lowRatio = lowDen > 1e-9 ? (lowNum / lowDen).squareRoot() : 0.45
+        let lowWeight = Float(min(1, max(0, lowRatio / 0.85)))
+        let medCrest: Float = crests.isEmpty ? 5.0 : crests.sorted()[crests.count / 2]
+        let drumPunch = min(1, max(0, (medCrest - 2.5) / 6.0))
+        let harmonicBalance = Float(otherSum + drumsSum > 1e-6 ? otherSum / (otherSum + drumsSum) : 0.5)
+        return [brightness, lowWeight, drumPunch, harmonicBalance]
+    }
+
+    /// Root-mean-square distance (0…1) between two tracks' timbre vectors.
+    static func timbreDistance(_ a: [Float]?, _ b: [Float]?) -> Double? {
+        guard let a, let b, a.count == b.count, !a.isEmpty else { return nil }
+        var sum: Float = 0
+        for i in a.indices { let d = a[i] - b[i]; sum += d * d }
+        return Double((sum / Float(a.count)).squareRoot())
     }
 
     /// How strongly a hook starts on each bar (0…1). A hook is what a song
@@ -1973,14 +2090,22 @@ enum AutoPlacement {
                 }
                 if preset == .dropSwap {
                     // Worth it only onto a real drop: a new section of B at
-                    // the switch that's clearly louder than B's bars before
-                    // it, ideally as a section of A ends.
+                    // the switch with a genuine loudness lift, a drum/bass
+                    // impact surge (common on loudness-war EDM/pop drops whose
+                    // build is already compressed near the chorus), or a strong
+                    // hook landing with a lift — ideally as a section of A ends.
                     let h = n / 2
                     let rise = sb.meanLoudness(bars: (c + h)..<(c + h + 8)) - sb.meanLoudness(bars: c..<(c + h))
-                    // A cut onto anything less than a real drop is just a
-                    // hard cut: not a Drop Swap spot at all.
-                    guard (rise >= 4 && bound(boundB, c + h) >= 0.5) || spot != nil else { continue }
-                    score += 1.0 * bound(boundB, c + h) * min(1, max(0, (rise - 2) / 6))
+                    let preLow = sb.meanActivity(.bass, bars: max(0, c + h - 4)..<(c + h))
+                    let postLow = sb.meanActivity(.bass, bars: (c + h)..<(c + h + 4))
+                    let preDrums = sb.meanActivity(.drums, bars: max(0, c + h - 4)..<(c + h))
+                    let postDrums = sb.meanActivity(.drums, bars: (c + h)..<(c + h + 4))
+                    let impactSurge = (preLow < 0.35 && postLow > 0.70) || (preDrums < 0.40 && postDrums > 0.75)
+                    let hookDrop = sb.hook(from: c + h) >= 0.55 && rise >= 1.5
+                    let realDrop = bound(boundB, c + h) >= 0.5 && (rise >= 3.0 || impactSurge || hookDrop)
+                    guard realDrop || spot != nil else { continue }
+                    let liftScore = max(min(1, max(0, (rise - 1.5) / 6)), impactSurge ? 0.85 : 0, hookDrop ? 0.75 : 0)
+                    score += 1.0 * bound(boundB, c + h) * liftScore
                     score += 0.4 * bound(boundA, e + h)
                     score -= 0.6 * sa.meanActivity(.vocals, bars: (e + h - 1)..<(e + h + 1))
                 }

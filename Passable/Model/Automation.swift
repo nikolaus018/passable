@@ -256,6 +256,10 @@ struct Roll: Codable, Equatable {
     /// to be heard: each starts from nothing.) Optional so rolls saved
     /// before loops existed still decode.
     var seamless: Bool? = nil
+    /// A vinyl brake / tape stop: from `start` to `end` playback decelerates
+    /// smoothly from normal speed to a dead stop, pitching down and fading
+    /// out before the next track slams in.
+    var brake: Bool? = nil
 
     func shifted(by delta: Double) -> Roll {
         var r = self

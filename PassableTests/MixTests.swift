@@ -736,4 +736,132 @@ final class SetShapeTests: XCTestCase {
         let hz = Double(crossings) / 2 / (Double(132_300 - 44_101) / sr)
         XCTAssertEqual(hz, 330 * pow(2, 2.0 / 12), accuracy: 2)
     }
+
+    func testDJFilter24dBSlopeAndBypass() {
+        let sr = AudioIO.sampleRate
+        var filter = DJFilter()
+        let n = 8192
+        let tone125 = (0..<n).map { Float(0.5 * sin(2 * Double.pi * 125 * Double($0) / sr)) }
+        var l = tone125, r = tone125
+        l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+            filter.process(lp.baseAddress!, rp.baseAddress!, count: n)
+        } }
+        XCTAssertEqual(l, tone125, "bypass is bit-exact")
+
+        // 24 dB/oct HPF at 500 Hz: 125 Hz is 2 octaves below → ~48 dB attenuation (< 0.008 from 0.5).
+        filter.set(.highPass, frequency: 500, sampleRate: sr)
+        l = tone125; r = tone125
+        l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+            filter.process(lp.baseAddress!, rp.baseAddress!, count: n)
+        } }
+        let settled = l[(n / 2)..<n].map(abs).max()!
+        XCTAssertLessThan(settled, 0.008, "4-pole 24 dB/oct HPF strongly rejects 2 octaves below cutoff")
+    }
+
+    func testLowIsolatorHasNoMidCutCombNotch() {
+        let sr = AudioIO.sampleRate
+        let n = 16_384
+        func measure(hz: Double, gainDB: Double) -> Float {
+            var iso = LowIsolator()
+            iso.set(gainDB: gainDB, sampleRate: sr)
+            let sig = (0..<n).map { Float(0.5 * sin(2 * Double.pi * hz * Double($0) / sr)) }
+            var l = sig, r = sig
+            l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+                iso.process(lp.baseAddress!, rp.baseAddress!, count: n)
+            } }
+            return l[(n / 2)..<n].map(abs).max()!
+        }
+        // 0 dB is bit-exact transparent.
+        var bypass = LowIsolator()
+        let tone = (0..<1024).map { Float(0.5 * sin(2 * Double.pi * 200 * Double($0) / sr)) }
+        var bl = tone, br = tone
+        bl.withUnsafeMutableBufferPointer { lp in br.withUnsafeMutableBufferPointer { rp in
+            bypass.process(lp.baseAddress!, rp.baseAddress!, count: 1024)
+        } }
+        XCTAssertEqual(bl, tone, "0 dB isolator is bit-exact")
+        // Full kill (-54 dB): 55 Hz killed, 400 Hz untouched.
+        XCTAssertLessThan(measure(hz: 55, gainDB: LowIsolator.killDecibels), 0.004)
+        XCTAssertGreaterThan(measure(hz: 400, gainDB: LowIsolator.killDecibels), 0.48)
+        // Partial -6 dB cut: 200 Hz has NO comb-filtering notch (old BW6 dry/wet dropped -33 dB here!).
+        XCTAssertGreaterThan(measure(hz: 200, gainDB: -6), 0.42, "no phase-cancellation notch at 200 Hz during partial low cut")
+    }
+
+    func testMidVocalDipperTargetsMidAndPreservesSide() {
+        let sr = AudioIO.sampleRate
+        let n = 8192
+        let tone = (0..<n).map { Float(0.5 * sin(2 * Double.pi * 1500 * Double($0) / sr)) }
+        // Mono (Mid-only) signal: dipped by ~4.5 dB once smoothed in.
+        var ml = tone, mr = tone
+        var dipper = MidVocalDipper(sampleRate: sr)
+        ml.withUnsafeMutableBufferPointer { lp in mr.withUnsafeMutableBufferPointer { rp in
+            for b in stride(from: 0, to: n, by: 256) {
+                dipper.process(lp.baseAddress! + b, rp.baseAddress! + b, count: 256, target: 1, sampleRate: sr)
+            }
+        } }
+        let monoPeak = ml[(n / 2)..<n].map(abs).max()!
+        XCTAssertLessThan(monoPeak, 0.34, "Mid 1.5 kHz vocal presence is dipped")
+        XCTAssertGreaterThan(monoPeak, 0.25, "dip stays musical (~-4.5 dB)")
+
+        // Pure Side signal (L = +tone, R = -tone): completely untouched.
+        var sl = tone, srBuf = tone.map { -$0 }
+        dipper.reset()
+        sl.withUnsafeMutableBufferPointer { lp in srBuf.withUnsafeMutableBufferPointer { rp in
+            for b in stride(from: 0, to: n, by: 256) {
+                dipper.process(lp.baseAddress! + b, rp.baseAddress! + b, count: 256, target: 1, sampleRate: sr)
+            }
+        } }
+        let sidePeak = sl[(n / 2)..<n].map(abs).max()!
+        XCTAssertEqual(sidePeak, 0.5, accuracy: 0.005, "Side stereo width is untouched")
+    }
+
+    func testBusGlueTransparentSoloAndGentleDuringBlends() {
+        let sr = AudioIO.sampleRate
+        let n = 16_384
+        let loud = (0..<n).map { Float(0.7 * sin(2 * Double.pi * 500 * Double($0) / sr)) }
+        var glue = BusGlue(sampleRate: sr)
+        var l = loud, r = loud
+        l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+            glue.process(lp.baseAddress!, rp.baseAddress!, count: n, active: false)
+        } }
+        XCTAssertEqual(l, loud, "solo playback bypasses bus glue bit-exact")
+
+        l = loud; r = loud
+        l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+            glue.process(lp.baseAddress!, rp.baseAddress!, count: n, active: true)
+        } }
+        let gluedPeak = l[(n / 2)..<n].map(abs).max()!
+        XCTAssertLessThan(gluedPeak, 0.65, "active bus glue gently tames blend peaks")
+        XCTAssertGreaterThan(gluedPeak, 0.45, "bus glue stays subtle (<= 3.5 dB GR)")
+    }
+
+    func testVinylBrakeDeceleratesSmoothlyWithoutClicks() {
+        let sr = AudioIO.sampleRate
+        let n = Int(sr * 1.2)
+        let tone = (0..<n).map { Float(0.4 * sin(2 * Double.pi * 440 * Double($0) / sr)) }
+        let stem = StemAudio(left: MappedChannel(samples: tone), right: MappedChannel(samples: tone))
+        let lane = Lane(side: .a, stem: .other)
+        let brakeRoll = Roll(side: .a, stem: .other, start: 0.5, end: 1.0, anchor: 0.5, length: 0.5, brake: true)
+        let frameRoll = MixSnapshot.FrameRoll(brakeRoll, sampleRate: sr)!
+        let renderer = MixRenderer(snapshot: MixSnapshot(
+            lanes: [.init(audio: stem, offset: 0, envelopes: lane.envelopes, audible: true, rolls: [frameRoll])],
+            length: n, delaySeconds: 0.3, masterGain: 1))
+        var l = [Float](repeating: 0, count: n), r = l
+        renderer.render(left: &l, right: &r, count: n)
+
+        func crossings(_ range: Range<Int>) -> Int {
+            var c = 0
+            for i in (range.lowerBound + 1)..<range.upperBound where (l[i - 1] < 0) != (l[i] < 0) { c += 1 }
+            return c
+        }
+        // Pitch slows noticeably from the start of the brake to the second half.
+        let earlyRate = crossings(Int(0.50 * sr)..<Int(0.60 * sr))
+        let lateRate = crossings(Int(0.75 * sr)..<Int(0.85 * sr))
+        XCTAssertLessThan(lateRate, earlyRate / 2, "turntable spin-down decelerates pitch")
+        // Smooth tail fade reaches near silence right before brakeEnd.
+        XCTAssertLessThan(l[Int(0.99 * sr)..<Int(1.0 * sr)].map(abs).max()!, 0.015)
+        // Entry at 0.5s is seamless (no step click).
+        let own = Float(0.4 * 2 * Double.pi * 440 / sr)
+        let entryJump = (Int(0.49 * sr)..<Int(0.51 * sr)).map { abs(l[$0 + 1] - l[$0]) }.max()!
+        XCTAssertLessThan(entryJump, 2.5 * own, "brake enters smoothly at speed 1.0")
+    }
 }

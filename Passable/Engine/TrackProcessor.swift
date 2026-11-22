@@ -174,6 +174,10 @@ final class TrackProcessor: @unchecked Sendable {
                 cached.structure?.heardReference = TrackStructure.heardReference(stems: stems, grid: cached.grid)
                 StemCache.saveAnalysis(cached, to: directory)
             }
+            if cached.structure != nil, cached.structure?.timbre == nil {
+                cached.structure?.timbre = TrackStructure.measureTimbre(stems: stems)
+                StemCache.saveAnalysis(cached, to: directory)
+            }
             if cached.tuningCents == nil {
                 cached.tuningCents = TrackAnalyzer.tuningCents(stems: stems)
                 StemCache.saveAnalysis(cached, to: directory)
@@ -296,7 +300,7 @@ final class TrackProcessor: @unchecked Sendable {
             let start = map.rampStart.isFinite ? String(Int(map.rampStart.rounded())) : "inf"
             let exit = map.hasExit
                 ? String(format: "-x%.9f-%d-%d", map.exitRate, Int(map.exitStart.rounded()), Int(map.exitLength.rounded())) : ""
-            return String(format: "v4-%.9f-%@-%d-%+d", map.rate, start, Int(map.rampLength.rounded()), semitones) + exit
+            return String(format: "v5-%.9f-%@-%d-%+d", map.rate, start, Int(map.rampLength.rounded()), semitones) + exit
         }
 
         func isSame(as other: MatchPlan) -> Bool {

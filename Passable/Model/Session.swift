@@ -925,7 +925,10 @@ final class Session: ObservableObject {
                 trim: Float(pow(10, trimDB(lane.side) / 20)),
                 rolls: rolls.filter { $0.side == lane.side && $0.stem == lane.stem }.sorted { $0.start < $1.start }
                     .compactMap { MixSnapshot.FrameRoll($0, sampleRate: sr) },
-                isVocal: lane.stem == .vocals)
+                isVocal: lane.stem == .vocals,
+                trackIndex: lane.side == .a ? 0 : 1,
+                isOther: lane.stem == .other,
+                isDrums: lane.stem == .drums)
         }
         // Dotted-eighth echo: syncopated against the grid, so repeats sit
         // between the kicks instead of on top of them.

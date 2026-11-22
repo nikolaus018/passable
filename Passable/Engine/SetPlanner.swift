@@ -101,13 +101,12 @@ enum MixMath {
     }
 
     /// Bars B takes to glide from A's tempo back to its own once A is gone:
-    /// about 0.5 % per bar, as a DJ rides the pitch fader back over half a
-    /// minute while a record plays alone, so no one hears the song speed up
-    /// or slow down. (At 1.5 % a bar, as this was, 4.5 % went by in three
-    /// bars, six seconds: heard as the song changing speed.)
+    /// about 0.75 % per bar (< 0.19 % per beat, still imperceptible to the
+    /// ear while returning the incoming track to untouched original audio
+    /// noticeably sooner).
     static func glideBars(rate: Double) -> Int {
         let percent = abs(rate - 1) * 100
-        return percent < 0.05 ? 1 : min(16, max(2, Int((percent / 0.5).rounded(.up))))
+        return percent < 0.05 ? 1 : min(16, max(2, Int((percent / 0.75).rounded(.up))))
     }
 
     /// Bars A takes to glide to the blend's tempo before it (0 where the
@@ -320,13 +319,15 @@ struct PairPlan: Equatable {
             options.append((.stemSwap, 8, length(8), 0))
             options.append((.dropSwap, 16, length(16) - 0.2, 0))
             options.append((.dropSwap, 8, length(8) - 0.2, 0))
-            // Electronic / low-vocal groove pairs at very close tempos and
+            // Electronic / low-vocal groove pairs at close tempos and
             // compatible keys can ride a lush 24-bar Long Blend.
-            if MixMath.stretch(rate) < 0.03, !clash(0),
-               let sa = a.structure, let sb = b.structure,
-               sa.meanActivity(.vocals, bars: (sa.loudness.count / 2)..<sa.loudness.count) < 0.35,
-               sb.meanActivity(.vocals, bars: 0..<max(4, sb.loudness.count / 4)) < 0.35 {
-                options.append((.longBlend, 24, length(24) - 0.1, 0))
+            if MixMath.stretch(rate) < 0.04, !clash(0),
+               let sa = a.structure, let sb = b.structure {
+                let vA = sa.meanActivity(.vocals, bars: (sa.loudness.count / 2)..<sa.loudness.count)
+                let vB = sb.meanActivity(.vocals, bars: 0..<max(4, sb.loudness.count / 4))
+                if (vA < 0.40 && vB < 0.50) || (vA < 0.50 && vB < 0.40) {
+                    options.append((.longBlend, 24, length(24) - 0.1, 0))
+                }
             }
             // And each Stem Swap over A's beat looped (see
             // `TransitionBuilder.loop`): four bars, the phrase a DJ loops.
@@ -437,6 +438,12 @@ struct PairPlan: Equatable {
         // one big drop far more than the same in small steps.
         let drop = SetOrdering.energy(a) - SetOrdering.energy(b)
         cost += drop > 0 ? 2.0 * drop + 6.0 * drop * drop : 0.2 * -drop
+        // Timbral continuity: nudge Auto-Order to group tracks with compatible
+        // sonic texture (bright synths with bright synths, dark 808s with dark
+        // 808s) without ever overriding tempo, key, or energy fundamentals.
+        if let dist = TrackStructure.timbreDistance(a.structure?.timbre, b.structure?.timbre) {
+            cost += 2.2 * dist * dist
+        }
         cost -= 0.3 * Double(placement.score)
         return cost
     }
@@ -450,7 +457,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "30"
+    static let planner = "31"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -1327,16 +1334,23 @@ struct SetMix: @unchecked Sendable {
                 lanes.append(.init(audio: t.stems[stem], offset: Int((t.offset * sr).rounded()),
                                    envelopes: t.envelopes[stem] ?? Lane(side: .a, stem: stem).envelopes,
                                    audible: including(i, stem), trim: trim, rolls: frameRolls,
-                                   isVocal: stem == .vocals))
+                                   isVocal: stem == .vocals, trackIndex: i,
+                                   isOther: stem == .other, isDrums: stem == .drums))
             }
         }
-        // Each transition echoes at the outgoing track's tempo (dotted
-        // eighth); switch half-way between transitions.
+        // Each transition echoes at the outgoing track's tempo with a musical
+        // subdivision: quarter-note on fast tracks (>=132 BPM) or Cuts/Drop
+        // Swaps for punchy stadium repeats, eighth-note on slow tracks
+        // (<=98 BPM) so echoes stay crisp, and dotted-eighth in between.
         var schedule: [(from: Int, seconds: Double)] = []
         var previousEnd = 0.0
         for tr in transitions {
             let from = schedule.isEmpty ? 0 : (previousEnd + tr.start) / 2
-            schedule.append((Int(from * sr), tr.barSeconds / 4 * 0.75))
+            let beat = tr.barSeconds / 4
+            let bpm = beat > 0 ? 60.0 / beat : 120.0
+            let mult: Double = (tr.edit.preset == .echoOut || tr.edit.preset == .dropSwap || bpm >= 132)
+                ? 1.0 : (bpm <= 98 ? 0.5 : 0.75)
+            schedule.append((Int(from * sr), beat * mult))
             previousEnd = tr.end
         }
         let first = schedule.first?.seconds ?? 0.35
@@ -2557,6 +2571,8 @@ enum SetBuilder {
         let rateA: Double, barSeconds: Double
         let shiftA: Int
         let drops: Bool
+        let lastStyle: TransitionBuilder.BuildStyle?
+        let vinylBrake: Bool
     }
 
     /// A Stem Swap rolls into a drop only from a blend at least this long:
@@ -2753,7 +2769,9 @@ enum SetBuilder {
                                     matched: plans[0].map.isIdentity ? nil : opener,
                                     offset: -first.analysis.grid.downbeat(startBar), envelopes: [:])]
         var shifts = [0]
-        var sinceDrop = 3
+        var sinceDrop = 2
+        var lastBuildStyle: TransitionBuilder.BuildStyle?
+        var lastCutWasBrake = false
         // Pairs planned for grooves that lock which turned out not to, and
         // for melodies that layer which turned out to clash.
         var broken: Set<PairKey> = [], clashing: Set<PairKey> = [], locking: Set<PairKey> = []
@@ -2809,16 +2827,29 @@ enum SetBuilder {
             let map = plans[k].map
             let matched = try await rendition(k)
             // A roll into the drop is a moment only if it isn't every
-            // transition: three without one in between, and only after a blend
+            // transition: two without one in between, and only after a blend
             // long enough to be one. A Drop Swap is built on it, but
             // never right after another roll: two in a row is a routine.
             let drops = !byHand && plan.placement.dropMoment && edit.preset != .echoOut
-                && (edit.preset == .dropSwap ? sinceDrop >= 1 : edit.bars >= dropMomentBars && sinceDrop >= 3)
+                && (edit.preset == .dropSwap ? sinceDrop >= 1 : edit.bars >= dropMomentBars && sinceDrop >= 2)
+            // Alternate vinyl brake spin-downs on eligible tempo-jump Cuts so
+            // consecutive cuts stay varied without overusing the turntable stop.
+            let isCut = !byHand && edit.preset == .echoOut && edit.bars <= 1
+            let cutStretch = MixMath.stretch(MixMath.rate(a: ga.bpm, b: gb.bpm))
+            let aSingsAtCut = isCut && (a.stems[.vocals].flatMap { vA in
+                VocalPhrasing.reference(a.loaded.analysis.structure).map { ref in
+                    VocalPhrasing.sounding(vA, offset: aOffset, reference: ref,
+                                           at: start - 0.5 * blendBar, beat: 0.5 * blendBar)
+                }
+            } ?? false)
+            let vinylBrake = isCut && cutStretch > 0.12 && !aSingsAtCut && !lastCutWasBrake
+            if isCut { lastCutWasBrake = vinylBrake }
             let buildKey = BuildKey(a: a.url, b: tracks[k].url, analysisA: a.loaded.analysis, analysisB: b.analysis,
                                     renditionA: plans[k - 1], rateB: map.rate, rampStartB: map.rampStart,
                                     rampLengthB: map.rampLength, skip: skippedBars > 0 ? draft.skip : nil, plan: plan,
                                     edit: draft.edit, isEdited: isEdited, entryRange: entryRange, rateA: draft.rateA,
-                                    barSeconds: blendBar, shiftA: shifts[k - 1], drops: drops)
+                                    barSeconds: blendBar, shiftA: shifts[k - 1], drops: drops,
+                                    lastStyle: drops ? lastBuildStyle : nil, vinylBrake: vinylBrake)
             if let previous, let old = previous.transitions.first(where: { $0.made?.key == buildKey }), let made = old.made,
                previous.tracks.indices.contains(old.to) {
                 // Built before from exactly this: the same transition, at
@@ -2838,6 +2869,13 @@ enum SetBuilder {
                 shifts.append(old.edit.semitones)
                 sinceDrop = byHand ? (old.edit.rolls.contains { $0.seamless != true } ? 0 : sinceDrop + 1)
                     : drops ? 0 : sinceDrop + 1
+                if drops {
+                    if old.payoff.contains("a cappella break into the drop") { lastBuildStyle = .acappellaBreak }
+                    else if old.payoff.contains("loop-halve into the drop") { lastBuildStyle = .loopHalve }
+                    else if old.payoff.contains("riser into the drop") { lastBuildStyle = .riser }
+                    else if old.payoff.contains("bass pull into the drop") { lastBuildStyle = .bassDrop }
+                    else if old.payoff.contains("roll into the drop") { lastBuildStyle = .snareRoll }
+                }
                 continue
             }
 
@@ -3286,18 +3324,47 @@ enum SetBuilder {
                     BeatAlign.snareBeat($0, offset: aPlays, barStart: start + (switchBar - 1) * blendBar,
                                         beat: blendBar / 4)
                 } : nil
-                // Vary build styles across a set so drop moments stay fresh:
-                // riser if no crisp snare beat, otherwise rotate through
-                // snareRoll, loopHalve, bassDrop, and riser deterministically.
+                // Choose a musical build style matched to the outgoing vocal,
+                // snare clarity, and incoming drop energy — never repeating the
+                // previous drop moment's style back to back.
                 let buildStyle: TransitionBuilder.BuildStyle
                 if !dropMoment {
                     buildStyle = .snareRoll
-                } else if rollBeat == nil {
-                    buildStyle = .riser
                 } else {
-                    let styles: [TransitionBuilder.BuildStyle] = [.snareRoll, .loopHalve, .bassDrop, .riser]
-                    buildStyle = styles[k % styles.count]
+                    let aSingsIntoDrop = loop == 0 && (vocalOut ?? switchBar) >= switchBar - 0.5
+                        && (a.stems[.vocals].flatMap { vA in
+                            VocalPhrasing.reference(a.loaded.analysis.structure).map { ref in
+                                VocalPhrasing.sounding(vA, offset: aOffset, reference: ref,
+                                                       at: start + (switchBar - 1) * blendBar, beat: blendBar)
+                            }
+                        } ?? false)
+                    let preferred: [TransitionBuilder.BuildStyle]
+                    if aSingsIntoDrop {
+                        preferred = [.acappellaBreak, .riser, .bassDrop, .snareRoll]
+                    } else if rollBeat != nil {
+                        let highEnergy = SetOrdering.energy(b.analysis) >= 0.65
+                        preferred = highEnergy ? [.snareRoll, .loopHalve, .riser, .bassDrop]
+                                               : [.bassDrop, .riser, .loopHalve, .snareRoll]
+                    } else {
+                        preferred = [.riser, .bassDrop, .loopHalve]
+                    }
+                    let varied = preferred.filter { $0 != lastBuildStyle }
+                    let pool = varied.isEmpty ? preferred : varied
+                    buildStyle = pool[k % min(2, pool.count)]
+                    lastBuildStyle = buildStyle
                 }
+                // Adaptive vocal echo send: full (0.78) when A is actively
+                // singing into its exit, gentler (0.45) when A already ends
+                // into a 2+ beat natural pause so we don't amplify bleed.
+                let vocalSend: Double = {
+                    guard let vocalsA = a.stems[.vocals],
+                          let refA = VocalPhrasing.reference(a.loaded.analysis.structure) else { return 0.78 }
+                    let exitBar = vocalOut ?? (edit.preset == .echoOut ? -0.125 : switchBar)
+                    let beat = blendBar / 4
+                    let recent = VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: refA,
+                                                        at: start + exitBar * blendBar - 2 * beat, beat: 2 * beat)
+                    return recent ? 0.78 : 0.45
+                }()
                 // Word-targeted vocal echo throw: find where the last sung
                 // word before `vocalOut` begins so only that word echoes out.
                 let vocalThrowStart: Double? = vocalOut.flatMap { outBar in
@@ -3343,7 +3410,8 @@ enum SetBuilder {
                                            carry: (plan.placement.carry || loop > 0) && !keysClash && !mashup, under: under,
                                            loop: loop, loopBack: loopBack, hats: hats, voiceStep: voiceStep,
                                            underUntil: underUntil, buildStyle: buildStyle,
-                                           vocalThrowStart: vocalThrowStart, mashupUnder: mashupUnder)
+                                           vocalThrowStart: vocalThrowStart, mashupUnder: mashupUnder,
+                                           vocalSend: vocalSend, vinylBrake: vinylBrake)
                 }
                 // B's melody plays under A's voice for as long as A sings,
                 // from the two songs' levels there, and steps up as the
@@ -3447,7 +3515,18 @@ enum SetBuilder {
                 }
                 payoff = plan.placement.payoff.filter { !$0.hasPrefix("mashup") && $0 != "roll into the drop" }
                 if mashup { payoff.append("mashup: B sings over A's beat") }
-                if dropMoment { payoff.append("roll into the drop") }
+                if dropMoment {
+                    let styleNote: String
+                    switch buildStyle {
+                    case .snareRoll: styleNote = "roll into the drop"
+                    case .loopHalve: styleNote = "loop-halve into the drop"
+                    case .riser: styleNote = "riser into the drop"
+                    case .bassDrop: styleNote = "bass pull into the drop"
+                    case .acappellaBreak: styleNote = "a cappella break into the drop"
+                    }
+                    payoff.append(styleNote)
+                }
+                if vinylBrake { payoff.append("vinyl brake") }
                 if dropMoment { dropAt = start + switchBar * blendBar }
                 if plan.placement.carry && !keysClash && !mashup { payoff.append("A's beat carries B in") }
                 if loop > 0 { payoff.append("A's beat loops under B") }
