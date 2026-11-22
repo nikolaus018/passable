@@ -930,6 +930,18 @@ final class SetShapeTests: XCTestCase {
         XCTAssertGreaterThan(boom, 0.04, "sub-impact boom reinforces the drop")
     }
 
+    func testMelodyHoldsUntilBCanTakeOver() {
+        func level(hold: Bool, bar: Double) -> Double {
+            let lanes = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 8,
+                                               lowSwap: 8, holdMelody: hold).lanes
+            return lanes.first { $0.side == .a && $0.stem == .other }!.value(.volume, at: 2 * bar)
+        }
+        XCTAssertLessThan(level(hold: false, bar: 6), 0.01, "A's melody is gone by bar 6 by default")
+        XCTAssertEqual(level(hold: true, bar: 6), 1, accuracy: 0.01, "held until the bar before the switch")
+        XCTAssertLessThan(level(hold: true, bar: 8), 0.01, "and gone on the switch")
+
+    }
+
     func testTurntableSpinbackReversesSmoothlyWithoutOutOfBounds() {
         let sr = AudioIO.sampleRate
         let n = Int(sr * 1.5)

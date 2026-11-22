@@ -189,6 +189,9 @@ struct TransitionBuilder {
     /// Early vocal tease ("ghost hook"): plays `duration` bars of B's vocal
     /// from bar `from` at bar `at` (4 bars before the drop) through a radio HPF + echo.
     let vocalTease: (at: Double, from: Double, duration: Double)?
+    /// B's melody is too quiet to take over from A's before the switch: A's
+    /// plays on and dissolves over the last bar or two before it.
+    let holdMelody: Bool
     /// Where A's vocal ended up leaving and B's coming in (bars from B's
     /// entry), for the caller to check against the audio.
     private(set) var vocalExit: Double?, vocalEntry: Double?
@@ -205,7 +208,8 @@ struct TransitionBuilder {
          loop: Int = 0, loopBack: Int = 0, hats: Bool = false, voiceStep: Double = 0, underUntil: Double? = nil,
          buildStyle: BuildStyle = .snareRoll, vocalThrowStart: Double? = nil, mashupUnder: Double = 0,
          vocalSend: Double = 0.78, vinylBrake: Bool = false, spinback: Bool = false,
-         acapellaBridge: Bool = false, vocalTease: (at: Double, from: Double, duration: Double)? = nil) {
+         acapellaBridge: Bool = false, vocalTease: (at: Double, from: Double, duration: Double)? = nil,
+         holdMelody: Bool = false) {
         self.buildStyle = buildStyle
         self.vocalThrowStart = vocalThrowStart
         self.mashupUnder = mashupUnder
@@ -214,6 +218,7 @@ struct TransitionBuilder {
         self.spinback = spinback && !vinylBrake
         self.acapellaBridge = acapellaBridge && !vinylBrake && !spinback
         self.vocalTease = vocalTease
+        self.holdMelody = holdMelody
         self.underUntil = underUntil
         self.hats = hats
         self.voiceStep = voiceStep
@@ -269,7 +274,7 @@ struct TransitionBuilder {
                      voiceStep: Double = 0, underUntil: Double? = nil, buildStyle: BuildStyle = .snareRoll,
                      vocalThrowStart: Double? = nil, mashupUnder: Double = 0, vocalSend: Double = 0.78,
                      vinylBrake: Bool = false, spinback: Bool = false, acapellaBridge: Bool = false,
-                     vocalTease: (at: Double, from: Double, duration: Double)? = nil) -> Made {
+                     vocalTease: (at: Double, from: Double, duration: Double)? = nil, holdMelody: Bool = false) -> Made {
         var builder = TransitionBuilder(lanes: lanes, start: start, barSeconds: barSeconds, bars: bars,
                                         vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap,
                                         drumsLayer: drumsLayer, drumsLinger: drumsLinger,
@@ -281,7 +286,8 @@ struct TransitionBuilder {
                                         underUntil: underUntil, buildStyle: buildStyle,
                                         vocalThrowStart: vocalThrowStart, mashupUnder: mashupUnder,
                                         vocalSend: vocalSend, vinylBrake: vinylBrake, spinback: spinback,
-                                        acapellaBridge: acapellaBridge, vocalTease: vocalTease)
+                                        acapellaBridge: acapellaBridge, vocalTease: vocalTease,
+                                        holdMelody: holdMelody)
         builder.clearAll()
         builder.write(preset)
         builder.writeLoop()
@@ -632,11 +638,11 @@ struct TransitionBuilder {
     /// fade into a blooming reverb wash over two bars under B. Reverb peaks
     /// while the melody still has full body so the post-fader send feeds a
     /// genuine tail instead of fading into silence first.
-    private mutating func dissolveMelody(from at: Double) {
-        automate(.a, .other, .filter, [(at, 0.5, .sCurve), (at + 2, 0.14, .linear)])
-        automate(.a, .other, .reverb, [(at - 0.5, 0, .sCurve), (at + 0.125, 0.72, .linear),
-                                       (at + 1.25, 0.80, .sCurve), (at + 2.25, 0, .linear)])
-        automate(.a, .other, .volume, [(at, 1, .sCurve), (at + 2, 0, .linear)])
+    private mutating func dissolveMelody(from at: Double, over span: Double = 2) {
+        automate(.a, .other, .filter, [(at, 0.5, .sCurve), (at + span, 0.14, .linear)])
+        automate(.a, .other, .reverb, [(at - 0.25 * span, 0, .sCurve), (at + 0.0625 * span, 0.72, .linear),
+                                       (at + 0.625 * span, 0.80, .sCurve), (at + 1.125 * span, 0, .linear)])
+        automate(.a, .other, .volume, [(at, 1, .sCurve), (at + span, 0, .linear)])
     }
 
     /// A's drums (and melody, where the keys let B's layer) turn their mids
@@ -1001,7 +1007,15 @@ struct TransitionBuilder {
                                                     (max(sw + 0.1, out - 0.125), 0.4625, .sCurve), (out, 0.5, .linear)])
                     }
                 }
-                dissolveMelody(from: Self.melodyDissolve(preset, bars: bars, switchAt: sw, carry: carry))
+                let dissolve = Self.melodyDissolve(preset, bars: bars, switchAt: sw, carry: carry)
+                // (Over two bars in a long blend: a bar's fade of a held
+                // melody there ticked on its low notes.)
+                let holdFade: Double = bars >= 16 ? 2 : 1
+                if holdMelody, sw - holdFade > dissolve {
+                    dissolveMelody(from: sw - holdFade, over: holdFade)
+                } else {
+                    dissolveMelody(from: dissolve)
+                }
             }
             if drumsLayer && drumsLinger && sw < n && !dropMoment {
                 // A's tops thin out and hand over smoothly from where the

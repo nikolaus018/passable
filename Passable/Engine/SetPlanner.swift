@@ -2804,6 +2804,12 @@ enum SetBuilder {
     /// Bars with nobody singing over a loop that make it not worth looping.
     static let loopVoicelessBars = 2.0
 
+    /// dB under A's own level (as the automation predicts it, which reads
+    /// shallower than the audio) that makes a bar of the blend a hole, and
+    /// the mean dB holding A's melody has to win back to be worth it.
+    static let melodyHoleDB: Float = 2
+    static let melodyHoldGainDB: Float = 0.75
+
     /// - Parameters:
     ///   - edits: hand-shaped transitions, by pair.
     ///   - reuse: renditions from the last build, reused when their plan
@@ -3681,7 +3687,6 @@ enum SetBuilder {
                    let vocalsA = a.stems[.vocals], let vocalsB = matched.stems[.vocals],
                    let refA = VocalPhrasing.reference(a.loaded.analysis.structure),
                    let refB = VocalPhrasing.reference(bCounted.structure) {
-                    let teaseAt = switchBar - 4
                     var hookFrom = vocalIn ?? switchBar
                     // Advance past any leading breath at `vocalIn` onto the actual
                     // first sung word/sixteenth so the tease grabs real vocal audio.
@@ -3703,24 +3708,28 @@ enum SetBuilder {
                                                                 beat: slotSec) { step += 1 }
                         hookFrom += Double(step) / Double(VocalPhrasing.slots)
                     }
-                    let aQuietAtTease = !VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: refA,
-                                                                at: start + (teaseAt - 0.125) * blendBar,
-                                                                beat: 1.0 * blendBar)
                     let bSingsAtHook = VocalPhrasing.sounding(vocalsB, offset: offset + nudge, reference: refB,
                                                               at: start + hookFrom * blendBar,
                                                               beat: 0.5 * blendBar)
                     // Compare A's chords WHERE THE TEASE PLAYS (`teaseAt`) against
                     // B's vocal WHERE THE HOOK IS SAMPLED (`hookFrom`), checking both
                     // scale clash and note-against-note roughness.
-                    let teaseHarmonyFits: Bool = {
+                    func teaseFits(at teaseAt: Double) -> Bool {
+                        guard !VocalPhrasing.sounding(vocalsA, offset: aOffset, reference: refA,
+                                                      at: start + (teaseAt - 0.125) * blendBar,
+                                                      beat: 1.0 * blendBar) else { return false }
                         guard let ca = Harmony.chroma([aStems[.other], aStems[.bass]].compactMap { $0 }, offset: aPlays,
                                                       from: start + teaseAt * blendBar, to: start + (teaseAt + 1) * blendBar),
                               let cb = Harmony.chroma([vocalsB], offset: offset + nudge,
                                                       from: start + hookFrom * blendBar, to: start + (hookFrom + 1) * blendBar)
                         else { return true }
                         return Harmony.fits(ca, cb) && Harmony.roughness(ca, cb) <= Harmony.roughTolerance
-                    }()
-                    if aQuietAtTease, bSingsAtHook, hookFrom >= teaseAt + 2.0, teaseHarmonyFits {
+                    }
+                    // Wherever A leaves it a clean bar, nearest four before the swap.
+                    let spot = [4.0, 3, 5, 6].map { switchBar - $0 }.first {
+                        $0 >= 0.5 && hookFrom >= $0 + 2 && teaseFits(at: $0)
+                    }
+                    if bSingsAtHook, let teaseAt = spot {
                         // Snap duration (0.25…0.75 bars) to a real word end in B so
                         // the ghost tease never slices mid-word.
                         var dur = 0.5
@@ -3785,6 +3794,7 @@ enum SetBuilder {
                     mashupUnder = AutoPlacement.under(a: pb, e: cueCounted, b: pa, c: edit.entryBar,
                                                       from: max(0, from), to: max(from + 1, Int(switchBar.rounded(.up))))
                 }
+                var holdMelody = false
                 func make(outFade: Double, inFade: Double, room: Double, start: Double? = nil,
                           barSeconds: Double? = nil, voiceStep: Double = 0,
                           underUntil: Double? = nil) -> TransitionBuilder.Made {
@@ -3802,7 +3812,8 @@ enum SetBuilder {
                                            underUntil: underUntil, buildStyle: buildStyle,
                                            vocalThrowStart: vocalThrowStart, mashupUnder: mashupUnder,
                                            vocalSend: vocalSend, vinylBrake: vinylBrake, spinback: spinback,
-                                           acapellaBridge: acapellaBridge, vocalTease: vocalTease)
+                                           acapellaBridge: acapellaBridge, vocalTease: vocalTease,
+                                           holdMelody: holdMelody)
                 }
                 // B's melody plays under A's voice for as long as A sings,
                 // from the two songs' levels there, and steps up as the
@@ -3835,6 +3846,41 @@ enum SetBuilder {
                 // faded down through a sentence is a crossfade; a cut on the
                 // beat is a decision.
                 let bar = blendBar, beat = bar / 4
+                // A's melody isn't let go before the swap where what B plays
+                // there, through its filters, can't fill in for it: that was
+                // the set's deepest dips. Judged on the automation itself,
+                // with and without the hold.
+                if edit.preset == .stemSwap, !keysClash, !mashup, let sa = saPlays, let sb = bCounted.structure,
+                   let pa = AutoPlacement.powers(sa, trim: Float(MixMath.trimDB(a.loaded.analysis))),
+                   let pb = AutoPlacement.powers(sb, trim: Float(MixMath.trimDB(b.analysis))) {
+                    let carried = plan.placement.carry || loop > 0
+                    let from = Int(TransitionBuilder.melodyDissolve(.stemSwap, bars: edit.bars, switchAt: switchBar,
+                                                                    carry: carried).rounded(.down))
+                    let to = Int(switchBar.rounded(.up))
+                    if to > from {
+                        func levels(hold: Bool) -> [Float] {
+                            holdMelody = hold
+                            let shape = TransitionShape(lanes: make(outFade: 0, inFade: 0, room: room, start: 0, barSeconds: 1).lanes,
+                                                        preset: edit.preset, bars: edit.bars)
+                            return (max(from, shape.first)..<min(to, shape.last)).map {
+                                shape.mixLevel($0, a: pa, e: edit.entryBar, b: pb, c: cueCounted)
+                            }
+                        }
+                        let plain = levels(hold: false), held = levels(hold: true)
+                        let before = (0..<max(1, from)).compactMap { k -> Float? in
+                            let bar = edit.entryBar + k
+                            guard bar < (pa[.drums]?.count ?? 0) else { return nil }
+                            let power = StemKind.allCases.reduce(Float(0)) { $0 + (pa[$1]?[bar].high ?? 0) + (pa[$1]?[bar].low ?? 0) }
+                            return 10 * log10(max(power, 1e-9))
+                        }.max()
+                        if let lowPlain = plain.min(), let before, !plain.isEmpty, plain.count == held.count {
+                            let gain = zip(plain, held).reduce(Float(0)) { $0 + ($1.1 - $1.0) } / Float(plain.count)
+                            holdMelody = lowPlain < before - Self.melodyHoleDB && gain >= Self.melodyHoldGainDB
+                        } else {
+                            holdMelody = false
+                        }
+                    }
+                }
                 var made = make(outFade: 0, inFade: 0, room: room)
                 var voiceStep = 0.0, underUntil: Double?
                 // The two voices met at one level where they change hands

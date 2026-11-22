@@ -70,7 +70,7 @@ if let k = CommandLine.arguments.firstIndex(of: "--vocal-step") { VocalSeparator
 // Songs not separated yet need the models: the installed app's.
 ModelLocation.directory = URL(fileURLWithPath: CommandLine.arguments.firstIndex(of: "--models").map { CommandLine.arguments[$0 + 1] }
                                  ?? "/Applications/Passable.app/Contents/Resources")
-TrackProcessor.renditionFolder = "render-matched"
+TrackProcessor.renditionFolder = ProcessInfo.processInfo.environment["PASSABLE_RENDITIONS"] ?? "render-matched"
 SetMix.Learned.isReadOnly = true
 // The tool's renditions are for runs of the same set close together: a
 // day after it last made one for a song, they go (they were 39 GB of a
@@ -358,7 +358,8 @@ if CommandLine.arguments.contains("--word-times") {
 let built = Date()
 // (PASSABLE_MOVES: which automatic moves are allowed, as `AutoMoves` bits.)
 let allowedMoves = ProcessInfo.processInfo.environment["PASSABLE_MOVES"].flatMap(Int.init).map(AutoMoves.init(rawValue:)) ?? .all
-let mix = try await SetBuilder.build(tracks, moves: allowedMoves, processor: processor) { _ in }
+let buildPace = ProcessInfo.processInfo.environment["PASSABLE_PACING"].flatMap { SetPacing(rawValue: $0) }
+let mix = try await SetBuilder.build(tracks, pacing: buildPace, moves: allowedMoves, processor: processor) { _ in }
 print("built in \(seconds(built))")
 
 try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
@@ -1059,6 +1060,9 @@ if CommandLine.arguments.contains("--report") {
     // Which automatic moves the set really uses.
     var moveCounts: [String: Int] = [:]
     for t in mix.transitions { for move in t.payoff { moveCounts[move, default: 0] += 1 } }
+    for (i, t) in mix.transitions.enumerated() {
+        print("PLAN\t\(i + 1)\t\(SongTitle.of(mix.tracks[t.from].url))\t\(SongTitle.of(mix.tracks[t.to].url))\t\(t.payoff.joined(separator: "; "))")
+    }
     print("MOVES " + moveCounts.sorted { ($1.value, $0.key) < ($0.value, $1.key) }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
     exit(0)
 }
