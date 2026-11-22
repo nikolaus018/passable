@@ -210,7 +210,7 @@ final class ChoreographyProbe: XCTestCase {
             // lows for 1 bar, and fakeoutDrop holds a 1.5-bar tension drop).
             let maxLowGap: Double = switch buildStyle {
             case .fakeoutDrop: 1.6
-            case .acappellaBreak, .loopHalve, .stutterGate, .polyRoll: 1.1
+            case .acappellaBreak, .loopHalve, .stutterGate, .polyRoll, .vocalChop, .beatJuggle: 1.1
             default: 0.5
             }
             let maxDrumsGap: Double = switch buildStyle {

@@ -93,7 +93,7 @@ struct SetView: View {
                     }
                 }
             } label: {
-                Label(set.pacing.rawValue, systemImage: "flame")
+                Label(set.pacing.rawValue, systemImage: set.pacing.icon)
             }
             .menuStyle(.borderedButton)
             .fixedSize()

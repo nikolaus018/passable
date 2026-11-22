@@ -1833,7 +1833,8 @@ enum AutoPlacement {
                       skip: Range<Int>? = nil, aShift: Int = 0, bShift: Int = 0, drumsLock: Bool = false,
                       drumsLinger: Bool = true, at spot: (entry: Int, cue: Int)? = nil, glide: Int = 0,
                       runUp: Int = 0, loop: Int = 0,
-                      targetSoloSeconds: Double = SetBuilder.minimumSoloSeconds) -> Result {
+                      targetSoloSeconds: Double = SetBuilder.minimumSoloSeconds,
+                      hookBoost: Float = 1.0, dropMinBars: Int = SetBuilder.dropMomentBars) -> Result {
         let barsA = a.grid.barCount(duration: a.duration)
         let barsB = b.grid.barCount(duration: b.duration)
         guard let whole = a.structure, let sb = b.structure, !whole.loudness.isEmpty, !sb.loudness.isEmpty else {
@@ -2019,9 +2020,9 @@ enum AutoPlacement {
         /// silence into two quiet bars is an anticlimax). Decided with the
         /// spot, since A is gone at such a switch rather than lingering.
         func dropMoment(_ sa: TrackStructure, e: Int, c: Int, switchAt: Int) -> Bool {
-            // A Stem Swap builds into one only from a blend long enough to
-            // be a build (as the set builder plays it).
-            guard !echo, switchAt >= 4, preset == .dropSwap || n >= SetBuilder.dropMomentBars,
+            // A Stem Swap builds into one from `dropMinBars` (16 in Chill/Club,
+            // 8 in Hype/Rush so quick-mix peak-time blends get full drop builds).
+            guard !echo, switchAt >= 4, preset == .dropSwap || n >= dropMinBars,
                   sa.meanActivity(.drums, bars: (e + switchAt - 2)..<(e + switchAt)) > 0.5,
                   min(sb.meanLoudness(bars: (c + switchAt)..<(c + switchAt + 1)),
                       sb.meanLoudness(bars: (c + switchAt + 1)..<(c + switchAt + 2))) >= sb.referenceLoudness - 3
@@ -2181,7 +2182,7 @@ enum AutoPlacement {
                 // Out drops straight into it), or B has a real drop there.
                 let switchAt = switchBar(sw)
                 let drop = dropMoment(sa, e: e, c: c, switchAt: switchAt)
-                score += 1.2 * sb.hook(from: c + switchAt)
+                score += (1.2 * hookBoost) * sb.hook(from: c + switchAt)
                 if preset == .stemSwap {
                     let rise = sb.meanLoudness(bars: (c + switchAt)..<(c + switchAt + 8))
                         - sb.meanLoudness(bars: (c + switchAt - 4)..<(c + switchAt))

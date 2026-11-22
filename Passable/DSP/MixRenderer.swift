@@ -58,6 +58,8 @@ final class MixSnapshot: @unchecked Sendable {
     /// A subtle stereo air riser + drop downlifter around a drop moment, in master frames.
     struct FrameSweep {
         let start: Int, drop: Int, end: Int, cutBeforeDrop: Int
+        /// 1.0 = subtle club air; >1.0 = festival/peak-time riser & sub-impact punch.
+        var intensity: Float = 1.0
     }
 
     let lanes: [LaneData]
@@ -70,15 +72,19 @@ final class MixSnapshot: @unchecked Sendable {
     let delaySchedule: [(from: Int, seconds: Double)]
     /// Drop-moment air sweeps, sorted by start.
     let sweeps: [FrameSweep]
+    /// Peak-time Club PA exciter & punch (0 = bit-exact bypass in Chill/Club).
+    let energyPunch: Float
 
     init(lanes: [LaneData], length: Int, delaySeconds: Double, masterGain: Float,
-         delaySchedule: [(from: Int, seconds: Double)] = [], sweeps: [FrameSweep] = []) {
+         delaySchedule: [(from: Int, seconds: Double)] = [], sweeps: [FrameSweep] = [],
+         energyPunch: Float = 0) {
         self.lanes = lanes
         self.length = length
         self.delaySeconds = delaySeconds
         self.masterGain = masterGain
         self.delaySchedule = delaySchedule
         self.sweeps = sweeps
+        self.energyPunch = energyPunch
     }
 
     static let empty = MixSnapshot(lanes: [], length: 0, delaySeconds: 0.35, masterGain: 1)
@@ -112,6 +118,7 @@ final class MixRenderer: @unchecked Sendable {
     private var delay: PingPongDelay
     private var glue: BusGlue
     private var airSweep: AirSweep
+    private var exciter: ClubExciter
     private var limiter: Limiter
     private var delaySeconds = 0.0
 
@@ -168,6 +175,7 @@ final class MixRenderer: @unchecked Sendable {
         delay = PingPongDelay(sampleRate: sampleRate)
         glue = BusGlue(sampleRate: sampleRate)
         airSweep = AirSweep(sampleRate: sampleRate)
+        exciter = ClubExciter(sampleRate: sampleRate)
         limiter = Limiter(sampleRate: sampleRate, ceiling: ceiling)
         retired.reserveCapacity(256)
         // Sized up front (four lanes a song, sets of up to 128 songs) so no
@@ -270,6 +278,7 @@ final class MixRenderer: @unchecked Sendable {
         delay.reset()
         glue.reset()
         airSweep.reset()
+        exciter.reset()
         reverbIdle = true
         delayIdle = true
         reverbTailFrames = 0
@@ -524,6 +533,7 @@ final class MixRenderer: @unchecked Sendable {
             // Blend-only VCA bus glue: welds overlapping tracks together and
             // eases limiter pumping without touching solo playback.
             glue.process(left, right, count: n, active: isBlending)
+            exciter.process(left, right, count: n, amount: snap.energyPunch)
             var master = snap.masterGain
             vDSP_vsmul(left, 1, &master, left, 1, vDSP_Length(n))
             vDSP_vsmul(right, 1, &master, right, 1, vDSP_Length(n))

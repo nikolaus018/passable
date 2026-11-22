@@ -505,22 +505,28 @@ struct AirSweep {
         let boomAttack = max(1, Int(0.004 * sampleRate))
 
         // Mid-block filter parameters (updated once per 64-sample block = smooth).
+        let intensity = max(0.5, min(2.5, sw.intensity))
         let midP = position + count / 2
         let freq: Double
         let k: Float
         if midP < sw.drop {
             let u = max(0.0, min(1.0, Double(midP - sw.start) / Double(riserSpan)))
-            freq = 500.0 * pow(11.0, u * u) // 500 Hz → 5.5 kHz
-            k = Float(1.0 / 1.6)
+            let topFreq = 5_500.0 + 1_800.0 * Double(max(0, intensity - 1))
+            freq = 480.0 * pow(topFreq / 480.0, u * u) // 480 Hz → 5.5–7.3 kHz
+            let q = 1.6 + 0.65 * Double(max(0, intensity - 1))
+            k = Float(1.0 / q)
         } else {
             let v = max(0.0, min(1.0, Double(midP - sw.drop) / Double(downSpan)))
-            freq = 3_800.0 * pow(320.0 / 3_800.0, pow(v, 0.7)) // 3.8 kHz → 320 Hz
-            k = Float(1.0 / 1.1)
+            freq = 4_200.0 * pow(300.0 / 4_200.0, pow(v, 0.7)) // 4.2 kHz → 300 Hz
+            k = Float(1.0 / 1.15)
         }
         let g = Float(tan(Double.pi * min(freq, sampleRate * 0.42) / sampleRate))
         let a1 = 1 / (1 + g * (g + k))
         let a2 = g * a1
         let a3 = g * a2
+        let boomSpanDyn = max(boomSpan, Int((0.20 + 0.06 * Double(max(0, intensity - 1))) * sampleRate))
+        let boomTopHz = 78.0 + 18.0 * Double(max(0, intensity - 1))
+        let boomAmp = 0.11 * Double(min(1.85, intensity))
 
         var z1L = s1L, z2L = s2L, z1R = s1R, z2R = s2R
         var wrote = false
@@ -529,7 +535,7 @@ struct AirSweep {
             var env: Float = 0
             if p >= sw.start && p < riserEnd {
                 let u = Float(p - sw.start) / Float(riserSpan)
-                env = 0.075 * u * u
+                env = 0.075 * intensity * u * u
                 let rem = riserEnd - p
                 if rem < cutFade {
                     let fu = Float(rem) / Float(cutFade)
@@ -538,21 +544,21 @@ struct AirSweep {
             } else if p >= sw.drop && p < sw.end {
                 let v = Float(p - sw.drop) / Float(downSpan)
                 let omv = 1 - v
-                env = 0.068 * omv * omv
+                env = 0.068 * intensity * omv * omv
                 let elapsed = p - sw.drop
                 if elapsed < attackFade {
                     env *= Float(elapsed) / Float(attackFade)
                 }
-                // Tasteful club sub-impact thump (78 Hz → 36 Hz over 200 ms, −18 dBFS)
-                // right on the drop for chest-felt sound-system weight.
-                if elapsed < boomSpan {
+                // Club sub-impact thump (78–96 Hz → 34 Hz over 200–260 ms)
+                // right on beat 1 of the drop for chest-felt sound-system weight.
+                if elapsed < boomSpanDyn {
                     let tSec = Double(elapsed) / sampleRate
-                    let dur = Double(boomSpan) / sampleRate
-                    // Integral of f(t) = 36 + 42 * (1 - t/dur)^2
+                    let dur = Double(boomSpanDyn) / sampleRate
+                    let spanHz = boomTopHz - 34.0
                     let u = tSec / dur
                     let omu = 1.0 - u
-                    let phase = 2.0 * Double.pi * (36.0 * tSec + 42.0 * dur * (1.0 - omu * omu * omu) / 3.0)
-                    var bEnv = Float(0.11 * omu * omu)
+                    let phase = 2.0 * Double.pi * (34.0 * tSec + spanHz * dur * (1.0 - omu * omu * omu) / 3.0)
+                    var bEnv = Float(boomAmp * omu * omu)
                     if elapsed < boomAttack {
                         let fa = Float(elapsed) / Float(boomAttack)
                         bEnv *= 0.5 * (1 - cosf(Float.pi * fa))
@@ -590,5 +596,51 @@ struct AirSweep {
         s1R = abs(z1R) < 1e-20 ? 0 : z1R
         s2R = abs(z2R) < 1e-20 ? 0 : z2R
         return wrote
+    }
+}
+
+/// Peak-time Club PA Exciter & Transient Punch: adds chest-felt 110 Hz kick
+/// lift, crisp 8.5 kHz air sheen, and warm parallel harmonic density in Hype
+/// and Rush modes while staying bit-exact bypassed (`amount == 0`) in Chill/Club.
+/// Zero allocations, audio-thread safe.
+struct ClubExciter {
+    private let sampleRate: Double
+    private var lowShelf = Biquad()
+    private var highShelf = Biquad()
+    private var configuredAmount: Float = -1
+
+    init(sampleRate: Double) {
+        self.sampleRate = sampleRate
+    }
+
+    mutating func reset() {
+        lowShelf.reset()
+        highShelf.reset()
+        configuredAmount = -1
+    }
+
+    mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>,
+                          count: Int, amount: Float) {
+        let amt = max(0, min(1, amount))
+        guard amt > 1e-4, count > 0 else { return }
+        if abs(amt - configuredAmount) > 1e-3 {
+            lowShelf.set(.lowShelf(frequency: 110, gainDB: Double(2.1 * amt)), sampleRate: sampleRate)
+            highShelf.set(.highShelf(frequency: 8_500, gainDB: Double(1.7 * amt)), sampleRate: sampleRate)
+            configuredAmount = amt
+        }
+        lowShelf.process(left, right, count: count)
+        highShelf.process(left, right, count: count)
+        // Warm parallel harmonic density + crisp loudness excitement before the limiter.
+        let drive: Float = 0.55 * amt
+        let wet: Float = 0.28 * amt
+        let dry: Float = 1 - wet
+        let trim: Float = 1 / (1 + 0.14 * amt)
+        for i in 0..<count {
+            let l = left[i], r = right[i]
+            let sl = l * (1 + drive) / (1 + drive * abs(l))
+            let sr = r * (1 + drive) / (1 + drive * abs(r))
+            left[i] = (dry * l + wet * sl) * trim
+            right[i] = (dry * r + wet * sr) * trim
+        }
     }
 }
