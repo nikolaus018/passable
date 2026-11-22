@@ -39,6 +39,8 @@ final class MixSnapshot: @unchecked Sendable {
         let crossfade: Int
         /// Vinyl brake / tape stop decelerating to 0 speed across `start..<end`.
         let brake: Bool
+        /// Turntable spinback accelerating backward across `start..<end`.
+        let spinback: Bool
 
         /// nil when it's too short to play.
         init?(_ roll: Roll, sampleRate: Double) {
@@ -47,8 +49,9 @@ final class MixSnapshot: @unchecked Sendable {
             anchor = Int((roll.anchor * sampleRate).rounded())
             length = Int((roll.length * sampleRate).rounded())
             brake = roll.brake == true
-            guard end > start, brake || length >= 2 * MixRenderer.declick else { return nil }
-            crossfade = roll.seamless == true && !brake ? min(MixRenderer.loopCrossfade, length / 4) : 0
+            spinback = roll.spinback == true && !brake
+            guard end > start, brake || spinback || length >= 2 * MixRenderer.declick else { return nil }
+            crossfade = roll.seamless == true && !brake && !spinback ? min(MixRenderer.loopCrossfade, length / 4) : 0
         }
     }
 
@@ -564,7 +567,24 @@ final class MixRenderer: @unchecked Sendable {
             // on with, and how much of it is still in (1…0).
             var tail = -1, tailGain: Float = 0
             for r in lane.rolls {
-                if r.brake, p >= r.start && p < r.end {
+                if r.spinback, p >= r.start && p < r.end {
+                    let span = Double(r.end - r.start)
+                    let u = Double(p - r.start) / span
+                    // Rapid reverse platter whip: speed -(1.5 + 7.5*u) → integrated
+                    // backward travel span * (1.5*u + 3.75*u^2).
+                    let travelled = span * (1.5 * u + 3.75 * u * u)
+                    fracPos = max(0, Double(r.anchor - lane.offset) - travelled)
+                    tail = -1
+                    if u < 0.05 {
+                        let fu = Float(u / 0.05)
+                        g = min(g, 0.5 * (1 - cosf(Float.pi * fu)))
+                    } else if u > 0.72 {
+                        let fu = Float((u - 0.72) / 0.28)
+                        g = min(g, 0.5 * (1 + cosf(Float.pi * fu)))
+                    }
+                } else if r.spinback {
+                    // Entry/exit already shaped smoothly inside spinback window.
+                } else if r.brake, p >= r.start && p < r.end {
                     let span = Double(r.end - r.start)
                     let u = Double(p - r.start) / span
                     // Speed v(u) = (1 - u)^2 → integrated position D * (1 - (1 - u)^3) / 3.

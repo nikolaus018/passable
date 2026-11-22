@@ -61,6 +61,10 @@ struct Reverb {
 
     private var lines: [Line]
     private var inputFilter = Biquad()
+    /// 25 ms pre-delay ring buffers so dry vocal/melody attacks stay crisp
+    /// while the lush cathedral tail blooms cleanly right behind them.
+    private var preL: [Float], preR: [Float]
+    private var preWrite = 0
     /// Feedback per loop pass (~3.8 s RT60 on the mean delay length).
     var feedback: Float = 0.89
     var damp: Float = 0.34
@@ -71,12 +75,18 @@ struct Reverb {
             let delay = max(16, Int((Double(Self.baseLengths[c]) * scale).rounded()))
             return Line(delay: delay, phase: Float(c) * 0.785398, rate: Self.lfoRates[c], sampleRate: sampleRate)
         }
+        let preLen = max(1, Int((0.025 * sampleRate).rounded()))
+        preL = [Float](repeating: 0, count: preLen)
+        preR = [Float](repeating: 0, count: preLen)
         // Keep sub-bass out of the tail; a reverbed kick is mud.
         inputFilter.set(.highPass(frequency: 250, q: 0.707), sampleRate: sampleRate)
     }
 
     mutating func reset() {
         for i in lines.indices { lines[i].clear() }
+        preL.withUnsafeMutableBufferPointer { $0.update(repeating: 0) }
+        preR.withUnsafeMutableBufferPointer { $0.update(repeating: 0) }
+        preWrite = 0
         inputFilter.reset()
     }
 
@@ -90,9 +100,14 @@ struct Reverb {
         // swamping the dry beat.
         let inGain: Float = 0.27
         let outGain: Float = 0.50
+        let preSize = preL.count
         for i in 0..<count {
-            let xl = left[i] * inGain
-            let xr = right[i] * inGain
+            let xl = preL[preWrite] * inGain
+            let xr = preR[preWrite] * inGain
+            preL[preWrite] = abs(left[i]) < 1e-20 ? 0 : left[i]
+            preR[preWrite] = abs(right[i]) < 1e-20 ? 0 : right[i]
+            preWrite += 1
+            if preWrite == preSize { preWrite = 0 }
             let d0 = lines[0].read(damp: dp), d1 = lines[1].read(damp: dp)
             let d2 = lines[2].read(damp: dp), d3 = lines[3].read(damp: dp)
             let d4 = lines[4].read(damp: dp), d5 = lines[5].read(damp: dp)
@@ -156,14 +171,22 @@ struct PingPongDelay {
     private var writeIndex = 0
     private var toneL: Tone
     private var toneR: Tone
-    private var delaySamples: Int
+    private var delaySamples: Float
+    private var targetDelaySamples: Float
+    private let delaySlew: Float
+    private var modPhase: Float = 0
+    private let modStep: Float
     var feedback: Float = 0.55
 
     init(sampleRate: Double, maxSeconds: Double = 4) {
         let size = Int(sampleRate * maxSeconds)
         bufferL = [Float](repeating: 0, count: size)
         bufferR = [Float](repeating: 0, count: size)
-        delaySamples = Int(sampleRate * 0.35)
+        let initial = Float(sampleRate * 0.35)
+        delaySamples = initial
+        targetDelaySamples = initial
+        delaySlew = Float(exp(-1.0 / (0.040 * sampleRate)))
+        modStep = Float(2 * Double.pi * 0.42 / sampleRate)
         toneL = Tone(sampleRate: sampleRate)
         toneR = Tone(sampleRate: sampleRate)
     }
@@ -171,31 +194,60 @@ struct PingPongDelay {
     mutating func reset() {
         bufferL.withUnsafeMutableBufferPointer { $0.update(repeating: 0) }
         bufferR.withUnsafeMutableBufferPointer { $0.update(repeating: 0) }
+        delaySamples = targetDelaySamples
+        modPhase = 0
         toneL = Tone(hpCoef: toneL.hpCoef, lpCoef: toneL.lpCoef)
         toneR = Tone(hpCoef: toneR.hpCoef, lpCoef: toneR.lpCoef)
     }
 
     mutating func setTime(seconds: Double, sampleRate: Double) {
-        delaySamples = max(1, min(bufferL.count - 1, Int(seconds * sampleRate)))
+        targetDelaySamples = Float(max(8.0, min(Double(bufferL.count - 8), seconds * sampleRate)))
     }
 
-    /// Replaces the send bus with the wet signal.
+    /// Replaces the send bus with the wet tape-echo ping-pong signal.
     mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>, count: Int) {
         let size = bufferL.count
+        let fSize = Float(size)
+        let slew = delaySlew, mStep = modStep, fb = feedback
+        var curDelay = delaySamples, phase = modPhase
         for i in 0..<count {
-            var readIndex = writeIndex - delaySamples
-            if readIndex < 0 { readIndex += size }
-            let dl = toneL.process(bufferL[readIndex])
-            let dr = toneR.process(bufferR[readIndex])
-            // Mono input into the left line; each line feeds the other.
+            curDelay = targetDelaySamples + slew * (curDelay - targetDelaySamples)
+            phase += mStep
+            if phase >= Float.pi * 2 { phase -= Float.pi * 2 }
+            // Subtle stereo tape wow/chorus (±3.5 samples) for Space Echo shimmer.
+            let mod = sinf(phase) * 3.5
+            var posL = Float(writeIndex) - (curDelay + mod)
+            if posL < 0 { posL += fSize }
+            if posL >= fSize { posL -= fSize }
+            let i0L = Int(posL) % size
+            let i1L = (i0L + 1) % size
+            let fracL = posL - floorf(posL)
+            let rawL = bufferL[i0L] + fracL * (bufferL[i1L] - bufferL[i0L])
+
+            var posR = Float(writeIndex) - (curDelay - mod)
+            if posR < 0 { posR += fSize }
+            if posR >= fSize { posR -= fSize }
+            let i0R = Int(posR) % size
+            let i1R = (i0R + 1) % size
+            let fracR = posR - floorf(posR)
+            let rawR = bufferR[i0R] + fracR * (bufferR[i1R] - bufferR[i0R])
+
+            let dl = toneL.process(rawL)
+            let dr = toneR.process(rawR)
+            // Gentle analog tape saturation in the feedback path keeps echoes warm
+            // and musical without harsh digital clipping.
             let input = (left[i] + right[i]) * 0.5
-            bufferL[writeIndex] = input + dr * feedback
-            bufferR[writeIndex] = dl * feedback
+            let fbL = tanhf((input + dr * fb) * 1.15) * (1.0 / 1.15)
+            let fbR = tanhf((dl * fb) * 1.15) * (1.0 / 1.15)
+            bufferL[writeIndex] = abs(fbL) < 1e-20 ? 0 : fbL
+            bufferR[writeIndex] = abs(fbR) < 1e-20 ? 0 : fbR
             left[i] = dl
             right[i] = dr
             writeIndex += 1
             if writeIndex == size { writeIndex = 0 }
         }
+        delaySamples = curDelay
+        modPhase = phase
     }
 }
 
@@ -304,8 +356,10 @@ struct BusGlue {
     private let blendCoef: Float
     private let scHpCoef: Float
     private let subLpCoef: Float
+    private let rmsCoef: Float
     private var scPrev: Float = 0, scState: Float = 0
     private var subSideState: Float = 0
+    private var rmsSq: Float = 0
     private var env: Float = 0
     private var blend: Float = 0
 
@@ -315,10 +369,11 @@ struct BusGlue {
         blendCoef = Float(exp(-1.0 / (0.120 * sampleRate)))
         scHpCoef = Float(exp(-2.0 * Double.pi * 120.0 / sampleRate))
         subLpCoef = Float(exp(-2.0 * Double.pi * 100.0 / sampleRate))
+        rmsCoef = Float(exp(-1.0 / (0.180 * sampleRate)))
     }
 
     mutating func reset() {
-        scPrev = 0; scState = 0; subSideState = 0; env = 0; blend = 0
+        scPrev = 0; scState = 0; subSideState = 0; rmsSq = 0; env = 0; blend = 0
     }
 
     mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>,
@@ -327,11 +382,16 @@ struct BusGlue {
         guard blend > 1e-4 || target > 0, count > 0 else { return }
         let atk = attackCoef, rel = releaseCoef, bCoef = blendCoef, hp = scHpCoef
         let subA = subLpCoef, subB = 1 - subLpCoef
+        let rA = rmsCoef, rB = 1 - rmsCoef
         // Threshold −9 dBFS (~0.355), soft knee 4 dB, ratio 2:1, max −3.5 dB GR.
         let threshDB: Float = -9.0
         let knee: Float = 4.0
         let invRatioDiff: Float = 0.5 // 1 - 1/2
-        var curBlend = blend, curEnv = env, curPrev = scPrev, curHp = scState, curSub = subSideState
+        // Slow-RMS overlap auto-leveler: tames hot +5–6 dB double-chorus stacks
+        // smoothly back toward −10.5 dBFS RMS without touching clean blends.
+        let rmsThreshDB: Float = -10.5
+        var curBlend = blend, curEnv = env, curPrev = scPrev, curHp = scState
+        var curSub = subSideState, curRms = rmsSq
         for i in 0..<count {
             curBlend = target + bCoef * (curBlend - target)
             var l = left[i], r = right[i]
@@ -360,17 +420,30 @@ struct BusGlue {
             } else {
                 grDB = invRatioDiff * over
             }
-            let applied = min(3.5, grDB) * curBlend
+            // Slow-RMS overlap leveler (tucks hot double-chorus overlaps smoothly).
+            curRms = rA * curRms + rB * (0.5 * (l * l + r * r))
+            let rmsDB = 10 * log10f(max(curRms, 1e-12))
+            let rmsOver = max(0, rmsDB - rmsThreshDB)
+            let rmsGR = min(3.5, rmsOver * 0.65)
+
+            let applied = min(5.5, grDB + rmsGR) * curBlend
             if applied > 1e-4 {
                 let g = powf(10, -applied / 20)
                 l *= g
                 r *= g
+            }
+            // C∞-smooth analog mixer summing warmth during blends.
+            if curBlend > 0.01 {
+                let sat = 0.08 * curBlend
+                l = l / (1 + sat * l * l)
+                r = r / (1 + sat * r * r)
             }
             left[i] = l
             right[i] = r
         }
         blend = curBlend < 1e-4 && !active ? 0 : curBlend
         env = curEnv < 1e-20 ? 0 : curEnv
+        rmsSq = curRms < 1e-20 ? 0 : curRms
         scPrev = abs(curPrev) < 1e-20 ? 0 : curPrev
         scState = abs(curHp) < 1e-20 ? 0 : curHp
         subSideState = abs(curSub) < 1e-20 ? 0 : curSub
@@ -428,6 +501,8 @@ struct AirSweep {
         let downSpan = max(1, sw.end - sw.drop)
         let cutFade = max(1, Int(0.012 * sampleRate))
         let attackFade = max(1, Int(0.010 * sampleRate))
+        let boomSpan = max(1, Int(0.20 * sampleRate))
+        let boomAttack = max(1, Int(0.004 * sampleRate))
 
         // Mid-block filter parameters (updated once per 64-sample block = smooth).
         let midP = position + count / 2
@@ -467,6 +542,24 @@ struct AirSweep {
                 let elapsed = p - sw.drop
                 if elapsed < attackFade {
                     env *= Float(elapsed) / Float(attackFade)
+                }
+                // Tasteful club sub-impact thump (78 Hz → 36 Hz over 200 ms, −18 dBFS)
+                // right on the drop for chest-felt sound-system weight.
+                if elapsed < boomSpan {
+                    let tSec = Double(elapsed) / sampleRate
+                    let dur = Double(boomSpan) / sampleRate
+                    // Integral of f(t) = 36 + 42 * (1 - t/dur)^2
+                    let u = tSec / dur
+                    let omu = 1.0 - u
+                    let phase = 2.0 * Double.pi * (36.0 * tSec + 42.0 * dur * (1.0 - omu * omu * omu) / 3.0)
+                    var bEnv = Float(0.11 * omu * omu)
+                    if elapsed < boomAttack {
+                        let fa = Float(elapsed) / Float(boomAttack)
+                        bEnv *= 0.5 * (1 - cosf(Float.pi * fa))
+                    }
+                    let sub = Float(sin(phase)) * bEnv
+                    dryL[i] += sub
+                    dryR[i] += sub
                 }
             }
             if env <= 1e-6 { continue }

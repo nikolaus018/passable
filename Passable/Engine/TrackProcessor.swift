@@ -203,6 +203,17 @@ final class TrackProcessor: @unchecked Sendable {
                 StemCache.saveAnalysis(analysis, to: directory)
             }
         }
+        // (Sections from the neural structure model, once, where the app
+        // has it, on the final grid: new songs, and songs measured without it.)
+        if let analyzer = StructureAnalyzer.shared, analysis.structure != nil, analysis.structure?.sections == nil {
+            let bars = analysis.grid.barCount(duration: analysis.duration)
+            if let found = try? analyzer.analyze(stems: stems, grid: analysis.grid, barCount: bars) {
+                analysis.structure?.sections = found.sections
+                analysis.structure?.neuralBoundary = found.neuralBoundary
+                analysis.structure?.chorusScore = found.chorusScore
+                StemCache.saveAnalysis(analysis, to: directory)
+            }
+        }
         if !languages.isEmpty, let vocals = stems[.vocals], let structure = analysis.structure, wantsWords(structure) {
             progress(.analyzing)
             listening.wait()
@@ -300,7 +311,7 @@ final class TrackProcessor: @unchecked Sendable {
             let start = map.rampStart.isFinite ? String(Int(map.rampStart.rounded())) : "inf"
             let exit = map.hasExit
                 ? String(format: "-x%.9f-%d-%d", map.exitRate, Int(map.exitStart.rounded()), Int(map.exitLength.rounded())) : ""
-            return String(format: "v5-%.9f-%@-%d-%+d", map.rate, start, Int(map.rampLength.rounded()), semitones) + exit
+            return String(format: "v6-%.9f-%@-%d-%+d", map.rate, start, Int(map.rampLength.rounded()), semitones) + exit
         }
 
         func isSame(as other: MatchPlan) -> Bool {
@@ -352,7 +363,8 @@ final class TrackProcessor: @unchecked Sendable {
                         let shift = kind == .drums ? 0 : plan.semitones
                         let matched = TimeStretcher.process(loaded.stems[kind]!.copyStereo(), map: plan.map,
                                                             semitones: shift, percussive: kind == .drums,
-                                                            vocal: kind == .vocals)
+                                                            vocal: kind == .vocals,
+                                                            harmonicPercussive: kind == .other)
                         if ticket.isCancelled { throw CancellationError() }
                         // (Sharing the song's file where it plays unchanged.)
                         try StemAudio.saveRendition(matched, source: loaded.stems[kind]!, sourceDirectory: loaded.directory,

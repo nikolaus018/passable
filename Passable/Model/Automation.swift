@@ -260,6 +260,9 @@ struct Roll: Codable, Equatable {
     /// smoothly from normal speed to a dead stop, pitching down and fading
     /// out before the next track slams in.
     var brake: Bool? = nil
+    /// A turntable backspin / spinback: rapidly accelerates backward over
+    /// `start..<end` into a reverb splash before the next track drops.
+    var spinback: Bool? = nil
 
     func shifted(by delta: Double) -> Roll {
         var r = self

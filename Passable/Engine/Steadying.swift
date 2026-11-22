@@ -99,7 +99,8 @@ enum Steadying {
                     let out = TimeStretcher.warp(stem.copyStereo(), count: count,
                                                  source: { warp.source($0 / sr) * sr },
                                                  output: { warp.output($0 / sr) * sr }, percussive: kind == .drums,
-                                                 vocal: kind == .vocals)
+                                                 vocal: kind == .vocals,
+                                                 harmonicPercussive: kind == .other)
                     try StemAudio.save(out, directory: staging, name: kind.rawValue)
                 } catch {
                     box.lock.lock(); box.error = box.error ?? error; box.lock.unlock()

@@ -45,24 +45,33 @@ struct ContentView: View {
         // A key released while another app has focus never reaches us: let
         // go of a held vocal rather than leave it muted.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
-            set.holdVocals(solo: false, down: false)
+            set.holdPerformance(nil, down: false)
         }
         .onDisappear { if let keyMonitor { NSEvent.removeMonitor(keyMonitor) } }
     }
 
-    /// Holding M mutes the vocal of the song that's playing (let the crowd
-    /// sing the chorus), holding S leaves only that vocal: for as long as
-    /// the key is down. A live gesture, not an edit, so no undo step.
+    /// Live DJ stem performance keys while the set plays (no undo step):
+    /// M = vocals out (crowd sings), S = vocals only (a cappella),
+    /// B = drop out bass & drums (release on beat 1 for a live drop!),
+    /// D = drums only (percussion break).
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         let set = self.set
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
             guard event.modifierFlags.isDisjoint(with: [.command, .option, .control]),
-                  let key = event.charactersIgnoringModifiers?.lowercased(), key == "m" || key == "s" else { return event }
+                  let key = event.charactersIgnoringModifiers?.lowercased() else { return event }
+            let kind: SetSession.LiveHoldKind
+            switch key {
+            case "m": kind = .vocalsOut
+            case "s": kind = .vocalsOnly
+            case "b": kind = .dropOut
+            case "d": kind = .drumsOnly
+            default: return event
+            }
             guard let responder = event.window?.firstResponder, !(responder is NSTextView) else { return event }
             let isDown = event.type == .keyDown
             MainActor.assumeIsolated {
-                set.holdVocals(solo: key == "s", down: isDown)
+                set.holdPerformance(kind, down: isDown)
             }
             return nil
         }

@@ -29,6 +29,23 @@ final class SetSession: ObservableObject {
     private let persists: Bool
     private static let storageKey = "setTracks"
     private static let editsKey = "setEdits"
+    private static let pacingKey = "setPacing"
+    @Published var pacing: SetPacing = .club {
+        didSet {
+            guard oldValue != pacing else { return }
+            if persists { UserDefaults.standard.set(pacing.rawValue, forKey: Self.pacingKey) }
+            if !items.isEmpty { invalidate() }
+        }
+    }
+    private static let movesKey = "setAutoMoves"
+    /// The showier moves the planner may use (see the set's Moves menu).
+    @Published var moves: AutoMoves = .all {
+        didSet {
+            guard oldValue != moves else { return }
+            if persists { UserDefaults.standard.set(moves.rawValue, forKey: Self.movesKey) }
+            if !items.isEmpty { invalidate() }
+        }
+    }
     @Published private(set) var mix: SetMix? {
         didSet { lamp.setBeats(from: mix) }
     }
@@ -76,7 +93,16 @@ final class SetSession: ObservableObject {
     init(persists: Bool = true) {
         self.persists = persists
         editor.host = self
-        if persists { loadEdits() }
+        if persists {
+            if let saved = UserDefaults.standard.string(forKey: Self.pacingKey),
+               let parsed = SetPacing(rawValue: saved) {
+                pacing = parsed
+            }
+            if UserDefaults.standard.object(forKey: Self.movesKey) != nil {
+                moves = AutoMoves(rawValue: UserDefaults.standard.integer(forKey: Self.movesKey))
+            }
+            loadEdits()
+        }
         clock = Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
@@ -379,9 +405,11 @@ final class SetSession: ObservableObject {
         // set, so not on the main thread.
         buildTask?.cancel()
         buildStatus = "Ordering songs…"
+        let pace = pacing
         orderTask = Task { [weak self] in
             let order = await Task.detached(priority: .userInitiated) {
-                let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: songs), remembered: true, urls: urls)
+                let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: songs), remembered: true,
+                                                   urls: urls, pacing: pace)
                 let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
                 return fitIn ? SetOrdering.insert(added, into: placed, costs, washOuts: washOuts, energies: energies)
                     : SetOrdering.order(costs, washOuts: washOuts, energies: energies)
@@ -465,12 +493,13 @@ final class SetSession: ObservableObject {
         let previous = mix ?? lastBuilt
         if mix == nil { buildStatus = "Planning transitions…" }
         let processor = self.processor
+        let pacing = self.pacing, moves = self.moves
         buildTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
             do {
                 let mix = try await SetBuilder.build(tracks, edits: edits, reuse: reuse, previous: previous,
-                                                     processor: processor) { text in
+                                                     pacing: pacing, moves: moves, processor: processor) { text in
                     Task { @MainActor in if self?.mix == nil { self?.buildStatus = text } }
                 }
                 guard !Task.isCancelled, let self else { return }
@@ -491,25 +520,47 @@ final class SetSession: ObservableObject {
         }
     }
 
-    /// Held M or S: the vocal of the song that's playing, muted (the crowd
-    /// sings the chorus) or alone, for as long as the key is down.
-    struct VocalHold: Equatable {
-        let track: Int
-        let solo: Bool
+    /// Held live DJ performance keys while the set plays:
+    /// M = vocals out (crowd sing-along), S = vocals only (live a cappella),
+    /// B = drop out bass & drums (live drop on release), D = drums only.
+    enum LiveHoldKind: Equatable {
+        case vocalsOut, vocalsOnly, dropOut, drumsOnly
+
+        var badge: String {
+            switch self {
+            case .vocalsOut: return "VOCALS OUT"
+            case .vocalsOnly: return "VOCALS ONLY"
+            case .dropOut: return "DROP OUT"
+            case .drumsOnly: return "DRUMS ONLY"
+            }
+        }
     }
 
-    @Published private(set) var vocalHold: VocalHold?
+    struct LiveHold: Equatable {
+        let track: Int
+        let kind: LiveHoldKind
+    }
 
-    /// Press and release of M (`solo` false) or S. Taken from the song
-    /// leading at the press and kept until the release, whatever the
-    /// editor shows meanwhile.
+    @Published private(set) var liveHold: LiveHold?
+
+    /// Backwards-compatible view for tests/callers checking vocal hold state.
+    var vocalHold: (track: Int, solo: Bool)? {
+        guard let h = liveHold, h.kind == .vocalsOut || h.kind == .vocalsOnly else { return nil }
+        return (h.track, h.kind == .vocalsOnly)
+    }
+
     func holdVocals(solo: Bool, down: Bool) {
-        if down {
-            guard vocalHold == nil, let i = currentIndex else { return }
-            vocalHold = VocalHold(track: i, solo: solo)
+        holdPerformance(solo ? .vocalsOnly : .vocalsOut, down: down)
+    }
+
+    /// Press and release of M / S / B / D live stem performance keys.
+    func holdPerformance(_ kind: LiveHoldKind?, down: Bool) {
+        if down, let kind {
+            guard liveHold == nil, let i = currentIndex else { return }
+            liveHold = LiveHold(track: i, kind: kind)
         } else {
-            guard vocalHold != nil else { return }
-            vocalHold = nil
+            guard liveHold != nil else { return }
+            liveHold = nil
         }
         refreshSnapshot()
     }
@@ -519,13 +570,20 @@ final class SetSession: ObservableObject {
         let pair = mix.flatMap { mix in focused.flatMap { i in mix.transitions.first { $0.from == i } } }
         let editor = self.editor
         let anySolo = pair != nil && editor.lanes.contains(where: \.isSoloed)
-        let hold = vocalHold
+        let hold = liveHold
         return mix?.snapshot(masterGain: Float(masterVolume)) { track, stem in
             guard including(track, stem) else { return false }
             if let hold {
-                let held = track == hold.track && stem == .vocals
-                if hold.solo { return held }
-                if held { return false }
+                switch hold.kind {
+                case .vocalsOut:
+                    if track == hold.track && stem == .vocals { return false }
+                case .vocalsOnly:
+                    return track == hold.track && stem == .vocals
+                case .dropOut:
+                    if track == hold.track && (stem == .drums || stem == .bass) { return false }
+                case .drumsOnly:
+                    return track == hold.track && stem == .drums
+                }
             }
             guard let pair else { return true }
             if track == pair.from { return editor.isAudible(.a, stem) }

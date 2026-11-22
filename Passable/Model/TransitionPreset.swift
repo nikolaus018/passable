@@ -152,9 +152,19 @@ struct TransitionBuilder {
         case riser
         /// Bass-pull tension: A's bass & kick lows drop out two beats early into B's slam.
         case bassDrop
-        /// A cappella break: A's instrumental drops out 2 bars early so A's voice
-        /// carries the tension solo into B's full drop.
+        /// A cappella break: A's instrumental drops out 1 bar early so the
+        /// voice carries the tension solo into B's full drop.
         case acappellaBreak
+        /// Fakeout drop (double drop misdirection): builds into the drop,
+        /// strips ALL drums & bass for 1 bar so B's vocal + melody hang naked,
+        /// then slams B's full drums & bass in one bar later.
+        case fakeoutDrop
+        /// Rhythmic fader-chop / stutter gate: syncopated 1/8th & 1/16th
+        /// rhythmic gates over the final bar with resonant HPF sweep into the drop.
+        case stutterGate
+        /// 3/16th polyrhythmic roll: hypnotic off-kilter dotted-eighth groove
+        /// loop across the final 1.5 bars that snaps back onto beat 1 of B's drop.
+        case polyRoll
     }
 
     /// Style of build-up for `dropMoment` (default `.snareRoll`).
@@ -170,6 +180,15 @@ struct TransitionBuilder {
     let vocalSend: Double
     /// Vinyl brake / tape-stop spin-down on a 1-bar Cut instead of an echo cut.
     let vinylBrake: Bool
+    /// Turntable spinback / backspin on a 1-bar Cut instead of an echo cut.
+    let spinback: Bool
+    /// Beatless a cappella tempo-bridge on a singing 1-bar Cut: kills A's
+    /// drums & bass 2 bars early so A's isolated voice floats into reverb/echo
+    /// before B slams in at its own tempo.
+    let acapellaBridge: Bool
+    /// Early vocal tease ("ghost hook"): plays `duration` bars of B's vocal
+    /// from bar `from` at bar `at` (4 bars before the drop) through a radio HPF + echo.
+    let vocalTease: (at: Double, from: Double, duration: Double)?
     /// Where A's vocal ended up leaving and B's coming in (bars from B's
     /// entry), for the caller to check against the audio.
     private(set) var vocalExit: Double?, vocalEntry: Double?
@@ -185,12 +204,16 @@ struct TransitionBuilder {
          vocalOutFade: Double = 0, vocalInFade: Double = 0, room: Double = 0, carry: Bool = false, under: Double = 0,
          loop: Int = 0, loopBack: Int = 0, hats: Bool = false, voiceStep: Double = 0, underUntil: Double? = nil,
          buildStyle: BuildStyle = .snareRoll, vocalThrowStart: Double? = nil, mashupUnder: Double = 0,
-         vocalSend: Double = 0.78, vinylBrake: Bool = false) {
+         vocalSend: Double = 0.78, vinylBrake: Bool = false, spinback: Bool = false,
+         acapellaBridge: Bool = false, vocalTease: (at: Double, from: Double, duration: Double)? = nil) {
         self.buildStyle = buildStyle
         self.vocalThrowStart = vocalThrowStart
         self.mashupUnder = mashupUnder
         self.vocalSend = vocalSend
         self.vinylBrake = vinylBrake
+        self.spinback = spinback && !vinylBrake
+        self.acapellaBridge = acapellaBridge && !vinylBrake && !spinback
+        self.vocalTease = vocalTease
         self.underUntil = underUntil
         self.hats = hats
         self.voiceStep = voiceStep
@@ -223,14 +246,17 @@ struct TransitionBuilder {
                       mashup: Bool = false, dropMoment: Bool = false, room: Double = 0, carry: Bool = false,
                       under: Double = 0, loop: Int = 0, loopBack: Int = 0, hats: Bool = false,
                       buildStyle: BuildStyle = .snareRoll, vocalThrowStart: Double? = nil,
-                      mashupUnder: Double = 0, vocalSend: Double = 0.78, vinylBrake: Bool = false) -> [Lane] {
+                      mashupUnder: Double = 0, vocalSend: Double = 0.78, vinylBrake: Bool = false,
+                      spinback: Bool = false, acapellaBridge: Bool = false,
+                      vocalTease: (at: Double, from: Double, duration: Double)? = nil) -> [Lane] {
         make(preset, lanes: lanes, start: start, barSeconds: barSeconds, bars: bars, vocalBar: vocalBar,
              keysClash: keysClash, lowSwap: lowSwap, drumsLayer: drumsLayer, drumsLinger: drumsLinger,
              vocalIn: vocalIn, vocalOut: vocalOut,
              mashup: mashup, dropMoment: dropMoment, room: room, carry: carry, under: under,
              loop: loop, loopBack: loopBack, hats: hats, buildStyle: buildStyle,
              vocalThrowStart: vocalThrowStart, mashupUnder: mashupUnder,
-             vocalSend: vocalSend, vinylBrake: vinylBrake).lanes
+             vocalSend: vocalSend, vinylBrake: vinylBrake, spinback: spinback,
+             acapellaBridge: acapellaBridge, vocalTease: vocalTease).lanes
     }
 
     /// The automation and the beat rolls of a preset.
@@ -242,7 +268,8 @@ struct TransitionBuilder {
                      under: Double = 0, loop: Int = 0, loopBack: Int = 0, hats: Bool = false,
                      voiceStep: Double = 0, underUntil: Double? = nil, buildStyle: BuildStyle = .snareRoll,
                      vocalThrowStart: Double? = nil, mashupUnder: Double = 0, vocalSend: Double = 0.78,
-                     vinylBrake: Bool = false) -> Made {
+                     vinylBrake: Bool = false, spinback: Bool = false, acapellaBridge: Bool = false,
+                     vocalTease: (at: Double, from: Double, duration: Double)? = nil) -> Made {
         var builder = TransitionBuilder(lanes: lanes, start: start, barSeconds: barSeconds, bars: bars,
                                         vocalBar: vocalBar, keysClash: keysClash, lowSwap: lowSwap,
                                         drumsLayer: drumsLayer, drumsLinger: drumsLinger,
@@ -253,10 +280,12 @@ struct TransitionBuilder {
                                         hats: hats && !drumsLayer, voiceStep: voiceStep,
                                         underUntil: underUntil, buildStyle: buildStyle,
                                         vocalThrowStart: vocalThrowStart, mashupUnder: mashupUnder,
-                                        vocalSend: vocalSend, vinylBrake: vinylBrake)
+                                        vocalSend: vocalSend, vinylBrake: vinylBrake, spinback: spinback,
+                                        acapellaBridge: acapellaBridge, vocalTease: vocalTease)
         builder.clearAll()
         builder.write(preset)
         builder.writeLoop()
+        builder.writeVocalTease()
         builder.oneThrowAtATime()
         for (side, stem, from, to) in builder.silences { builder.silence(side, stem, from: from, to: to) }
         builder.switchBeforeTheBeat()
@@ -332,6 +361,36 @@ struct TransitionBuilder {
                               anchor: from - Double(loopBack) * barSeconds, length: Double(loop) * barSeconds,
                               seamless: true))
         }
+    }
+
+    /// Ghost-hook vocal tease: previews a word-aligned slice of B's upcoming
+    /// hook 4 bars early through a radio high-pass + lush ping-pong echo over
+    /// A's beat, then resets cleanly before B's real vocal arrives.
+    private mutating func writeVocalTease() {
+        guard let tease = vocalTease, let vin = vocalEntry else { return }
+        let dur = max(0.25, min(0.75, tease.duration))
+        guard tease.at >= 0.5, tease.at + dur + 0.5 < vin else { return }
+        rolls.append(Roll(side: .b, stem: .vocals,
+                          start: start + tease.at * barSeconds,
+                          end: start + (tease.at + dur) * barSeconds,
+                          anchor: start + tease.from * barSeconds,
+                          length: dur * barSeconds))
+        automate(.b, .vocals, .volume, [
+            (tease.at, 0, .sCurve), (tease.at + 0.03, 0.85, .linear),
+            (tease.at + dur - 0.04, 0.85, .sCurve), (tease.at + dur, 0, .linear),
+        ])
+        automate(.b, .vocals, .filter, [
+            (tease.at - 0.05, 0.74, .linear), (tease.at + dur + 0.05, 0.74, .sCurve),
+            (tease.at + dur + 0.25, 0.5, .linear),
+        ])
+        automate(.b, .vocals, .delay, [
+            (tease.at, 0, .sCurve), (tease.at + 0.04, 0.72, .linear),
+            (tease.at + dur, 0.72, .sCurve), (tease.at + dur + 0.5, 0, .linear),
+        ])
+        automate(.b, .vocals, .reverb, [
+            (tease.at, 0, .sCurve), (tease.at + 0.04, 0.48, .linear),
+            (tease.at + dur, 0.48, .sCurve), (tease.at + dur + 0.5, 0, .linear),
+        ])
     }
 
     /// Where A's own drums stop inside the blend (its breakdown, a break)
@@ -431,9 +490,9 @@ struct TransitionBuilder {
     /// beat like every switch.
     static let switchRamp = 0.008
     /// Seconds a bass line or a low band is switched over: low notes ring
-    /// through the beat, and a 50 Hz wave switched in under a period of
-    /// itself clicks.
-    static let lowRamp = 0.012
+    /// through the beat, and a 50 Hz wave or 6th-order resonant low isolator
+    /// switched in under a period clicks.
+    static let lowRamp = 0.018
     /// Seconds A's voice is closed over as it's taken out. Shut in a
     /// millisecond, whatever still rang there (a word's tail, its reverb,
     /// the stem's bleed) was chopped into a click; over 30 ms it's still a
@@ -751,6 +810,63 @@ struct TransitionBuilder {
             silences.append((.a, .drums, s - 1, s))
             silences.append((.a, .other, s - 1, s))
             for stem in [StemKind.drums, .bass, .other] { silences.append((.b, stem, s - 1, s)) }
+
+        case .fakeoutDrop:
+            // Fakeout drop: build resonant tension into `s`, then strip ALL
+            // drums & bass (and A's melody) for 1 full bar (`s..<s+1`) so B's
+            // iconic vocal & melody hang naked in the room before B's kick &
+            // bass slam in on `s+1`.
+            automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.86, .hold), (s, 0.5, .linear)])
+            automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.84, .hold), (s, 0.5, .linear)])
+            automate(.a, .other, .reverb, [(s - 1.5, 0, .sCurve), (s - 0.375, 0.80, .linear),
+                                           (s - 0.125, 0.80, .linear), (s + 0.05, 0, .linear)])
+            // Ensure B's melody is wide open (unfiltered) during the naked fakeout bar.
+            if let bi = lanes.firstIndex(where: { $0.side == .b && $0.stem == .other }), !lanes[bi][.filter].isEmpty {
+                let openEnd = start + (s + 2.5) * barSeconds
+                lanes[bi][.filter].clear((start + (s - 0.05) * barSeconds)...openEnd)
+                automate(.b, .other, .filter, [(s - 0.05, 0.5, .linear), (s, 0.5, .linear)])
+            }
+            silences.append((.a, .bass, s - 0.5, s))
+            silences.append((.a, .drums, s - 0.125, s))
+            // Keep A's melody out through its dissolve window so it never pops
+            // back in over B's naked fakeout bar.
+            silences.append((.a, .other, s - 0.125, min(Double(bars) + 2, s + 2.5)))
+            silences.append((.b, .other, s - 0.125, s))
+            silences.append((.b, .drums, s - 0.5, s + 1))
+            silences.append((.b, .bass, s - 0.125, s + 1))
+
+        case .stutterGate:
+            // James Hype style rhythmic fader-chop build: syncopated 1/8th and
+            // 1/16th rhythmic gates across the final bar with a resonant HPF
+            // sweep and delay throw into B's full drop on `s`.
+            automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.86, .hold), (s, 0.5, .linear)])
+            automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.84, .hold), (s, 0.5, .linear)])
+            automate(.a, .drums, .delay, [(s - 1, 0, .sCurve), (s - 0.375, 0.52, .linear), (s - 0.125, 0, .linear)])
+            silences.append((.a, .bass, s - 1, s))
+            silences.append((.b, .drums, s - 1, s))
+            for (f, t) in [(s - 0.875, s - 0.75), (s - 0.625, s - 0.5),
+                           (s - 0.375, s - 0.3125), (s - 0.25, s - 0.1875), (s - 0.125, s)] {
+                silences.append((.a, .drums, f, t))
+                silences.append((.a, .other, f, t))
+            }
+            for stem in [StemKind.drums, .bass, .other] { silences.append((.b, stem, s - 0.125, s)) }
+
+        case .polyRoll:
+            // 3/16th polyrhythmic loop roll: hypnotic dotted-eighth tension
+            // across the final 1.5 bars that snaps violently back onto the 4/4
+            // downbeat when B's drop slams in.
+            automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.86, .hold), (s, 0.5, .linear)])
+            automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.83, .hold), (s, 0.5, .linear)])
+            automate(.a, .drums, .delay, [(s - 1, 0, .sCurve), (s - 0.375, 0.48, .linear), (s - 0.125, 0, .linear)])
+            var anchor = s - 1.5
+            if loop > 0, anchor >= 0 { anchor = Double(-loopBack) + anchor.truncatingRemainder(dividingBy: Double(loop)) }
+            rolls.append(Roll(side: .a, stem: .drums,
+                              start: start + (s - 1.5) * barSeconds, end: start + (s - 0.125) * barSeconds,
+                              anchor: start + anchor * barSeconds, length: 0.1875 * barSeconds))
+            silences.append((.a, .bass, s - 1, s))
+            silences.append((.b, .drums, s - 1, s))
+            for stem in [StemKind.drums, .other] { silences.append((.a, stem, s - 0.125, s)) }
+            for stem in [StemKind.drums, .bass, .other] { silences.append((.b, stem, s - 0.125, s)) }
         }
     }
 
@@ -931,7 +1047,7 @@ struct TransitionBuilder {
                 // A taste of B's melody over A's build, thin, then whole on
                 // the drop: the two songs are heard together first.
                 automate(.b, .other, .volume, [(h / 2, 0, .hold), (h / 2 + 0.001, 1, .linear)])
-                automate(.b, .other, .filter, [(h / 2, 0.84, .hold), (h - 0.001, 0.76, .hold), (h, 0.5, .linear)])
+                automate(.b, .other, .filter, [(h / 2, 0.84, .exponential), (h - 0.001, 0.76, .hold), (h, 0.5, .linear)])
                 automate(.b, .other, .low, [(h, 0, .hold), (h + 0.001, 0.5, .linear)])
             }
             for stem in [StemKind.drums, .bass] {
@@ -1078,6 +1194,29 @@ struct TransitionBuilder {
                 }
                 automate(.a, .other, .reverb, [(-0.625, 0, .sCurve), (-0.375, 0.55, .linear),
                                                (-0.25, 0.55, .linear), (-0.04, 0, .linear)])
+            } else if spinback {
+                let spinStart = start - 0.25 * barSeconds
+                let spinEnd = start - 0.03 * barSeconds
+                for stem in [StemKind.drums, .bass, .other] {
+                    rolls.append(Roll(side: .a, stem: stem, start: spinStart, end: spinEnd,
+                                      anchor: spinStart, length: spinEnd - spinStart, spinback: true))
+                    automate(.a, stem, .volume, [(-0.03, 1, .hold), (-0.029, 0, .linear)])
+                }
+                automate(.a, .other, .reverb, [(-0.375, 0, .sCurve), (-0.25, 0.68, .linear),
+                                               (-0.125, 0.68, .linear), (-0.03, 0, .linear)])
+            } else if acapellaBridge {
+                // Open-format a cappella tempo-bridge: kill A's beat & bass 2
+                // bars early so A's singing voice + softly reverbed melody
+                // float beatless into a cathedral wash, then B slams in at its
+                // own completely different tempo on beat 1.
+                for stem in [StemKind.drums, .bass] {
+                    automate(.a, stem, .filter, [(-2, 0.5, .sCurve), (-1.25, 0.14, .linear)])
+                    automate(.a, stem, .volume, [(-2, 1, .sCurve), (-1.25, 0, .linear)])
+                }
+                automate(.a, .drums, .delay, [(-2.25, 0, .sCurve), (-1.75, 0.55, .linear), (-1.25, 0, .linear)])
+                automate(.a, .other, .filter, [(-2, 0.5, .sCurve), (-0.125, 0.22, .linear)])
+                automate(.a, .other, .reverb, [(-1.5, 0, .sCurve), (-0.5, 0.78, .linear), (-0.125, 0.78, .linear), (0.001, 0, .linear)])
+                automate(.a, .other, .volume, [(-1.25, 1, .sCurve), (-0.125, 0, .linear)])
             } else {
                 for stem in [StemKind.drums, .bass, .other] {
                     automate(.a, stem, .volume, [(-0.125, 1, .hold), (-0.124, 0, .linear)])

@@ -19,10 +19,10 @@ struct TrackStructure: Codable, Equatable {
     /// measured before they existed still decode; the loader re-measures.
     var stemLevel: [String: [Float]]?
     var stemLowLevel: [String: [Float]]?
-    /// How "below 150 Hz" was measured (see `measure`); structures
+    /// How "below the low split" was measured (see `measure`); structures
     /// measured another way are measured again on load.
     var lowSplit: Int?
-    static let lowSplit = 2
+    static let lowSplit = 3
     /// dB under the song's loud level that a stem's loud bars count as at
     /// the least, when its activity is measured (see `measure`); how
     /// activity was measured, so older structures are measured again.
@@ -93,6 +93,36 @@ struct TrackStructure: Codable, Equatable {
     /// Auto-Order to group tracks with compatible sonic texture. Optional so
     /// cached structures decode and lazily backfill on load.
     var timbre: [Float]?
+
+    /// Functional parts of the song from the neural structure model (see
+    /// `StructureAnalyzer`), on the song's bars; nil where the model isn't
+    /// bundled or the song was measured before it. `neuralBoundary` is per
+    /// bar 0…1 how strongly a section starts there, `chorusScore` 0…1 how
+    /// much the bar is a chorus or instrumental drop.
+    var sections: [Section]?
+    var neuralBoundary: [Float]?
+    var chorusScore: [Float]?
+
+    enum SectionLabel: String, Codable, CaseIterable {
+        case start, end, intro, outro, `break`, bridge, inst, solo, verse, chorus
+
+        /// A part a DJ lands the next record on: its payoff.
+        var isPayoff: Bool { self == .chorus || self == .inst || self == .solo }
+        /// A part that's no landing: thin, waiting, or leaving.
+        var isLull: Bool { self == .intro || self == .break || self == .outro || self == .start || self == .end }
+    }
+
+    struct Section: Codable, Equatable {
+        var startBar: Int
+        var endBar: Int
+        var label: SectionLabel
+        var confidence: Float
+    }
+
+    /// The neural section label of `bar`, nil without one.
+    func section(at bar: Int) -> SectionLabel? {
+        sections?.first { bar >= $0.startBar && bar < $0.endBar }?.label
+    }
 
     /// How loud the track is when it's going: the level of its loud bars
     /// (80th percentile), which is what a DJ matches with the trim knob.
@@ -223,15 +253,15 @@ struct TrackStructure: Codable, Equatable {
         var stemLevel: [String: [Float]] = [:], stemLowLevel: [String: [Float]] = [:]
         for (kind, stem) in stems {
             var bars: [Float] = [], levels: [Float] = [], lows: [Float] = []
-            // "Below 150 Hz" is what a low kill takes away: the stem less
-            // what the mixer's isolator leaves of it (see
-            // `MixRenderer.updateFilters`), so a killed stem is judged by
-            // exactly what's heard of it. (A gentle low-pass, as this
-            // was, counted much of a kick's body above 150 Hz as "the
-            // rest": drums with their lows killed were planned louder
-            // than they play.)
-            var isolator = [Biquad(), Biquad(), Biquad()]
-            for (i, q) in [0.5176, 0.7071, 1.9319].enumerated() { isolator[i].set(.highPass(frequency: 150, q: q), sampleRate: sr) }
+            // "Low end" is exactly what the mixer's 6th-order Cytomic ZDF
+            // LowIsolator takes away on a full kill (105 Hz shelf, −54 dB),
+            // so placement judges a killed stem by the exact power left in it.
+            var isolator = LowIsolator(sampleRate: sr)
+            isolator.set(gainDB: LowIsolator.killDecibels, sampleRate: sr)
+            // Prime coefficients in 1 zero sample so bar 0 doesn't ramp across
+            // the whole bar.
+            var zeroL: Float = 0, zeroR: Float = 0
+            isolator.process(&zeroL, &zeroR, count: 1)
             var bar = 0
             while true {
                 let start = Int(grid.downbeat(bar) * sr), end = Int(grid.downbeat(bar + 1) * sr)
@@ -251,7 +281,7 @@ struct TrackStructure: Codable, Equatable {
                 let total = (ml + mr) / 2
                 var restL = Array(UnsafeBufferPointer(start: stem.left.pointer + start, count: n))
                 var restR = Array(UnsafeBufferPointer(start: stem.right.pointer + start, count: n))
-                for i in isolator.indices { isolator[i].process(&restL, &restR, count: n) }
+                isolator.process(&restL, &restR, count: n)
                 vDSP_measqv(restL, 1, &ml, vDSP_Length(n))
                 vDSP_measqv(restR, 1, &mr, vDSP_Length(n))
                 lows.append(10 * log10(max(total - (ml + mr) / 2, 1e-9)))
@@ -627,7 +657,14 @@ struct TrackStructure: Codable, Equatable {
     /// 0…1: how strongly a hook starts on `bar`.
     func hook(_ bar: Int) -> Float {
         guard let h = hookStart, bar >= 0, bar < h.count else { return 0 }
-        return h[bar]
+        // With the neural model: a hook that starts where it hears a chorus
+        // (or a drop) begin counts as much as either says, and a "hook" in
+        // what it hears as an intro, break or outro counts half.
+        guard let cs = chorusScore, bar < cs.count else { return h[bar] }
+        let starts = cs[bar] - (bar > 0 && bar - 1 < cs.count ? cs[bar - 1] : 0)
+        let neural = min(1, max(0, starts) + 0.5 * (neuralBoundary.map { bar < $0.count ? $0[bar] : 0 } ?? 0) * cs[bar])
+        let lull = section(at: bar)?.isLull == true
+        return min(1, max(h[bar], neural) * (lull ? 0.5 : 1))
     }
 }
 
@@ -1030,7 +1067,16 @@ extension TrackStructure {
             }
         }
         let peak = novelty.max() ?? 0
-        return peak > 0 ? novelty.map { $0 / peak } : novelty
+        let heuristic = peak > 0 ? novelty.map { $0 / peak } : novelty
+        // The neural model's section starts, where it has heard them, added
+        // in: it tells a verse from a chorus at the same level, which stem
+        // activity alone can't. It only ever raises a bar: blended over the
+        // measured change, it talked placement out of real ones (more
+        // transitions with under four bars of both songs).
+        guard let nb = neuralBoundary, !nb.isEmpty else { return heuristic }
+        return heuristic.indices.map { b in
+            b < nb.count ? max(heuristic[b], min(1, 0.5 * heuristic[b] + 0.6 * nb[b])) : heuristic[b]
+        }
     }
 
     /// Bar offset (0…3) of the four-bar phrase grid: the phase on which
@@ -1244,12 +1290,15 @@ enum AutoPlacement {
     /// say. Under three quarters of a minute, the songs just flicker past.
     /// - Parameter skipping: bars left out by a jump (not played at all).
     static func pacing(_ s: TrackStructure, from: Int, to: Int, barSeconds: Double,
-                       skipping: Range<Int>? = nil) -> Float {
+                       skipping: Range<Int>? = nil,
+                       targetSoloSeconds: Double = SetBuilder.minimumSoloSeconds) -> Float {
         let lowEnd = s.lowEndGoing()
         let bars = (max(0, from)..<max(max(0, from), to)).filter { !(skipping?.contains($0) ?? false) }
         let sag = bars.filter { s.sags($0, lowEnd: lowEnd) }.count
         let seconds = Float(Double(bars.count) * barSeconds)
-        return 0.1 * Float(sag) + 0.03 * max(0, seconds - 60) + 0.03 * max(0, 45 - seconds)
+        let targetMin = Float(targetSoloSeconds)
+        let targetMax = targetMin + 15
+        return 0.1 * Float(sag) + 0.03 * max(0, seconds - targetMax) + 0.03 * max(0, targetMin - seconds)
     }
 
     /// Every stem's power per bar, split at 150 Hz, with the deck's trim
@@ -1771,7 +1820,8 @@ enum AutoPlacement {
                       keysClash: Bool = false, clashAbove: Float? = nil, mashup: Bool = false, soloFrom: Int? = nil,
                       skip: Range<Int>? = nil, aShift: Int = 0, bShift: Int = 0, drumsLock: Bool = false,
                       drumsLinger: Bool = true, at spot: (entry: Int, cue: Int)? = nil, glide: Int = 0,
-                      runUp: Int = 0, loop: Int = 0) -> Result {
+                      runUp: Int = 0, loop: Int = 0,
+                      targetSoloSeconds: Double = SetBuilder.minimumSoloSeconds) -> Result {
         let barsA = a.grid.barCount(duration: a.duration)
         let barsB = b.grid.barCount(duration: b.duration)
         guard let whole = a.structure, let sb = b.structure, !whole.loudness.isEmpty, !sb.loudness.isEmpty else {
@@ -1899,7 +1949,7 @@ enum AutoPlacement {
         let musicEndB = (sb.loudness.lastIndex { $0 + trimB > refB - 5 } ?? barsB - 1) + 1
         let room = barsB - n - 8
         let lastCue = max(0, min(Int(Double(barsB) * 0.45), room,
-                                 min(barsB, musicEndB) - span - glide - SetBuilder.minimumSoloBars(b.grid) - 16))
+                                 min(barsB, musicEndB) - span - glide - SetBuilder.minimumSoloBars(b.grid, seconds: targetSoloSeconds) - 16))
         var cues = (0...lastCue).filter { onPhrase(startsB, $0) && plainB($0) }
         // Too short for a cue on its phrase grid within that: its first
         // phrase if the song has the bars for it, else its first bar.
@@ -2043,7 +2093,8 @@ enum AutoPlacement {
             scoreA += 0.6 * bound(boundA, e) + (loop > 0 ? 0 : 0.3 * bound(boundA, e + span))
             if let soloFrom {
                 scoreA -= pacing(sa, from: soloFrom, to: e - lead, barSeconds: a.grid.barSeconds,
-                                 skipping: skip.flatMap { e >= $0.upperBound ? $0 : nil })
+                                 skipping: skip.flatMap { e >= $0.upperBound ? $0 : nil },
+                                 targetSoloSeconds: targetSoloSeconds)
             } else {
                 scoreA += 0.3 * Float(e) / Float(max(1, barsA))
             }

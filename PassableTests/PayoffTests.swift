@@ -527,7 +527,9 @@ final class PayoffTests: XCTestCase {
             XCTAssertEqual(value(lanes, .a, stem, bar: -0.9), 1)
             XCTAssertEqual(value(lanes, .a, stem, bar: -0.15), 1)
             XCTAssertEqual(value(lanes, .a, stem, bar: -0.1), 0, accuracy: 0.01)
-            XCTAssertEqual(value(lanes, .b, stem, bar: -0.02), 0)
+            // (Shut until its switch starts: the lead plus the longest ramp, the bass's.)
+            let opens = (TransitionBuilder.switchLead + TransitionBuilder.lowRamp) / 2
+            XCTAssertEqual(value(lanes, .b, stem, bar: -opens - 0.001), 0)
             XCTAssertEqual(value(lanes, .b, stem, bar: 0.01), 1)
         }
     }
@@ -1412,6 +1414,56 @@ final class PayoffTests: XCTestCase {
                     for k in pts.indices.dropFirst() where abs(pts[k].value - pts[k - 1].value) > 0.05 {
                         XCTAssertNotEqual(pts[k - 1].curve, .hold, "mashup \(lane.id) \(p.shortName)")
                         XCTAssertGreaterThanOrEqual(pts[k].time - pts[k - 1].time, 0.0019, "mashup \(lane.id) \(p.shortName)")
+                    }
+                }
+            }
+        }
+    }
+
+    func testFakeoutDropVocalTeaseAndSpinbackAreClean() {
+        // Fakeout drop: B's vocal & melody play during bar 8..9 while B's drums
+        // and bass wait until bar 9 to slam in.
+        let fake = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 100, barSeconds: 2, bars: 16,
+                                          lowSwap: 8, vocalIn: 8, dropMoment: true, buildStyle: .fakeoutDrop)
+        let bDrums = fake.lanes.first { $0.side == .b && $0.stem == .drums }!
+        let bBass = fake.lanes.first { $0.side == .b && $0.stem == .bass }!
+        let bOther = fake.lanes.first { $0.side == .b && $0.stem == .other }!
+        let bVocals = fake.lanes.first { $0.side == .b && $0.stem == .vocals }!
+        XCTAssertEqual(bDrums.value(.volume, at: 100 + 2 * 8.5), 0, accuracy: 0.01, "B drums held out during fakeout bar")
+        XCTAssertEqual(bBass.value(.volume, at: 100 + 2 * 8.5), 0, accuracy: 0.01, "B bass held out during fakeout bar")
+        XCTAssertEqual(bOther.value(.volume, at: 100 + 2 * 8.5), 1, accuracy: 0.01, "B melody hangs naked during fakeout")
+        XCTAssertEqual(bVocals.value(.volume, at: 100 + 2 * 8.5), 1, accuracy: 0.01, "B vocal hangs naked during fakeout")
+        XCTAssertEqual(bDrums.value(.volume, at: 100 + 2 * 9.2), 1, accuracy: 0.01, "B drums slam in on bar 9")
+        XCTAssertEqual(bBass.value(.volume, at: 100 + 2 * 9.2), 1, accuracy: 0.01, "B bass slams in on bar 9")
+
+        // Ghost-hook vocal tease: previews B's vocal at bar 4 through radio HPF + echo.
+        let tease = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 100, barSeconds: 2, bars: 16,
+                                           lowSwap: 8, vocalIn: 8, vocalTease: (at: 4, from: 8, duration: 0.5))
+        let tbVoc = tease.lanes.first { $0.side == .b && $0.stem == .vocals }!
+        XCTAssertTrue(tease.rolls.contains { $0.side == .b && $0.stem == .vocals }, "tease roll added on B vocals")
+        XCTAssertGreaterThan(tbVoc.value(.volume, at: 100 + 2 * 4.25), 0.7, "tease opens B vocal briefly at bar 4")
+        XCTAssertGreaterThan(tbVoc.value(.filter, at: 100 + 2 * 4.25), 0.7, "tease radio-filters B vocal")
+        XCTAssertGreaterThan(tbVoc.value(.delay, at: 100 + 2 * 4.25), 0.6, "tease throws into ping-pong echo")
+        XCTAssertEqual(tbVoc.value(.volume, at: 100 + 2 * 5.0), 0, accuracy: 0.01, "tease closes cleanly before drop")
+        XCTAssertEqual(tbVoc.value(.filter, at: 100 + 2 * 6.0), 0.5, accuracy: 0.01, "filter resets cleanly before real entry")
+
+        // Spinback Cut & A Cappella Tempo-Bridge Cut write clean zero-step automation.
+        let spin = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 100, barSeconds: 2, bars: 1,
+                                          spinback: true)
+        XCTAssertEqual(Set(spin.rolls.filter { $0.spinback == true && $0.side == .a }.map(\.stem)), [.drums, .bass, .other])
+        let acBridge = TransitionBuilder.make(.echoOut, lanes: Lane.allLanes(), start: 100, barSeconds: 2, bars: 1,
+                                              acapellaBridge: true)
+        let acDrumsA = acBridge.lanes.first { $0.side == .a && $0.stem == .drums }!
+        let acVocA = acBridge.lanes.first { $0.side == .a && $0.stem == .vocals }!
+        XCTAssertEqual(acDrumsA.value(.volume, at: 100 - 2 * 0.75), 0, accuracy: 0.01, "A beat leaves 2 bars early for a cappella bridge")
+        XCTAssertEqual(acVocA.value(.volume, at: 100 - 2 * 0.75), 1, accuracy: 0.01, "A vocal floats beatless over final bar")
+        for made in [fake, tease, spin, acBridge] {
+            for lane in made.lanes {
+                for p in LaneParameter.allCases {
+                    let pts = lane[p].points
+                    for k in pts.indices.dropFirst() where abs(pts[k].value - pts[k - 1].value) > 0.05 {
+                        XCTAssertNotEqual(pts[k - 1].curve, .hold, "\(lane.id) \(p.shortName)")
+                        XCTAssertGreaterThanOrEqual(pts[k].time - pts[k - 1].time, 0.0019, "\(lane.id) \(p.shortName)")
                     }
                 }
             }

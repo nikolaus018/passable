@@ -749,11 +749,14 @@ final class SetShapeTests: XCTestCase {
         XCTAssertEqual(l, tone125, "bypass is bit-exact")
 
         // 24 dB/oct HPF at 500 Hz: 125 Hz is 2 octaves below → ~48 dB attenuation (< 0.008 from 0.5).
+        // (The first block is the filter's click-free fade in; measured after it.)
         filter.set(.highPass, frequency: 500, sampleRate: sr)
-        l = tone125; r = tone125
-        l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
-            filter.process(lp.baseAddress!, rp.baseAddress!, count: n)
-        } }
+        for _ in 0..<2 {
+            l = tone125; r = tone125
+            l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+                filter.process(lp.baseAddress!, rp.baseAddress!, count: n)
+            } }
+        }
         let settled = l[(n / 2)..<n].map(abs).max()!
         XCTAssertLessThan(settled, 0.008, "4-pole 24 dB/oct HPF strongly rejects 2 octaves below cutoff")
     }
@@ -766,9 +769,13 @@ final class SetShapeTests: XCTestCase {
             iso.set(gainDB: gainDB, sampleRate: sr)
             let sig = (0..<n).map { Float(0.5 * sin(2 * Double.pi * hz * Double($0) / sr)) }
             var l = sig, r = sig
-            l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
-                iso.process(lp.baseAddress!, rp.baseAddress!, count: n)
-            } }
+            // (The first block is the gain's click-free ramp; measured after it.)
+            for _ in 0..<2 {
+                l = sig; r = sig
+                l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+                    iso.process(lp.baseAddress!, rp.baseAddress!, count: n)
+                } }
+            }
             return l[(n / 2)..<n].map(abs).max()!
         }
         // 0 dB is bit-exact transparent.
@@ -877,10 +884,13 @@ final class SetShapeTests: XCTestCase {
         } }
         XCTAssertEqual(l, sub, "solo bypass leaves sub-bass bit-exact")
 
-        l = sub; r = sub.map { -$0 }
-        l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
-            glue.process(lp.baseAddress!, rp.baseAddress!, count: n, active: true)
-        } }
+        // (The first block is the blend's 120 ms engage; measured after it.)
+        for _ in 0..<2 {
+            l = sub; r = sub.map { -$0 }
+            l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+                glue.process(lp.baseAddress!, rp.baseAddress!, count: n, active: true)
+            } }
+        }
         let tightenedSide = (n / 2..<n).map { abs(0.5 * (l[$0] - r[$0])) }.max()!
         XCTAssertLessThan(tightenedSide, 0.11, "sub-100 Hz stereo Side is tightened during blends")
     }
@@ -915,5 +925,31 @@ final class SetShapeTests: XCTestCase {
         XCTAssertLessThan(riser, 0.12, "riser stays tasteful and subtle")
         XCTAssertEqual(breath, 0, "cuts dead cleanly during the pre-drop breath")
         XCTAssertGreaterThan(down, 0.005, "gentle downlifter on the drop")
+        // Club sub-impact boom present in the first 100 ms after drop.
+        let boom = dL[Int(3.01 * sr)..<Int(3.10 * sr)].map(abs).max()!
+        XCTAssertGreaterThan(boom, 0.04, "sub-impact boom reinforces the drop")
+    }
+
+    func testTurntableSpinbackReversesSmoothlyWithoutOutOfBounds() {
+        let sr = AudioIO.sampleRate
+        let n = Int(sr * 1.5)
+        // Rising chirp so reverse playback sounds audibly distinct from silence.
+        let chirp = (0..<n).map { i -> Float in
+            let t = Double(i) / sr
+            return Float(0.35 * sin(2 * Double.pi * (220 + 220 * t) * t))
+        }
+        let stem = StemAudio(left: MappedChannel(samples: chirp), right: MappedChannel(samples: chirp))
+        let lane = Lane(side: .a, stem: .other)
+        let spin = Roll(side: .a, stem: .other, start: 0.7, end: 1.0, anchor: 0.7, length: 0.3, spinback: true)
+        let frameRoll = MixSnapshot.FrameRoll(spin, sampleRate: sr)!
+        let renderer = MixRenderer(snapshot: MixSnapshot(
+            lanes: [.init(audio: stem, offset: 0, envelopes: lane.envelopes, audible: true, rolls: [frameRoll])],
+            length: n, delaySeconds: 0.3, masterGain: 1))
+        var l = [Float](repeating: 0, count: n), r = l
+        renderer.render(left: &l, right: &r, count: n)
+        // Active audio during the spinback body, smoothly faded by end.
+        XCTAssertGreaterThan(l[Int(0.75 * sr)..<Int(0.88 * sr)].map(abs).max()!, 0.15)
+        XCTAssertLessThan(l[Int(0.995 * sr)..<Int(1.0 * sr)].map(abs).max()!, 0.02)
+        XCTAssertFalse(l.contains { $0.isNaN || $0.isInfinite })
     }
 }

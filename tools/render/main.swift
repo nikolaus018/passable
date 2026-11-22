@@ -71,6 +71,7 @@ if let k = CommandLine.arguments.firstIndex(of: "--vocal-step") { VocalSeparator
 ModelLocation.directory = URL(fileURLWithPath: CommandLine.arguments.firstIndex(of: "--models").map { CommandLine.arguments[$0 + 1] }
                                  ?? "/Applications/Passable.app/Contents/Resources")
 TrackProcessor.renditionFolder = "render-matched"
+SetMix.Learned.isReadOnly = true
 // The tool's renditions are for runs of the same set close together: a
 // day after it last made one for a song, they go (they were 39 GB of a
 // 134 GB cache, never read by the app).
@@ -241,7 +242,8 @@ if ordered {
     let t0 = Date()
     let hits = BeatAlign.attacks(of: tracks.map(\.loaded))
     let t1 = Date()
-    let costs = SetOrdering.costMatrix(analyses, drums: hits, remembered: true, urls: tracks.map(\.url))
+    let pace = ProcessInfo.processInfo.environment["PASSABLE_PACING"].flatMap { SetPacing(rawValue: $0) }
+    let costs = SetOrdering.costMatrix(analyses, drums: hits, remembered: true, urls: tracks.map(\.url), pacing: pace)
     let t2 = Date()
     let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
     let shakes = CommandLine.arguments.firstIndex(of: "--shakes").map { Int(CommandLine.arguments[$0 + 1])! }
@@ -354,7 +356,9 @@ if CommandLine.arguments.contains("--word-times") {
     exit(0)
 }
 let built = Date()
-let mix = try await SetBuilder.build(tracks, processor: processor) { _ in }
+// (PASSABLE_MOVES: which automatic moves are allowed, as `AutoMoves` bits.)
+let allowedMoves = ProcessInfo.processInfo.environment["PASSABLE_MOVES"].flatMap(Int.init).map(AutoMoves.init(rawValue:)) ?? .all
+let mix = try await SetBuilder.build(tracks, moves: allowedMoves, processor: processor) { _ in }
 print("built in \(seconds(built))")
 
 try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
@@ -594,7 +598,7 @@ if CommandLine.arguments.contains("--renditions") {
         for kind in StemKind.allCases {
             let fresh = TimeStretcher.process(t.loaded.stems[kind]!.copyStereo(), map: m.plan.map,
                                               semitones: kind == .drums ? 0 : m.plan.semitones, percussive: kind == .drums,
-                                              vocal: kind == .vocals)
+                                              vocal: kind == .vocals, harmonicPercussive: kind == .other)
             let saved = m.stems[kind]!
             let ok = fresh.count == saved.count && (0..<fresh.count).allSatisfy {
                 fresh.left[$0].bitPattern == saved.left.pointer[$0].bitPattern && fresh.right[$0].bitPattern == saved.right.pointer[$0].bitPattern
@@ -949,7 +953,9 @@ if CommandLine.arguments.contains("--report") {
         // (A drop moment, the bar of silence before B's drop, is meant:
         // the steps into and out of it aren't counted, nor its level.)
         let silenceBar = t.dropAt.map { Int((($0 - from) / t.barSeconds).rounded()) - 1 }
-        let meant = { (j: Int) in silenceBar.map { j == $0 - 1 || j == $0 } ?? false }
+        // (A fakeout lands a bar later: the slam out of its bare bar is meant too.)
+        let slam = t.dropDelayBars > 0 ? silenceBar.map { $0 + Int(t.dropDelayBars.rounded()) } : nil
+        let meant = { (j: Int) in (silenceBar.map { j == $0 - 1 || j == $0 } ?? false) || j == slam }
         row.excess = js.indices.filter { !meant($0) }.map { js[$0] - max(ja[$0], jb[$0]) }.max() ?? 0
         row.seam = js.indices.filter { !meant($0) }.map { js[$0] }.max() ?? 0
         // (Bar of B's entry the biggest step lands on: the step from the
@@ -1050,6 +1056,10 @@ if CommandLine.arguments.contains("--report") {
                  Double(rows.map(\.together).reduce(0, +)) / m, rows.filter { $0.together < 4 }.count,
                  rows.filter { $0.dip > 4 }.count, rows.filter { $0.hole > 6 }.count, rows.map(\.busy).reduce(0, +), rows.map(\.moves).max() ?? 0,
                  Double(rows.map(\.moves).reduce(0, +)) / m, rows.map(\.after).reduce(0, +) / m, rows.filter { $0.after > 4 }.count))
+    // Which automatic moves the set really uses.
+    var moveCounts: [String: Int] = [:]
+    for t in mix.transitions { for move in t.payoff { moveCounts[move, default: 0] += 1 } }
+    print("MOVES " + moveCounts.sorted { ($1.value, $0.key) < ($0.value, $1.key) }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
     exit(0)
 }
 
@@ -1281,8 +1291,10 @@ if CommandLine.arguments.contains("--stretch") {
         let clip = StereoBuffer(left: Array(UnsafeBufferPointer(start: s.left.pointer + a, count: n)),
                                 right: Array(UnsafeBufferPointer(start: s.right.pointer + a, count: n)))
         let clock = Date()
-        let there = TimeStretcher.process(clip, map: .constant(1.03), semitones: 0, percussive: kind == .drums)
-        let back = TimeStretcher.process(there, map: .constant(1 / 1.03), semitones: 0, percussive: kind == .drums)
+        let there = TimeStretcher.process(clip, map: .constant(1.03), semitones: 0, percussive: kind == .drums,
+                                          vocal: kind == .vocals, harmonicPercussive: kind == .other)
+        let back = TimeStretcher.process(there, map: .constant(1 / 1.03), semitones: 0, percussive: kind == .drums,
+                                         vocal: kind == .vocals, harmonicPercussive: kind == .other)
         let x = clip.mono(), y = back.mono()
         let edge = Int(sr)
         try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)

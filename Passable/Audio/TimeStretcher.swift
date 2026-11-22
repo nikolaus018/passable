@@ -19,7 +19,7 @@ import Accelerate
 ///   copied verbatim.
 enum TimeStretcher {
     static func process(_ input: StereoBuffer, map: TimeMap, semitones: Int, percussive: Bool,
-                        vocal: Bool = false) -> StereoBuffer {
+                        vocal: Bool = false, harmonicPercussive: Bool = false) -> StereoBuffer {
         let total = max(0, Int(map.output(Double(input.count)).rounded(.down)))
         if map.isIdentity && semitones == 0 { return input }
 
@@ -31,9 +31,9 @@ enum TimeStretcher {
         // sharply; drums keep 4× since TransientCopy replaces hits directly.
         let size = (percussive || vocal) ? 2048 : 4096
         let overlap = percussive ? 4 : 8
-        let mono = input.mono()
-        let onsets = Onsets.detect(mono, sensitivity: percussive ? 0.06 : vocal ? 0.14 : 0.22)
+        let onsets = Onsets.detect(input.mono(), sensitivity: percussive ? 0.06 : vocal ? 0.14 : 0.18)
         let preserveLowPhase = !percussive
+        let selectiveOnsetReset = harmonicPercussive && !percussive
 
         if pitch != 1 {
             // Stretch by rate/pitch, then play the result `pitch` times
@@ -43,6 +43,7 @@ enum TimeStretcher {
             let zCount = Int((Double(total) * pitch).rounded(.up)) + taps
             let z = PhaseVocoder(size: size, overlap: overlap).process(input, count: zCount, source: { map.source($0 / pitch) },
                                                                        onsets: onsets, preserveLowPhase: preserveLowPhase,
+                                                                       selectiveOnsetReset: selectiveOnsetReset,
                                                                        formantRatio: vocal ? pitch : 1)
             return StereoBuffer(left: Resampler.resample(z.left, step: pitch, count: total),
                                 right: Resampler.resample(z.right, step: pitch, count: total))
@@ -60,7 +61,8 @@ enum TimeStretcher {
         }
         guard let verbatim else {
             var out = PhaseVocoder(size: size, overlap: overlap).process(input, count: total, source: map.source, onsets: onsets,
-                                                                         preserveLowPhase: preserveLowPhase)
+                                                                         preserveLowPhase: preserveLowPhase,
+                                                                         selectiveOnsetReset: selectiveOnsetReset)
             if percussive { TransientCopy.apply(to: &out, source: input, map: map, onsets: onsets, until: total) }
             return out
         }
@@ -69,7 +71,8 @@ enum TimeStretcher {
         if verbatim.start > 0 {
             let count = min(total, verbatim.start + fade + size)
             let head = PhaseVocoder(size: size, overlap: overlap).process(input, count: count, source: map.source, onsets: onsets,
-                                                                          preserveLowPhase: preserveLowPhase)
+                                                                          preserveLowPhase: preserveLowPhase,
+                                                                          selectiveOnsetReset: selectiveOnsetReset)
             out.left.replaceSubrange(0..<count, with: head.left)
             out.right.replaceSubrange(0..<count, with: head.right)
             if percussive {
@@ -98,7 +101,8 @@ enum TimeStretcher {
             let from = max(verbatim.start, verbatim.end - fade)
             let tail = PhaseVocoder(size: size, overlap: overlap).process(input, count: total - from,
                                                                           source: { map.source($0 + Double(from)) }, onsets: onsets,
-                                                                          preserveLowPhase: preserveLowPhase)
+                                                                          preserveLowPhase: preserveLowPhase,
+                                                                          selectiveOnsetReset: selectiveOnsetReset)
             for y in from..<total {
                 let u = y - from
                 let g = u < fade ? Float(0.5 - 0.5 * cos(Double.pi * Double(u) / Double(fade))) : 1
@@ -120,12 +124,14 @@ enum TimeStretcher {
     ///   - output: its inverse, source frame → output frame (where each
     ///     drum hit is copied to).
     static func warp(_ input: StereoBuffer, count: Int, source: (Double) -> Double,
-                     output: (Double) -> Double, percussive: Bool, vocal: Bool = false) -> StereoBuffer {
+                     output: (Double) -> Double, percussive: Bool, vocal: Bool = false,
+                     harmonicPercussive: Bool = false) -> StereoBuffer {
         let size = (percussive || vocal) ? 2048 : 4096
         let overlap = percussive ? 4 : 8
-        let onsets = Onsets.detect(input.mono(), sensitivity: percussive ? 0.06 : vocal ? 0.14 : 0.22)
+        let onsets = Onsets.detect(input.mono(), sensitivity: percussive ? 0.06 : vocal ? 0.14 : 0.18)
         var out = PhaseVocoder(size: size, overlap: overlap).process(input, count: count, source: source, onsets: onsets,
-                                                                     preserveLowPhase: !percussive)
+                                                                     preserveLowPhase: !percussive,
+                                                                     selectiveOnsetReset: harmonicPercussive && !percussive)
         if percussive { TransientCopy.apply(to: &out, source: input, output: output, onsets: onsets, until: count) }
         out.left.removeSubrange(min(count, out.left.count)...)
         out.right.removeSubrange(min(count, out.right.count)...)
@@ -215,36 +221,61 @@ final class PhaseVocoder {
     ///     phases, which keeps attacks from smearing.
     ///   - preserveLowPhase: on onset resets, keep sub-250 Hz fundamentals
     ///     phase-continuous to avoid low-end thumps on tonal/vocal stems.
+    ///   - selectiveOnsetReset: on tonal stems with mixed sustained chords and
+    ///     plucks (`other`), only reset phases of bins that actually spike on
+    ///     the onset (`mag[b] > 1.35 * prevMag[b]`), keeping steady harmonic
+    ///     partials phase-locked so chords never glitch during plucks.
     ///   - formantRatio: when resampling by `pitch != 1` for a vocal stem,
     ///     pre-warp the spectral envelope so vocal formants stay in place.
     func process(_ input: StereoBuffer, count: Int, source: (Double) -> Double, onsets: [Int],
-                 preserveLowPhase: Bool = false, formantRatio: Double = 1) -> StereoBuffer {
+                 preserveLowPhase: Bool = false, selectiveOnsetReset: Bool = false,
+                 formantRatio: Double = 1) -> StereoBuffer {
         let half = n / 2
         var outL = [Float](repeating: 0, count: count + n + hop)
         var outR = outL
         var fl = [Float](repeating: 0, count: n), fr = fl
         var lRe = [Float](repeating: 0, count: bins), lIm = lRe, rRe = lRe, rIm = lRe
-        var refRe = lRe, refIm = lRe, mag = lRe, phase = lRe
+        var refRe = lRe, refIm = lRe, mag = lRe, smoothMag = lRe, phase = lRe, phaseExact = lRe
         var prevPhase = lRe, prevSynth = lRe, synth = lRe, advanced = lRe
         var rot = lRe, cosR = lRe, sinR = lRe
         var isPeak = [Bool](repeating: false, count: bins)
-        var logEnv = [Float](repeating: 0, count: bins)
-        var envPrefix = [Float](repeating: 0, count: bins + 1)
+        // Liftered real-cepstrum buffers for pitch-shifted vocal formant preservation.
+        var cepRe = [Float](repeating: 0, count: bins)
+        var cepIm = [Float](repeating: 0, count: bins)
+        var cepTime = [Float](repeating: 0, count: n)
+        var lifter = [Float](repeating: 0, count: n)
         let minResetBin = preserveLowPhase ? max(1, Int(250 * Double(n) / AudioIO.sampleRate)) : 1
-        let envHalfWidth = max(3, Int(85 * Double(n) / AudioIO.sampleRate))
         let preserveFormants = abs(formantRatio - 1) > 1e-4
-        var prevA: Int?
+        if preserveFormants {
+            // Smooth raised-cosine low-quefrency lifter keeping vocal-tract
+            // formants (<0.80 ms) while attenuating pitch harmonics (>1.25 ms).
+            let qFlat = Int((0.00080 * AudioIO.sampleRate).rounded())
+            let qCut = Int((0.00125 * AudioIO.sampleRate).rounded())
+            let invNorm = 1.0 / Float(2 * n)
+            lifter[0] = invNorm
+            let maxQ = min(qCut, n / 2 - 1)
+            for q in 1...max(1, maxQ) {
+                let w: Float = q <= qFlat ? 1.0
+                    : 0.5 * (1.0 + cosf(Float.pi * Float(q - qFlat) / Float(max(1, qCut - qFlat))))
+                lifter[q] = w * invNorm
+                lifter[n - q] = w * invNorm
+            }
+        }
+        var prevExactA: Double?
         var nextOnset = 0
         var sumW2: Float = 0
         vDSP_svesq(window, 1, &sumW2, vDSP_Length(n))
         let norm = Float(hop) / sumW2 / Float(2 * n)
         let twoPi = Float.pi * 2
+        let omegaStep = twoPi / Float(n)
 
         var k = -(half / hop) + 1
         while k * hop - half < count {
             let s = k * hop
-            let a = Int(source(Double(s)).rounded())
-            let ha = prevA.map { a - $0 } ?? hop
+            let exactA = source(Double(s))
+            let a = Int(exactA.rounded())
+            let frac = Float(exactA - Double(a))
+            let fha = prevExactA.map { Float(exactA - $0) } ?? Float(hop)
 
             // Analysis frames, zero outside the source.
             load(input.left, centre: a, into: &fl)
@@ -269,35 +300,52 @@ final class PhaseVocoder {
             vvatan2f(&phase, refIm, refRe, &c)
             vDSP_zvabs_wrapper(refRe, refIm, &mag)
 
-            let fullReset = prevA == nil || ha <= 0
+            // Fractional-sample phase shift: move analysis phase from integer
+            // center `a` to exact continuous center `exactA = a + frac`,
+            // eliminating the ±0.5-sample analysis-hop sawtooth jitter.
+            phaseExact[0] = phase[0]
+            if abs(frac) > 1e-6 {
+                for b in 1..<bins {
+                    phaseExact[b] = phase[b] + Float(b) * omegaStep * frac
+                }
+            } else {
+                phaseExact = phase
+            }
+
+            let fullReset = prevExactA == nil || fha <= 0
             var onsetReset = false
-            while nextOnset < onsets.count && onsets[nextOnset] <= a + ha / 2 {
-                if onsets[nextOnset] > a - ha / 2 { onsetReset = true }
+            let halfHa = Int((fha * 0.5).rounded())
+            while nextOnset < onsets.count && onsets[nextOnset] <= a + halfHa {
+                if onsets[nextOnset] > a - halfHa { onsetReset = true }
                 nextOnset += 1
             }
 
             if fullReset || (onsetReset && minResetBin <= 1) {
-                synth = phase
-            } else {
-                let fha = Float(ha), fhs = Float(hop)
                 for b in 1..<bins {
-                    let omega = twoPi * Float(b) / Float(n)
-                    var d = phase[b] - prevPhase[b] - omega * fha
+                    synth[b] = phaseExact[b] - twoPi * (phaseExact[b] / twoPi).rounded()
+                }
+            } else {
+                let fhs = Float(hop)
+                for b in 1..<bins {
+                    let omega = Float(b) * omegaStep
+                    var d = phaseExact[b] - prevPhase[b] - omega * fha
                     d -= twoPi * (d / twoPi).rounded()
                     advanced[b] = prevSynth[b] + (omega + d / fha) * fhs
                 }
-                if onsetReset {
+                if onsetReset && !selectiveOnsetReset {
                     // Preserve phase continuity below 250 Hz while locking
                     // transients above 250 Hz to analysis phases.
                     for b in 1..<min(minResetBin, bins) {
                         synth[b] = advanced[b] - twoPi * (advanced[b] / twoPi).rounded()
                     }
                     for b in min(minResetBin, bins)..<bins {
-                        synth[b] = phase[b]
+                        synth[b] = phaseExact[b] - twoPi * (phaseExact[b] / twoPi).rounded()
                     }
                 } else {
-                    // Identity phase locking: peaks follow their own frequency,
-                    // every other bin keeps its phase relation to the nearest peak.
+                    // Identity phase locking with spectral-valley influence
+                    // regions: peaks follow their own frequency, and bins
+                    // between adjacent peaks split at the magnitude minimum
+                    // rather than the geometric midpoint.
                     var peakCount = 0
                     for b in 1..<bins {
                         let m = mag[b]
@@ -312,17 +360,49 @@ final class PhaseVocoder {
                         var prevPeak = -1
                         var b = 1
                         while b < bins {
-                            // Next peak at or after b.
                             var next = b
                             while next < bins && !isPeak[next] { next += 1 }
                             let end = next < bins ? next : bins - 1
-                            for j in b...end {
-                                let useNext = next < bins && (prevPeak < 0 || next - j <= j - prevPeak)
-                                let p = useNext ? next : prevPeak
-                                synth[j] = advanced[p] + phase[j] - phase[p]
+                            if prevPeak < 0 {
+                                for j in b...end {
+                                    synth[j] = advanced[next] + phaseExact[j] - phaseExact[next]
+                                }
+                            } else if next >= bins {
+                                for j in b...end {
+                                    synth[j] = advanced[prevPeak] + phaseExact[j] - phaseExact[prevPeak]
+                                }
+                            } else {
+                                var valley = prevPeak
+                                var minMag = mag[prevPeak]
+                                for m in (prevPeak + 1)...next where mag[m] < minMag {
+                                    minMag = mag[m]
+                                    valley = m
+                                }
+                                for j in b...end {
+                                    let p = j <= valley ? prevPeak : next
+                                    synth[j] = advanced[p] + phaseExact[j] - phaseExact[p]
+                                }
                             }
                             prevPeak = next
                             b = end + 1
+                        }
+                    }
+                    if onsetReset && selectiveOnsetReset {
+                        // Per-bin STFT harmonic-percussive phase preservation:
+                        // bins that jump sharply above their temporal harmonic
+                        // baseline (`smoothMag`) and sit on a broadband vertical
+                        // ridge lock to exact analysis phase for crisp plucks/
+                        // attacks, while steady harmonic partials stay phase-locked.
+                        for b in min(minResetBin, bins)..<bins {
+                            let h = smoothMag[b]
+                            guard mag[b] > 1.65 * h else { continue }
+                            let lo = max(1, b - 2), hi = min(bins - 1, b + 2)
+                            var pSum: Float = 0
+                            for fb in lo...hi { pSum += mag[fb] }
+                            let pMean = pSum / Float(hi - lo + 1)
+                            if mag[b] > 0.5 * pMean {
+                                synth[b] = phaseExact[b]
+                            }
                         }
                     }
                     for b in 1..<bins { synth[b] -= twoPi * (synth[b] / twoPi).rounded() }
@@ -330,21 +410,25 @@ final class PhaseVocoder {
             }
 
             if preserveFormants {
-                envPrefix[0] = 0
-                for b in 0..<bins {
-                    envPrefix[b + 1] = envPrefix[b] + logf(mag[b] + 1e-6)
-                }
+                // Real liftered cepstrum: extract the smooth vocal-tract log
+                // envelope without harmonic ripples, then warp formants back
+                // to their unshifted frequencies.
+                cepRe[0] = logf(max(mag[1], 1e-6))
+                cepIm[0] = logf(max(mag[bins - 1], 1e-6))
                 for b in 1..<bins {
-                    let lo = max(1, b - envHalfWidth), hi = min(bins, b + envHalfWidth + 1)
-                    logEnv[b] = (envPrefix[hi] - envPrefix[lo]) / Float(hi - lo)
+                    cepRe[b] = logf(max(mag[b], 1e-6))
+                    cepIm[b] = 0
                 }
+                inverse(&cepRe, &cepIm, &cepTime)
+                vDSP_vmul(cepTime, 1, lifter, 1, &cepTime, 1, vDSP_Length(n))
+                forward(&cepTime, &cepRe, &cepIm)
                 for b in 1..<bins {
                     let target = Double(b) * formantRatio
                     let t0 = min(bins - 1, max(1, Int(target)))
                     let t1 = min(bins - 1, t0 + 1)
-                    let frac = Float(target - Double(t0))
-                    let targetEnv = logEnv[t0] + frac * (logEnv[t1] - logEnv[t0])
-                    let g = min(4.0, max(0.25, expf(targetEnv - logEnv[b])))
+                    let f = Float(target - Double(t0))
+                    let targetEnv = cepRe[t0] + f * (cepRe[t1] - cepRe[t0])
+                    let g = min(4.0, max(0.25, expf(targetEnv - cepRe[b])))
                     lRe[b] *= g; lIm[b] *= g
                     rRe[b] *= g; rIm[b] *= g
                 }
@@ -373,9 +457,14 @@ final class PhaseVocoder {
                               o.baseAddress! + s + lo, 1, vDSP_Length(hi - lo))
                 }
             }
-            prevPhase = phase
+            if prevExactA == nil {
+                smoothMag = mag
+            } else {
+                for b in 1..<bins { smoothMag[b] = 0.75 * smoothMag[b] + 0.25 * mag[b] }
+            }
+            prevPhase = phaseExact
             prevSynth = synth
-            prevA = a
+            prevExactA = exactA
             k += 1
         }
         var scale = norm

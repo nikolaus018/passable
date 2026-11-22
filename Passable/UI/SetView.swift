@@ -80,6 +80,38 @@ struct SetView: View {
             .fixedSize()
             .disabled(set.exportProgress != nil)
             .help("Save the set with its songs as one .passable file, or open one")
+            Menu {
+                ForEach(SetPacing.allCases) { p in
+                    Button {
+                        set.pacing = p
+                    } label: {
+                        if set.pacing == p {
+                            Label(p.rawValue, systemImage: "checkmark")
+                        } else {
+                            Text(p.rawValue)
+                        }
+                    }
+                }
+            } label: {
+                Label(set.pacing.rawValue, systemImage: "flame")
+            }
+            .menuStyle(.borderedButton)
+            .fixedSize()
+            .help(set.pacing.help)
+            Menu {
+                ForEach(AutoMoves.named, id: \.name) { item in
+                    Toggle(item.name, isOn: Binding(
+                        get: { set.moves.contains(item.move) },
+                        set: { on in
+                            if on { set.moves.insert(item.move) } else { set.moves.remove(item.move) }
+                        }))
+                }
+            } label: {
+                Label("Moves", systemImage: "sparkles")
+            }
+            .menuStyle(.borderedButton)
+            .fixedSize()
+            .help("The showier moves automatic transitions may use")
             Button { set.autoOrder() } label: {
                 Label("Auto-Order", systemImage: "wand.and.stars")
             }
@@ -287,8 +319,8 @@ struct SetTransportBar: View {
                 .font(.system(.body, design: .monospaced))
                 .fixedSize()
 
-            if let hold = set.vocalHold {
-                Text(hold.solo ? "VOCALS ONLY" : "VOCALS OUT")
+            if let hold = set.liveHold {
+                Text(hold.kind.badge)
                     .font(.caption.bold()).foregroundStyle(.white)
                     .padding(.horizontal, 7).padding(.vertical, 3)
                     .background(Capsule().fill(Theme.deckB))
