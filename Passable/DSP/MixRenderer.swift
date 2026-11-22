@@ -52,6 +52,11 @@ final class MixSnapshot: @unchecked Sendable {
         }
     }
 
+    /// A subtle stereo air riser + drop downlifter around a drop moment, in master frames.
+    struct FrameSweep {
+        let start: Int, drop: Int, end: Int, cutBeforeDrop: Int
+    }
+
     let lanes: [LaneData]
     /// Master-timeline length in frames.
     let length: Int
@@ -60,14 +65,17 @@ final class MixSnapshot: @unchecked Sendable {
     /// Echo time changes over a set, since each transition echoes in its own
     /// tempo: (master frame from which it applies, seconds), ascending.
     let delaySchedule: [(from: Int, seconds: Double)]
+    /// Drop-moment air sweeps, sorted by start.
+    let sweeps: [FrameSweep]
 
     init(lanes: [LaneData], length: Int, delaySeconds: Double, masterGain: Float,
-         delaySchedule: [(from: Int, seconds: Double)] = []) {
+         delaySchedule: [(from: Int, seconds: Double)] = [], sweeps: [FrameSweep] = []) {
         self.lanes = lanes
         self.length = length
         self.delaySeconds = delaySeconds
         self.masterGain = masterGain
         self.delaySchedule = delaySchedule
+        self.sweeps = sweeps
     }
 
     static let empty = MixSnapshot(lanes: [], length: 0, delaySeconds: 0.35, masterGain: 1)
@@ -100,6 +108,7 @@ final class MixRenderer: @unchecked Sendable {
     private var reverb: Reverb
     private var delay: PingPongDelay
     private var glue: BusGlue
+    private var airSweep: AirSweep
     private var limiter: Limiter
     private var delaySeconds = 0.0
 
@@ -155,6 +164,7 @@ final class MixRenderer: @unchecked Sendable {
         reverb = Reverb(sampleRate: sampleRate)
         delay = PingPongDelay(sampleRate: sampleRate)
         glue = BusGlue(sampleRate: sampleRate)
+        airSweep = AirSweep(sampleRate: sampleRate)
         limiter = Limiter(sampleRate: sampleRate, ceiling: ceiling)
         retired.reserveCapacity(256)
         // Sized up front (four lanes a song, sets of up to 128 songs) so no
@@ -256,6 +266,7 @@ final class MixRenderer: @unchecked Sendable {
         reverb.reset()
         delay.reset()
         glue.reset()
+        airSweep.reset()
         reverbIdle = true
         delayIdle = true
         reverbTailFrames = 0
@@ -359,10 +370,22 @@ final class MixRenderer: @unchecked Sendable {
                 // During a blend, dip the center-panned vocal presence band on
                 // an `other` stem whose deck's vocal stem is muted, hiding
                 // leftover vocal separation bleed while keeping stereo synths wide.
+                // And as an outgoing melody low-passes away (<2 kHz), gently
+                // narrow its dry stereo width so it recedes behind the wide reverb.
                 if lane.isOther {
                     let vocalMuted = isBlending && lane.trackIndex >= 0
                         && (lane.trackIndex == mutedVocalTrack0 || lane.trackIndex == mutedVocalTrack1)
                     lanes[i].midVocalDipper.process(ll, lr, count: n, target: vocalMuted ? 1 : 0, sampleRate: sampleRate)
+                    if isBlending && lanes[i].filterValue < 0.35 && lanes[i].filterValue >= 0 {
+                        let depth = Float(max(0, min(1, (0.35 - lanes[i].filterValue) / 0.23)))
+                        let sideScale = 1 - 0.30 * depth
+                        for j in 0..<n {
+                            let m = 0.5 * (ll[j] + lr[j])
+                            let s = 0.5 * (ll[j] - lr[j]) * sideScale
+                            ll[j] = m + s
+                            lr[j] = m - s
+                        }
+                    }
                 }
 
                 // Fader, ramped across the block so fades are sample-smooth.
@@ -437,6 +460,14 @@ final class MixRenderer: @unchecked Sendable {
                 let rel = Float(exp(-Double(n) / (0.080 * sampleRate)))
                 kickDuck = 1 + rel * (kickDuck - 1)
                 if kickDuck > 0.9995 { kickDuck = 1; kickOwnerTrack = -1; kickLpState = 0 }
+            }
+
+            // Synthesize subtle stereo air riser + downlifter around drop moments.
+            if !snap.sweeps.isEmpty,
+               airSweep.process(position: position, count: n, sweeps: snap.sweeps,
+                                dryL: dL.baseAddress!, dryR: dR.baseAddress!,
+                                revL: rL.baseAddress!, revR: rR.baseAddress!) {
+                reverbFed = true
             }
 
             // The reverb and the echo only run while something is sent to

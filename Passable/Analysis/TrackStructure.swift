@@ -1647,6 +1647,11 @@ enum AutoPlacement {
     static func melodyOverlap(_ preset: TransitionPreset, bars n: Int,
                               lowSwap: Int?) -> (before: Range<Int>, after: Range<Int>) {
         let sw = TransitionBuilder.switchBar(preset, bars: n, lowSwap: lowSwap)
+        if preset == .mashup {
+            let split = Int(sw)
+            let until = max(split + 1, Int(TransitionBuilder.melodyDissolve(preset, bars: n, switchAt: sw)) + 2)
+            return (split..<split, split..<until)
+        }
         let q = n / 4, until = max(q + 1, Int(TransitionBuilder.melodyDissolve(preset, bars: n, switchAt: sw)) + 2)
         let split = min(max(q, Int(sw)), until)
         return (q..<split, split..<until)
@@ -1792,7 +1797,8 @@ enum AutoPlacement {
         // there is no voice of A's to wait for.)
         let mash = mashup && preset == .stemSwap && n >= 16 && loop == 0
             ? Int(TransitionBuilder.mashupWindow(bars: n).earliest) : nil
-        let handoffs = (swap == vocalIn ? [vocalIn] : [vocalIn, swap]) + (mash.map { [$0] } ?? [])
+        let handoffs = preset == .mashup ? [0]
+            : (swap == vocalIn ? [vocalIn] : [vocalIn, swap]) + (mash.map { [$0] } ?? [])
         let span = echo ? 0 : n
         let boundA = whole.boundaryStrength(), boundB = sb.boundaryStrength()
         // Each song's phrases, counted from its own section changes: the
@@ -2088,6 +2094,42 @@ enum AutoPlacement {
                         - sb.meanLoudness(bars: (c + switchAt - 4)..<(c + switchAt))
                     score += 0.5 * bound(boundB, c + switchAt) * min(1, max(0, (rise - 2) / 6))
                 }
+                if preset == .mashup {
+                    // A real club mashup needs B actively singing across the
+                    // first half over A's beat, ideally building into B's drop
+                    // or hook at `switchAt`. When placed automatically, require
+                    // verified vocal-on-harmony fit, an instrumental/looped bed
+                    // from A, a real low end from B at the drop, and a hook.
+                    let h = max(1, n / 2)
+                    let vBFirst = sb.meanActivity(.vocals, bars: c..<(c + h))
+                    let aBeat = sa.meanActivity(.drums, bars: e..<(e + h))
+                    let aVocals = loop > 0 ? 0 : sa.meanActivity(.vocals, bars: e..<(e + h))
+                    let hookPayoff = max(sb.hook(from: c), sb.hook(from: c + switchAt))
+                    if spot == nil {
+                        guard !clashHere, vBFirst >= 0.45, aBeat >= 0.55, aVocals < 0.35,
+                              hookPayoff >= 0.35, lowShort(at: c + switchAt) <= 4,
+                              let vChroma = sb.vocalChroma, let hChroma = sa.harmonyChroma
+                        else { continue }
+                        var vb = [Float](repeating: 0, count: 12), ha = vb
+                        for k in 0..<h {
+                            if c + k < vChroma.count {
+                                let row = bShift == 0 ? vChroma[c + k] : Harmony.transposed(vChroma[c + k], by: bShift)
+                                for p in 0..<12 { vb[p] += row[p] }
+                            }
+                            if e + k < hChroma.count {
+                                let row = aShift == 0 ? hChroma[e + k] : Harmony.transposed(hChroma[e + k], by: aShift)
+                                for p in 0..<12 { ha[p] += row[p] }
+                            }
+                        }
+                        guard vb.contains(where: { $0 > 0 }), ha.contains(where: { $0 > 0 }),
+                              Harmony.clash(ha, vb) <= Harmony.clashTolerance,
+                              Harmony.roughness(ha, vb) <= Harmony.roughTolerance
+                        else { continue }
+                    }
+                    score += 0.45 * min(1, vBFirst) + 0.35 * min(1, aBeat)
+                    score += 0.60 * hookPayoff
+                    score -= 1.2 * aVocals
+                }
                 if preset == .dropSwap {
                     // Worth it only onto a real drop: a new section of B at
                     // the switch with a genuine loudness lift, a drum/bass
@@ -2203,7 +2245,19 @@ enum AutoPlacement {
                                                           latest: min(target + after, max(target, untilB), Double(n)))
                         }
                         var plans: [Plan] = []
-                        if !echo, handoff == mash {
+                        if preset == .mashup {
+                            let h = Double(max(2, n / 2))
+                            let vinCut = AutoPlacement.vocalCut(sb, at: c, opening: true, target: 0,
+                                                                earliest: 0, latest: h / 2)
+                            let outCut = loop > 0
+                                ? AutoPlacement.vocalCut(whole, at: e, opening: false, target: 0,
+                                                         earliest: -AutoPlacement.loopExit.before,
+                                                         latest: AutoPlacement.loopExit.after)
+                                : AutoPlacement.vocalCut(sa, at: e, opening: false, target: vinCut.bar,
+                                                         earliest: max(-2, vinCut.bar - 2), latest: vinCut.bar)
+                            plans.append(Plan(vocalBar: 0, mashup: true, vin: vinCut.bar, drumsLayer: drumsLock,
+                                              out: outCut.bar, inCut: vinCut.kind, outCut: outCut.kind))
+                        } else if !echo, handoff == mash {
                             let w = TransitionBuilder.mashupWindow(bars: n)
                             plans.append(Plan(vocalBar: handoff, mashup: true,
                                               vin: AutoPlacement.vocalEntry(sb, cue: c, target: w.earliest,
@@ -2299,7 +2353,9 @@ enum AutoPlacement {
                             return Plan(vocalBar: v, mashup: false, vin: vin.bar, drumsLayer: drumsLayer,
                                         out: echo ? nil : out.bar, inCut: vin.kind, outCut: out.kind)
                         }
-                        plans.append(plan(from: floor, drumsLayer: true))
+                        if preset != .mashup {
+                            plans.append(plan(from: floor, drumsLayer: true))
+                        }
                         if preset == .stemSwap, !drumsLock {
                             // First: usually the worst, so the rest can be
                             // skipped once the spot can't win.

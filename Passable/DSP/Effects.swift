@@ -293,8 +293,9 @@ struct Limiter {
     }
 }
 
-/// Gentle VCA-style bus glue compressor engaged only while two songs overlap
-/// (`blendTarget > 0`). Glues layered tops/mids into one cohesive mix and takes
+/// Gentle VCA-style bus glue compressor + sub-100 Hz mono-maker engaged only
+/// while two songs overlap (`active == true`). Glues layered tops/mids into
+/// one cohesive mix, locks sub-bass dead center during swaps, and takes
 /// pressure off the peak limiter, while staying bit-exact bypassed during solo
 /// playback.
 struct BusGlue {
@@ -302,7 +303,9 @@ struct BusGlue {
     private let releaseCoef: Float
     private let blendCoef: Float
     private let scHpCoef: Float
+    private let subLpCoef: Float
     private var scPrev: Float = 0, scState: Float = 0
+    private var subSideState: Float = 0
     private var env: Float = 0
     private var blend: Float = 0
 
@@ -311,10 +314,11 @@ struct BusGlue {
         releaseCoef = Float(exp(-1.0 / (0.120 * sampleRate)))
         blendCoef = Float(exp(-1.0 / (0.120 * sampleRate)))
         scHpCoef = Float(exp(-2.0 * Double.pi * 120.0 / sampleRate))
+        subLpCoef = Float(exp(-2.0 * Double.pi * 100.0 / sampleRate))
     }
 
     mutating func reset() {
-        scPrev = 0; scState = 0; env = 0; blend = 0
+        scPrev = 0; scState = 0; subSideState = 0; env = 0; blend = 0
     }
 
     mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>,
@@ -322,17 +326,27 @@ struct BusGlue {
         let target: Float = active ? 1 : 0
         guard blend > 1e-4 || target > 0, count > 0 else { return }
         let atk = attackCoef, rel = releaseCoef, bCoef = blendCoef, hp = scHpCoef
+        let subA = subLpCoef, subB = 1 - subLpCoef
         // Threshold −9 dBFS (~0.355), soft knee 4 dB, ratio 2:1, max −3.5 dB GR.
         let threshDB: Float = -9.0
         let knee: Float = 4.0
         let invRatioDiff: Float = 0.5 // 1 - 1/2
-        var curBlend = blend, curEnv = env, curPrev = scPrev, curHp = scState
+        var curBlend = blend, curEnv = env, curPrev = scPrev, curHp = scState, curSub = subSideState
         for i in 0..<count {
             curBlend = target + bCoef * (curBlend - target)
-            let mono = 0.5 * (left[i] + right[i])
+            var l = left[i], r = right[i]
+            // Sub-100 Hz mono-maker: tighten Side below 100 Hz by −12 dB while
+            // blending, leaving Mid and >100 Hz stereo image completely untouched.
+            let side = 0.5 * (l - r)
+            curSub = subA * curSub + subB * side
+            let tighten = 0.75 * curBlend * curSub
+            l -= tighten
+            r += tighten
+
+            let mono = 0.5 * (l + r)
             curHp = hp * (curHp + mono - curPrev)
             curPrev = mono
-            let det = max(abs(curHp), 0.7 * max(abs(left[i]), abs(right[i])))
+            let det = max(abs(curHp), 0.7 * max(abs(l), abs(r)))
             let c = det > curEnv ? atk : rel
             curEnv = det + c * (curEnv - det)
             let db = 20 * log10f(max(curEnv, 1e-6))
@@ -349,13 +363,139 @@ struct BusGlue {
             let applied = min(3.5, grDB) * curBlend
             if applied > 1e-4 {
                 let g = powf(10, -applied / 20)
-                left[i] *= g
-                right[i] *= g
+                l *= g
+                r *= g
             }
+            left[i] = l
+            right[i] = r
         }
         blend = curBlend < 1e-4 && !active ? 0 : curBlend
         env = curEnv < 1e-20 ? 0 : curEnv
         scPrev = abs(curPrev) < 1e-20 ? 0 : curPrev
         scState = abs(curHp) < 1e-20 ? 0 : curHp
+        subSideState = abs(curSub) < 1e-20 ? 0 : curSub
+    }
+}
+
+/// Subtle Pioneer-style stereo air riser & drop downlifter synthesized only
+/// inside drop-moment windows. Zero-allocation, deterministic, and completely
+/// bypassed outside drop sweeps so solo playback stays bit-exact.
+struct AirSweep {
+    private let sampleRate: Double
+    private var rngL: UInt32 = 0x1234_5678
+    private var rngR: UInt32 = 0x9E37_79B9
+    private var s1L: Float = 0, s2L: Float = 0
+    private var s1R: Float = 0, s2R: Float = 0
+    private var active = false
+
+    init(sampleRate: Double) {
+        self.sampleRate = sampleRate
+    }
+
+    mutating func reset() {
+        rngL = 0x1234_5678
+        rngR = 0x9E37_79B9
+        s1L = 0; s2L = 0; s1R = 0; s2R = 0
+        active = false
+    }
+
+    @inline(__always)
+    private static func nextWhite(_ state: inout UInt32) -> Float {
+        var x = state
+        x ^= x << 13
+        x ^= x >> 17
+        x ^= x << 5
+        state = x
+        return Float(Int32(bitPattern: x)) * (1.0 / 2_147_483_648.0)
+    }
+
+    /// Synthesizes any overlapping sweep for frames `position..<(position + count)`
+    /// into `dryL/R` and feeds 35 % into `revL/R`. Returns true if audio was added.
+    mutating func process(position: Int, count: Int, sweeps: [MixSnapshot.FrameSweep],
+                          dryL: UnsafeMutablePointer<Float>, dryR: UnsafeMutablePointer<Float>,
+                          revL: UnsafeMutablePointer<Float>, revR: UnsafeMutablePointer<Float>) -> Bool {
+        var match: MixSnapshot.FrameSweep?
+        for sw in sweeps {
+            if sw.end > position && sw.start < position + count { match = sw; break }
+        }
+        guard let sw = match else {
+            if active { s1L = 0; s2L = 0; s1R = 0; s2R = 0; active = false }
+            return false
+        }
+        active = true
+        let riserEnd = sw.drop - sw.cutBeforeDrop
+        let riserSpan = max(1, riserEnd - sw.start)
+        let downSpan = max(1, sw.end - sw.drop)
+        let cutFade = max(1, Int(0.012 * sampleRate))
+        let attackFade = max(1, Int(0.010 * sampleRate))
+
+        // Mid-block filter parameters (updated once per 64-sample block = smooth).
+        let midP = position + count / 2
+        let freq: Double
+        let k: Float
+        if midP < sw.drop {
+            let u = max(0.0, min(1.0, Double(midP - sw.start) / Double(riserSpan)))
+            freq = 500.0 * pow(11.0, u * u) // 500 Hz → 5.5 kHz
+            k = Float(1.0 / 1.6)
+        } else {
+            let v = max(0.0, min(1.0, Double(midP - sw.drop) / Double(downSpan)))
+            freq = 3_800.0 * pow(320.0 / 3_800.0, pow(v, 0.7)) // 3.8 kHz → 320 Hz
+            k = Float(1.0 / 1.1)
+        }
+        let g = Float(tan(Double.pi * min(freq, sampleRate * 0.42) / sampleRate))
+        let a1 = 1 / (1 + g * (g + k))
+        let a2 = g * a1
+        let a3 = g * a2
+
+        var z1L = s1L, z2L = s2L, z1R = s1R, z2R = s2R
+        var wrote = false
+        for i in 0..<count {
+            let p = position + i
+            var env: Float = 0
+            if p >= sw.start && p < riserEnd {
+                let u = Float(p - sw.start) / Float(riserSpan)
+                env = 0.075 * u * u
+                let rem = riserEnd - p
+                if rem < cutFade {
+                    let fu = Float(rem) / Float(cutFade)
+                    env *= 0.5 * (1 - cosf(Float.pi * fu))
+                }
+            } else if p >= sw.drop && p < sw.end {
+                let v = Float(p - sw.drop) / Float(downSpan)
+                let omv = 1 - v
+                env = 0.068 * omv * omv
+                let elapsed = p - sw.drop
+                if elapsed < attackFade {
+                    env *= Float(elapsed) / Float(attackFade)
+                }
+            }
+            if env <= 1e-6 { continue }
+            wrote = true
+            let xl = Self.nextWhite(&rngL)
+            let v3L = xl - z2L
+            let v1L = a1 * z1L + a2 * v3L
+            let v2L = z2L + a2 * z1L + a3 * v3L
+            z1L = 2 * v1L - z1L
+            z2L = 2 * v2L - z2L
+            let outL = v1L * env
+
+            let xr = Self.nextWhite(&rngR)
+            let v3R = xr - z2R
+            let v1R = a1 * z1R + a2 * v3R
+            let v2R = z2R + a2 * z1R + a3 * v3R
+            z1R = 2 * v1R - z1R
+            z2R = 2 * v2R - z2R
+            let outR = v1R * env
+
+            dryL[i] += outL
+            dryR[i] += outR
+            revL[i] += outL * 0.35
+            revR[i] += outR * 0.35
+        }
+        s1L = abs(z1L) < 1e-20 ? 0 : z1L
+        s2L = abs(z2L) < 1e-20 ? 0 : z2L
+        s1R = abs(z1R) < 1e-20 ? 0 : z1R
+        s2R = abs(z2R) < 1e-20 ? 0 : z2R
+        return wrote
     }
 }

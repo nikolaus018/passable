@@ -933,8 +933,20 @@ final class Session: ObservableObject {
         // Dotted-eighth echo: syncopated against the grid, so repeats sit
         // between the kicks instead of on top of them.
         let beat = masterGrid?.beatSeconds ?? 0.5
+        var sweeps: [MixSnapshot.FrameSweep] = []
+        if let grid = masterGrid, preset != .echoOut, placedHere?.dropMoment == true {
+            let sw = TransitionBuilder.switchBar(preset, bars: transitionBars, lowSwap: placedHere?.lowSwap)
+            let dropAt = transitionStart + sw * grid.barSeconds
+            let startF = Int(((dropAt - 2 * grid.barSeconds) * sr).rounded())
+            let dropF = Int((dropAt * sr).rounded())
+            let endF = Int(((dropAt + min(2.5, 1.5 * grid.barSeconds)) * sr).rounded())
+            let cutF = Int((0.125 * grid.barSeconds * sr).rounded())
+            if startF >= 0 && dropF > startF {
+                sweeps.append(.init(start: startF, drop: dropF, end: endF, cutBeforeDrop: cutF))
+            }
+        }
         return MixSnapshot(lanes: data, length: Int(lengthSeconds * sr), delaySeconds: beat * 0.75,
-                           masterGain: Float(masterVolume))
+                           masterGain: Float(masterVolume), sweeps: sweeps)
     }
 
     private func rebuildSnapshot() {

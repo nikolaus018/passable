@@ -1384,4 +1384,37 @@ final class PayoffTests: XCTestCase {
         XCTAssertEqual(TrackStructure.timbreDistance(bright, bright)!, 0, accuracy: 1e-6)
         XCTAssertGreaterThan(TrackStructure.timbreDistance(bright, darkSub)!, 0.35)
     }
+
+    func testMashupPresetHarmonicAndDrumBedModesAreClean() {
+        // Harmonic 24-bar club mashup: B's vocal enters at bar 0, A's melody
+        // pockets under it and dissolves at bar 12 as B's full song drops in.
+        let harmonic = TransitionBuilder.make(.mashup, lanes: Lane.allLanes(), start: 100, barSeconds: 2, bars: 24,
+                                              keysClash: false, vocalIn: 0, vocalOut: 0, mashupUnder: 4.5)
+        let vocB = harmonic.lanes.first { $0.side == .b && $0.stem == .vocals }!
+        let othA = harmonic.lanes.first { $0.side == .a && $0.stem == .other }!
+        let othB = harmonic.lanes.first { $0.side == .b && $0.stem == .other }!
+        XCTAssertEqual(vocB.value(.volume, at: 100 + 2 * 2), 1, accuracy: 0.01, "B vocal sings early over A's beat")
+        XCTAssertLessThan(LaneParameter.eqDecibels(othA.value(.mid, at: 100 + 2 * 4)), -3.5, "A melody pockets under B vocal")
+        XCTAssertEqual(othB.value(.volume, at: 100 + 2 * 4), 0, accuracy: 0.01, "B melody waits for the drop")
+        XCTAssertEqual(othB.value(.volume, at: 100 + 2 * 13), 1, accuracy: 0.01, "B melody lands on the switch")
+
+        // Drum-bed mashup (clashing keys): A's melody washes out by bar 2 so B's
+        // vocal rides clash-free over A's beat, and every switch is ramped.
+        let drumBed = TransitionBuilder.make(.mashup, lanes: Lane.allLanes(), start: 100, barSeconds: 2, bars: 16,
+                                             keysClash: true, vocalIn: 0, vocalOut: 0, dropMoment: true,
+                                             buildStyle: .acappellaBreak)
+        let drumBedOthA = drumBed.lanes.first { $0.side == .a && $0.stem == .other }!
+        XCTAssertEqual(drumBedOthA.value(.volume, at: 100 + 2 * 3), 0, accuracy: 0.01, "clashing A melody stripped by bar 2")
+        for made in [harmonic, drumBed] {
+            for lane in made.lanes {
+                for p in LaneParameter.allCases {
+                    let pts = lane[p].points
+                    for k in pts.indices.dropFirst() where abs(pts[k].value - pts[k - 1].value) > 0.05 {
+                        XCTAssertNotEqual(pts[k - 1].curve, .hold, "mashup \(lane.id) \(p.shortName)")
+                        XCTAssertGreaterThanOrEqual(pts[k].time - pts[k - 1].time, 0.0019, "mashup \(lane.id) \(p.shortName)")
+                    }
+                }
+            }
+        }
+    }
 }

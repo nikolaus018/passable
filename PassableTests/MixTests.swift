@@ -864,4 +864,56 @@ final class SetShapeTests: XCTestCase {
         let entryJump = (Int(0.49 * sr)..<Int(0.51 * sr)).map { abs(l[$0 + 1] - l[$0]) }.max()!
         XCTAssertLessThan(entryJump, 2.5 * own, "brake enters smoothly at speed 1.0")
     }
+
+    func testBusGlueTightensSubBassSideDuringBlendsAndLeavesSoloExact() {
+        let sr = AudioIO.sampleRate
+        let n = 16_384
+        // Pure 55 Hz Side signal (L = +sine, R = -sine).
+        let sub = (0..<n).map { Float(0.2 * sin(2 * Double.pi * 55 * Double($0) / sr)) }
+        var glue = BusGlue(sampleRate: sr)
+        var l = sub, r = sub.map { -$0 }
+        l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+            glue.process(lp.baseAddress!, rp.baseAddress!, count: n, active: false)
+        } }
+        XCTAssertEqual(l, sub, "solo bypass leaves sub-bass bit-exact")
+
+        l = sub; r = sub.map { -$0 }
+        l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+            glue.process(lp.baseAddress!, rp.baseAddress!, count: n, active: true)
+        } }
+        let tightenedSide = (n / 2..<n).map { abs(0.5 * (l[$0] - r[$0])) }.max()!
+        XCTAssertLessThan(tightenedSide, 0.11, "sub-100 Hz stereo Side is tightened during blends")
+    }
+
+    func testAirSweepRisesIntoDropCutsCleanlyAndIsSilentOutsideWindow() {
+        let sr = AudioIO.sampleRate
+        let n = Int(sr * 6)
+        let sweep = MixSnapshot.FrameSweep(start: Int(1.0 * sr), drop: Int(3.0 * sr),
+                                           end: Int(5.0 * sr), cutBeforeDrop: Int(0.25 * sr))
+        var gen = AirSweep(sampleRate: sr)
+        var dL = [Float](repeating: 0, count: n), dR = dL, rL = dL, rR = dL
+        dL.withUnsafeMutableBufferPointer { dlp in
+            dR.withUnsafeMutableBufferPointer { drp in
+                rL.withUnsafeMutableBufferPointer { rlp in
+                    rR.withUnsafeMutableBufferPointer { rrp in
+                        for p in stride(from: 0, to: n, by: 64) {
+                            let c = min(64, n - p)
+                            _ = gen.process(position: p, count: c, sweeps: [sweep],
+                                            dryL: dlp.baseAddress! + p, dryR: drp.baseAddress! + p,
+                                            revL: rlp.baseAddress! + p, revR: rrp.baseAddress! + p)
+                        }
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(dL[0..<Int(0.9 * sr)].map(abs).max()!, 0, "silent before sweep")
+        XCTAssertEqual(dL[Int(5.1 * sr)..<n].map(abs).max()!, 0, "silent after sweep")
+        let riser = dL[Int(2.3 * sr)..<Int(2.7 * sr)].map(abs).max()!
+        let breath = dL[Int(2.80 * sr)..<Int(2.95 * sr)].map(abs).max()!
+        let down = dL[Int(3.1 * sr)..<Int(3.5 * sr)].map(abs).max()!
+        XCTAssertGreaterThan(riser, 0.005, "audible subtle air riser before drop")
+        XCTAssertLessThan(riser, 0.12, "riser stays tasteful and subtle")
+        XCTAssertEqual(breath, 0, "cuts dead cleanly during the pre-drop breath")
+        XCTAssertGreaterThan(down, 0.005, "gentle downlifter on the drop")
+    }
 }

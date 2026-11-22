@@ -71,11 +71,11 @@ enum MixMath {
     nonisolated(unsafe) static var cutCost = 15.0
 
     /// What a pair whose keys clash (melodies swap, never layer) costs
-    /// the order on top. On the 66-song set, with cuts at 15: at 1.2, 16
-    /// clashing swaps; at 2.5, 11; at 3, 9 with the smallest jumps (0.73 dB
-    /// mean), fewest thin blends (5) and dips (17); at 4 a cut comes back.
+    /// the order on top. Gently raised to 3.5 so large sets prefer Camelot-
+    /// compatible neighbors, unlocking more harmonic blends and club mashups
+    /// without introducing extra tempo cuts.
     /// Variable only for passable-render's trials.
-    nonisolated(unsafe) static var clashCost = 3.0
+    nonisolated(unsafe) static var clashCost = 3.5
 
     /// Up to this (each song no more than 4 % off its own tempo) a blend
     /// may run long. Past it the blend is a quick one: both songs are off
@@ -191,7 +191,7 @@ struct PairPlan: Equatable {
     static func make(a: TrackAnalysis, b: TrackAnalysis, entryRange: ClosedRange<Int>? = nil, aShift: Int = 0,
                      soloFrom: Int? = nil, skip: Range<Int>? = nil, drums: (a: [Float], b: [Float])? = nil,
                      fixed: TransitionEdit? = nil, clashing: Bool = false, locking: Bool = false,
-                     loops: Bool = true) -> PairPlan {
+                     loops: Bool = true, allowMashup: Bool = true) -> PairPlan {
         let rate = MixMath.rate(a: a.grid.bpm, b: b.grid.bpm)
         // (A song without a steady tempo is bridged whatever was chosen
         // for it: there is no beat to lay another on.)
@@ -210,7 +210,8 @@ struct PairPlan: Equatable {
                 let counted = b.counted(metre)
                 func plan(_ fixed: TransitionEdit?) -> PairPlan {
                     make(a: a, b: counted, entryRange: entryRange, aShift: aShift, soloFrom: soloFrom, skip: skip,
-                         drums: drums, fixed: fixed, clashing: clashing, locking: locking, loops: loops)
+                         drums: drums, fixed: fixed, clashing: clashing, locking: locking, loops: loops,
+                         allowMashup: allowMashup)
                 }
                 var chosen = fixed
                 chosen?.cueBar = metre.counted(fixed?.cueBar ?? 0)
@@ -329,6 +330,17 @@ struct PairPlan: Equatable {
                     options.append((.longBlend, 24, length(24) - 0.1, 0))
                 }
             }
+            // Full club mashup candidates (16 or 24 bars, with or without A's
+            // 4-bar groove looped underneath) when tempos and keys fit.
+            // Placement strictly verifies B's vocal presence and chord fit.
+            if allowMashup, !clash(0), MixMath.stretch(rate) < MixMath.mashupStretch {
+                options.append((.mashup, 16, length(16) + 0.15, 0))
+                if loops { options.append((.mashup, 16, length(16) + 0.15, MixMath.loopBars)) }
+                if Double(24) * barSeconds <= MixMath.maxBlendSeconds {
+                    options.append((.mashup, 24, length(24) + 0.05, 0))
+                    if loops { options.append((.mashup, 24, length(24) + 0.05, MixMath.loopBars)) }
+                }
+            }
             // And each Stem Swap over A's beat looped (see
             // `TransitionBuilder.loop`): four bars, the phrase a DJ loops.
             if loops {
@@ -343,7 +355,9 @@ struct PairPlan: Equatable {
         if MixMath.stretch(rate) > MixMath.easyStretch { options = options.filter { $0.preset == .echoOut || $0.bars <= 8 } }
         if let fixed {
             options = [(fixed.preset, fixed.bars, 0, 0)]
-            if fixed.preset == .stemSwap { options.append((fixed.preset, fixed.bars, 0, MixMath.loopBars)) }
+            if fixed.preset == .stemSwap || fixed.preset == .mashup {
+                options.append((fixed.preset, fixed.bars, 0, MixMath.loopBars))
+            }
             shifts = [fixed.semitones]
         }
         typealias Candidate = (preset: TransitionPreset, bars: Int, shift: Int, placement: AutoPlacement.Result, prior: Float)
@@ -457,7 +471,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "31"
+    static let planner = "32"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -1354,8 +1368,20 @@ struct SetMix: @unchecked Sendable {
             previousEnd = tr.end
         }
         let first = schedule.first?.seconds ?? 0.35
+        // Subtle stereo air riser + drop downlifter around drop moments.
+        var sweeps: [MixSnapshot.FrameSweep] = []
+        for tr in transitions {
+            guard let dropAt = tr.dropAt, tr.edit.preset != .echoOut else { continue }
+            let startF = Int(((dropAt - 2 * tr.barSeconds) * sr).rounded())
+            let dropF = Int((dropAt * sr).rounded())
+            let endF = Int(((dropAt + min(2.5, 1.5 * tr.barSeconds)) * sr).rounded())
+            let cutF = Int((0.125 * tr.barSeconds * sr).rounded())
+            if startF >= 0 && dropF > startF {
+                sweeps.append(.init(start: startF, drop: dropF, end: endF, cutBeforeDrop: cutF))
+            }
+        }
         return MixSnapshot(lanes: lanes, length: Int(length * sr), delaySeconds: first, masterGain: masterGain,
-                           delaySchedule: schedule)
+                           delaySchedule: schedule, sweeps: sweeps)
     }
 }
 
@@ -2640,6 +2666,9 @@ enum SetBuilder {
             let hits = BeatAlign.attacks(of: tracks.map(\.loaded))
             // Semitones each track plays shifted by.
             var shifts = [0]
+            // Space full automatic club mashups at least 4 tracks apart so they
+            // land as special set highlights rather than running back to back.
+            var sinceMashup = 4
             for k in 1..<tracks.count {
                 if Task.isCancelled { throw CancellationError() }
                 progress("Planning \(k)/\(tracks.count - 1)")
@@ -2676,10 +2705,12 @@ enum SetBuilder {
                                          drums: unlocked.contains(key) ? nil
                                              : hits[k - 1].flatMap { x in hits[k].map { (a: x, b: $0) } },
                                          fixed: chosen, clashing: clashed.contains(key),
-                                         locking: locked.contains(key) && !unlocked.contains(key))
+                                         locking: locked.contains(key) && !unlocked.contains(key),
+                                         allowMashup: sinceMashup >= 4)
                 let edit = inRange(byHand ? edits[key]! : TransitionEdit(
                     entryBar: plan.placement.entryBar, cueBar: plan.placement.cueBar, preset: plan.preset,
                     bars: plan.bars, semitones: plan.semitones, lanes: [], byHand: false))
+                sinceMashup = (edit.preset == .mashup || plan.placement.mashup) ? 0 : sinceMashup + 1
                 // B's shift is the plan's: decided there from the notes that
                 // overlap at the spot, and placed and priced as that.
                 // The two meet at a tempo between theirs (or at A's, for a
@@ -3148,7 +3179,38 @@ enum SetBuilder {
                 // starts clean in the window, and A's vocal (if any) has
                 // finished a line by then.
                 // B's voice has to sit on A's chords, as they play there.
-                if plan.placement.mashup, edit.preset == .stemSwap, !keysClash, align.grooves,
+                // Full club mashup preset (16–32 bars): B's vocal sings over A's
+                // beat from the start into B's drop on `sw`. Verify chord fit on
+                // actual audio; if it clashes, cleanly engage Drum-Bed mode.
+                if edit.preset == .mashup {
+                    if !keysClash,
+                       !Harmony.fits([aStems[.other], aStems[.bass]].compactMap { $0 }, aOffset: aPlays,
+                                     [vocalsB], bOffset: offset + nudge,
+                                     from: start, to: start + sw * bar) {
+                        keysClash = true
+                    }
+                    if let refB = VocalPhrasing.reference(bCounted.structure),
+                       let entry = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: refB, opening: true,
+                                                     target: start, earliest: start,
+                                                     latest: start + (sw / 2) * bar, bar: bar, lines: linesB(start)) {
+                        vocalIn = (entry.time - start) / bar
+                        vocalInKind = entry.kind == .line ? "breath" : entry.kind.rawValue
+                    } else {
+                        vocalIn = 0
+                        vocalInKind = "bar"
+                    }
+                    if loop == 0, let refA {
+                        let tin = start + (vocalIn ?? 0) * bar
+                        if let exit = VocalPhrasing.cut(vocalsA, offset: aOffset, reference: refA, opening: false, target: tin,
+                                                        earliest: tin - 2 * bar, latest: tin, bar: bar, lines: linesA(tin)) {
+                            vocalOut = (exit.time - start) / bar
+                            vocalOutKind = exit.kind.rawValue
+                        } else {
+                            vocalOut = vocalIn ?? 0
+                        }
+                    }
+                    mashup = true
+                } else if plan.placement.mashup, edit.preset == .stemSwap, !keysClash, align.grooves,
                    let refB = VocalPhrasing.reference(bCounted.structure),
                    Harmony.fits([aStems[.other], aStems[.bass]].compactMap { $0 }, aOffset: aPlays,
                                 [vocalsB], bOffset: offset + nudge,
@@ -3331,15 +3393,22 @@ enum SetBuilder {
                 if !dropMoment {
                     buildStyle = .snareRoll
                 } else {
-                    let aSingsIntoDrop = loop == 0 && (vocalOut ?? switchBar) >= switchBar - 0.5
+                    let aSingsIntoDrop = edit.preset != .mashup && loop == 0 && (vocalOut ?? switchBar) >= switchBar - 0.5
                         && (a.stems[.vocals].flatMap { vA in
                             VocalPhrasing.reference(a.loaded.analysis.structure).map { ref in
                                 VocalPhrasing.sounding(vA, offset: aOffset, reference: ref,
                                                        at: start + (switchBar - 1) * blendBar, beat: blendBar)
                             }
                         } ?? false)
+                    let bSingsIntoDrop = edit.preset == .mashup
+                        && (matched.stems[.vocals].flatMap { vB in
+                            VocalPhrasing.reference(bCounted.structure).map { ref in
+                                VocalPhrasing.sounding(vB, offset: offset + nudge, reference: ref,
+                                                       at: start + (switchBar - 1) * blendBar, beat: blendBar)
+                            }
+                        } ?? false)
                     let preferred: [TransitionBuilder.BuildStyle]
-                    if aSingsIntoDrop {
+                    if aSingsIntoDrop || bSingsIntoDrop {
                         preferred = [.acappellaBreak, .riser, .bassDrop, .snareRoll]
                     } else if rollBeat != nil {
                         let highEnergy = SetOrdering.energy(b.analysis) >= 0.65
@@ -3502,7 +3571,7 @@ enum SetBuilder {
                 // bars of beat loop on over the gap (see `drumBridge`).
                 // (Without, Can't Hold Us broke down a bar into its blend
                 // with Pump It's beat three bars off: three bars of no beat.)
-                if edit.preset == .stemSwap, loop == 0, let sa = saPlays,
+                if (edit.preset == .stemSwap || edit.preset == .mashup), loop == 0, let sa = saPlays,
                    let bridge = TransitionBuilder.drumBridge(a: sa, entry: edit.entryBar, b: bCounted.structure, cue: cueCounted,
                                                              bars: edit.bars, bDrumsFrom: align.grooves ? 0 : switchBar,
                                                              until: switchBar) {
@@ -3514,7 +3583,13 @@ enum SetBuilder {
                                            seamless: true))
                 }
                 payoff = plan.placement.payoff.filter { !$0.hasPrefix("mashup") && $0 != "roll into the drop" }
-                if mashup { payoff.append("mashup: B sings over A's beat") }
+                if edit.preset == .mashup {
+                    payoff.append(keysClash
+                        ? "drum-bed mashup: B sings over A's beat"
+                        : "club mashup: B sings over A's groove (\(edit.bars) bars)")
+                } else if mashup {
+                    payoff.append("mashup: B sings over A's beat")
+                }
                 if dropMoment {
                     let styleNote: String
                     switch buildStyle {

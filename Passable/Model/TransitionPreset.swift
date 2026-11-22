@@ -4,7 +4,7 @@ import Foundation
 /// moment B enters, measured in bars of the master (A) grid, so they land on
 /// phrase boundaries whatever the tempo.
 enum TransitionPreset: String, CaseIterable, Codable, Identifiable {
-    case stemSwap, dropSwap, longBlend, echoOut
+    case stemSwap, dropSwap, longBlend, mashup, echoOut
 
     var id: String { rawValue }
 
@@ -13,6 +13,7 @@ enum TransitionPreset: String, CaseIterable, Codable, Identifiable {
         case .stemSwap: return "Stem Swap"
         case .dropSwap: return "Drop Swap"
         case .longBlend: return "Long Blend"
+        case .mashup: return "Mashup"
         case .echoOut: return "Wash Out"
         }
     }
@@ -25,6 +26,8 @@ enum TransitionPreset: String, CaseIterable, Codable, Identifiable {
             return "A rides its build while B's drums creep in filtered; A's beat rolls into a half-beat of silence, then on B's drop everything flips at once and A's melody and vocal echo away."
         case .longBlend:
             return "A slow EQ blend: B's drums and melody come up with their low end killed, the lows and bass lines trade places mid-way, A filters out."
+        case .mashup:
+            return "A full club mashup: A's beat and groove ride underneath (or loop cleanly) while B's singer performs a full verse or hook on top, then B's bass and full instrumental slam in on the drop as A washes away. On clashing keys, A strips to a drum bed so B's vocal rides clean."
         case .echoOut:
             return "Two beats never play at once, so each song keeps its own tempo. At 1 bar it's a cut on the one (tempos too far apart to blend): A plays whole to its phrase end, its last beat echoes into half a beat of silence, and B lands whole on its downbeat. Longer, it's a bridge for a song with no steady beat (a live drummer): A's beat sinks away first and its melody and vocal float on into a reverb wash before B drops in."
         }
@@ -41,6 +44,7 @@ enum TransitionPreset: String, CaseIterable, Codable, Identifiable {
         case .stemSwap: return 16
         case .dropSwap: return 8
         case .longBlend: return 32
+        case .mashup: return 16
         case .echoOut: return 8
         }
     }
@@ -245,7 +249,7 @@ struct TransitionBuilder {
                                         vocalIn: vocalIn, vocalOut: vocalOut,
                                         mashup: mashup, dropMoment: dropMoment, rollBeat: rollBeat,
                                         vocalOutFade: vocalOutFade, vocalInFade: vocalInFade, room: room, carry: carry,
-                                        under: under, loop: preset == .stemSwap ? loop : 0, loopBack: loopBack,
+                                        under: under, loop: (preset == .stemSwap || preset == .mashup) ? loop : 0, loopBack: loopBack,
                                         hats: hats && !drumsLayer, voiceStep: voiceStep,
                                         underUntil: underUntil, buildStyle: buildStyle,
                                         vocalThrowStart: vocalThrowStart, mashupUnder: mashupUnder,
@@ -283,6 +287,7 @@ struct TransitionBuilder {
         switch preset {
         case .echoOut: return 0
         case .dropSwap, .longBlend: return n / 2
+        case .mashup: return min(n, max(n / 2, Double(lowSwap ?? bars / 2)))
         case .stemSwap: return min(n, max(1, Double(lowSwap ?? bars / 2)))
         }
     }
@@ -303,6 +308,7 @@ struct TransitionBuilder {
     /// bar 3 of a 16-bar blend.)
     static func melodyDissolve(_ preset: TransitionPreset, bars: Int, switchAt sw: Double, mashup: Bool = false,
                                carry: Bool = false) -> Double {
+        if preset == .mashup { return min(sw, max(Double(bars) / 4, Double(bars) - 2)) }
         guard preset == .stemSwap else { return sw }
         let n = Double(bars), q = n / 4
         if mashup { return min(sw, max(q, n - 2)) }
@@ -604,7 +610,7 @@ struct TransitionBuilder {
     /// A's vocal is gone at bar `out`: its last words are thrown into the
     /// echo, and the channel cuts there (or blends out over the bars
     /// before, if it's still singing), so the echo carries it away.
-    private mutating func echoOutVocal(at out: Double, send: Double = 0.8, tail: Double = 1) {
+    private mutating func echoOutVocal(at out: Double, send: Double = 0.8, tail: Double = 1, reverb: Double = 0) {
         vocalExit = out
         // If we know where A's last sung word begins, open the echo right on
         // that word instead of smearing a whole bar of lyrics into the delay.
@@ -612,8 +618,16 @@ struct TransitionBuilder {
             let lead = max(out - 1.0, wordStart - 0.04)
             automate(.a, .vocals, .delay, [(lead, 0, .sCurve), (wordStart, send, .linear),
                                            (out, send, .linear), (out + tail, 0, .linear)])
+            if reverb > 0.01 {
+                automate(.a, .vocals, .reverb, [(lead, 0, .sCurve), (wordStart, reverb, .linear),
+                                                (out, reverb, .linear), (out + min(tail, 0.75), 0, .linear)])
+            }
         } else {
             automate(.a, .vocals, .delay, [(out - 1, 0, .linear), (out - 0.25, send, .hold), (out + tail, 0, .linear)])
+            if reverb > 0.01 {
+                automate(.a, .vocals, .reverb, [(out - 0.75, 0, .sCurve), (out - 0.25, reverb, .linear),
+                                                (out, reverb, .linear), (out + min(tail, 0.75), 0, .linear)])
+            }
         }
         if vocalOutFade > 0 {
             automate(.a, .vocals, .volume, [(out - vocalOutFade, 1, .logarithmic), (out, 0, .linear)])
@@ -651,8 +665,9 @@ struct TransitionBuilder {
         // Close the drum echo send right on the switch so A's beat-1 kick after
         // the swap doesn't smear over B's downbeat.
         automate(.a, .drums, .delay, [(at - 1, 0, .exponential), (at - 0.25, 0.45, .linear), (at, 0, .linear)])
-        // Subtle 2-beat sub-bass tension lift right into B's bass drop.
-        if at >= 4 {
+        // Subtle 2-beat sub-bass tension lift right into B's bass drop
+        // (skipped if the bass is already low-passed, e.g. drum-bed mashup).
+        if at >= 4, let bi = lanes.firstIndex(where: { $0.side == .a && $0.stem == .bass }), lanes[bi][.filter].isEmpty {
             automate(.a, .bass, .filter, [(at - 0.5, 0.5, .exponential), (at, 0.72, .linear)])
         }
     }
@@ -862,6 +877,13 @@ struct TransitionBuilder {
                     automate(.b, .other, .mid, [(q, midCut, .linear), (max(q + 0.01, lift - 0.125), midCut, .sCurve), (lift, 0.5, .linear)])
                 } else {
                     bringIn(.other, at: q, filter: 0.82, open: q + max(1, q / 2))
+                    // Reverse mashup: if A's voice carries on past the swap over
+                    // B's new beat, carve a gentle mid pocket in B's melody so
+                    // A's singer stays crystal clear until exiting.
+                    if out > sw + 0.5 {
+                        automate(.b, .other, .mid, [(max(0, sw - 0.25), 0.5, .sCurve), (sw, 0.4625, .linear),
+                                                    (max(sw + 0.1, out - 0.125), 0.4625, .sCurve), (out, 0.5, .linear)])
+                    }
                 }
                 dissolveMelody(from: Self.melodyDissolve(preset, bars: bars, switchAt: sw, carry: carry))
             }
@@ -967,6 +989,79 @@ struct TransitionBuilder {
             automate(.a, .drums, .volume, [(3 * q, 1, .sCurve), (4 * q, 0, .linear)])
             bringInVocal(at: vin)
 
+        case .mashup:
+            // Full club mashup (16–32 bars): B's singer rides over A's groove
+            // for an entire verse or hook (0..<sw), then B's real bass, kick,
+            // and full melody slam in on `sw` as A washes into reverb.
+            let q = n / 4
+            let sw = Self.switchBar(.mashup, bars: bars, lowSwap: lowSwap)
+            let vin = max(0, min(sw - 1, vocalIn ?? 0))
+            let out = min(vin, vocalOut ?? vin)
+            // Drums: if grooves lock, B's low-killed drums sweep smoothly in
+            // underneath B's vocal to build energy into the drop; otherwise
+            // A's beat drives cleanly solo until B slams in on `sw`.
+            if drumsLayer {
+                bringIn(.drums, at: 0, filter: 0.86, open: sw)
+            } else if hats {
+                automate(.b, .drums, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
+                automate(.b, .drums, .filter, [(0, Self.hatsFilter, .hold), (sw - 0.001, Self.hatsFilter, .hold), (sw, 0.5, .linear)])
+            } else {
+                automate(.b, .drums, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
+            }
+            for stem in [StemKind.drums, .other] {
+                automate(.b, stem, .low, [(sw, 0, .hold), (sw + 0.001, 0.5, .linear)])
+                if sw < n {
+                    automate(.a, stem, .low, [(sw, 0.5, .hold), (sw + 0.001, 0, .linear)])
+                }
+            }
+            automate(.a, .bass, .volume, [(sw, 1, .hold), (sw + 0.001, 0, .linear)])
+            automate(.b, .bass, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
+            handOverVocalLows(at: sw)
+            // A's vocal echoes out with a lush reverb tail right before B's singer takes over.
+            echoOutVocal(at: out, send: vocalSend, reverb: 0.42)
+            bringInVocal(at: vin)
+
+            if keysClash {
+                // Drum-bed mashup: strip A's melody out smoothly over the
+                // first 2 bars and filter A's bass to pure sub so B's vocal
+                // rides clash-free over A's beat until B's full song drops on `sw`.
+                let stripEnd = min(2.0, max(1.0, sw / 2))
+                automate(.a, .other, .filter, [(0, 0.5, .sCurve), (stripEnd, 0.14, .linear)])
+                automate(.a, .other, .reverb, [(0, 0, .sCurve), (stripEnd * 0.35, 0.72, .linear), (stripEnd, 0, .linear)])
+                automate(.a, .other, .volume, [(0, 1, .sCurve), (stripEnd, 0, .linear)])
+                automate(.a, .bass, .filter, [(0, 0.5, .sCurve), (min(1.0, sw / 4), 0.12, .linear)])
+                automate(.b, .other, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
+            } else {
+                // Harmonic club mashup: A's full melody stays as the musical
+                // bed under B's voice, pocketed cleanly in the mids, then
+                // dissolves into reverb as B's real instrumental slams in on `sw`.
+                let dissolve = Self.melodyDissolve(.mashup, bars: bars, switchAt: sw)
+                let pocketDB = max(3.5, min(6.0, mashupUnder > 0.25 ? mashupUnder : 3.5))
+                let pocket = 0.5 - pocketDB / 80
+                if dissolve > vin + 0.25 {
+                    automate(.a, .other, .mid, [(max(0, vin - 0.25), 0.5, .sCurve), (vin, pocket, .linear),
+                                                (dissolve + 2, pocket, .linear), (n + 4, 0.5, .linear)])
+                }
+                dissolveMelody(from: dissolve)
+                if dropMoment {
+                    automate(.b, .other, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
+                } else {
+                    bringIn(.other, at: sw, filter: 0.78, open: min(n, sw + 1.5))
+                }
+            }
+            if drumsLayer && drumsLinger && sw < n && !dropMoment {
+                let fadeFrom = max(sw, 3 * q)
+                automate(.a, .drums, .filter, [(fadeFrom, sw >= 2 ? 0.78 : 0.5, .sCurve), (n, 0.88, .linear)])
+                automate(.a, .drums, .volume, [(fadeFrom, 1, .sCurve), (n, 0, .linear)])
+            } else {
+                automate(.a, .drums, .volume, [(sw, 1, .hold), (sw + 0.001, 0, .linear)])
+            }
+            if dropMoment {
+                buildDrop(at: sw)
+            } else {
+                buildUp(to: sw, drumsContinue: drumsLayer && drumsLinger && sw < n)
+            }
+
         case .echoOut where n <= 1:
             // A cut on the one, for tempos too far apart to blend: what a
             // club DJ does rather than play a record everyone knows 15 %
@@ -996,7 +1091,7 @@ struct TransitionBuilder {
             // A's voice leaves on a line end in its last bars, at the cut
             // (or B's pickup) at the latest, thrown into the echo.
             let out = max(-4, min(-0.125, vin, vocalOut ?? -0.125))
-            echoOutVocal(at: out, send: min(0.85, vocalSend + 0.07), tail: max(0.25, min(1, -out)))
+            echoOutVocal(at: out, send: min(0.85, vocalSend + 0.07), tail: max(0.25, min(1, -out)), reverb: 0.45)
             for stem in [StemKind.drums, .bass, .other] {
                 automate(.b, stem, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
             }
