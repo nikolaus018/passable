@@ -51,6 +51,45 @@ final class AnalysisTests: XCTestCase {
         }
     }
 
+    /// A crisp broadband 16th-note hi-hat a quarter-beat ahead of a deep kick
+    /// can dominate broadband log spectral flux; when the neural beat tracker
+    /// hears the true beat on the kicks, `TempoEstimator` must lock onto the
+    /// kicks rather than staying stuck 1/4 beat early on the hi-hat.
+    func testTrackerPhaseLockPrefersKicksOverBroadbandHiHatPickup() {
+        let sr = 44_100.0, bpm = 128.0, beat = 60.0 / bpm, first = 0.25, seconds = 60.0
+        let n = Int(seconds * sr)
+        var rhythm = [Float](repeating: 0, count: n)
+        var beats: [Double] = [], downbeats: [Double] = []
+        var k = 0
+        while first + Double(k) * beat < seconds - 1 {
+            let t0 = first + Double(k) * beat
+            beats.append(t0)
+            if k % 4 == 0 { downbeats.append(t0) }
+            // Deep sub-120 Hz kick right on the true beat.
+            let i0 = Int(t0 * sr)
+            for i in 0..<Int(0.10 * sr) where i0 + i < n {
+                let t = Double(i) / sr
+                rhythm[i0 + i] += 0.8 * Float(exp(-t / 0.035) * sin(2 * .pi * (52 + 55 * exp(-t / 0.015)) * t))
+            }
+            // Crisp broadband hi-hat a quarter-beat (117 ms) BEFORE the kick.
+            let h0 = Int((t0 - beat * 0.25) * sr)
+            if h0 >= 0 {
+                var seed: UInt32 = UInt32(k &+ 7)
+                for i in 0..<Int(0.025 * sr) where h0 + i < n {
+                    seed = seed &* 1_664_525 &+ 1_013_904_223
+                    let noise = Float(seed >> 8) / Float(1 << 24) - 0.5
+                    rhythm[h0 + i] += 0.35 * Float(exp(-Double(i) / sr / 0.008)) * noise
+                }
+            }
+            k += 1
+        }
+        let heard = BeatTracker.Beats(beats: beats, downbeats: downbeats)
+        let grid = TempoEstimator.estimate(rhythm: rhythm, harmony: nil, heard: heard, sampleRate: sr)
+        let midBeat = first + 40 * beat
+        let err = abs(midBeat - grid.snapped(midBeat, division: 1))
+        XCTAssertLessThan(err, 0.02, "Grid must lock onto the kick (within 20 ms), not the hi-hat 117 ms early")
+    }
+
     func testFixtureSongGrid() throws {
         let song = try SeparationTests.song()
         let mono = song.mono()

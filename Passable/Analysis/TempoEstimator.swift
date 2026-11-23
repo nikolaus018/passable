@@ -440,12 +440,29 @@ enum TempoEstimator {
             if agreement > 0.7 {
                 beatsHeard = true
                 let offset = atan2(y, x) / (2 * .pi) * unit
-                if abs(offset) > 0.2 * unit {
+                if abs(offset) > 0.15 * unit {
                     var centre = (phase + offset).truncatingRemainder(dividingBy: period)
+                    if centre < 0 { centre += period }
                     if centre < 0.12 * period { centre += period }
+                    let range = (centre - 0.12 * period)...(centre + 0.12 * period)
                     let (_, moved) = combSearch(onset, periods: stride(from: period, through: period, by: 1), phaseStep: 0.02,
-                                                phaseRange: (centre - 0.12 * period)...(centre + 0.12 * period))
-                    if combScore(onset, period: period, phase: moved) >= 0.5 * combScore(onset, period: period, phase: phase) {
+                                                phaseRange: range)
+                    let (_, lowMoved) = combSearch(lowOnset, periods: stride(from: period, through: period, by: 1), phaseStep: 0.02,
+                                                   phaseRange: range)
+                    let oldOnset = combScore(onset, period: period, phase: phase)
+                    let newOnset = combScore(onset, period: period, phase: moved)
+                    let oldLow = combScore(lowOnset, period: period, phase: phase)
+                    let newLow = combScore(lowOnset, period: period, phase: lowMoved)
+                    if newLow > 1.5 * max(oldLow, 1e-6) {
+                        // Broadband log-flux locked onto a crisp hi-hat/shaker
+                        // off the beat while the tracker's beats sit directly on
+                        // the kicks: re-refine period and phase on low-band kicks.
+                        let (p, ph) = combSearch(lowOnset,
+                                                 periods: stride(from: period - 0.008, through: period + 0.008, by: 0.0005),
+                                                 phaseStep: 0.02,
+                                                 phaseRange: max(0, lowMoved - 0.3)...(lowMoved + 0.3))
+                        (period, phase) = (p, ph)
+                    } else if newOnset >= 0.5 * oldOnset {
                         phase = moved
                     } else {
                         beatsHeard = false

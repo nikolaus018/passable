@@ -13,7 +13,7 @@ struct TrackAnalysis: Codable, Equatable {
     /// `Steadiness`); analyses checked another way, or not at all, are
     /// checked on load.
     var tempoCheck: Int?
-    static let tempoCheck = 5
+    static let tempoCheck = 6
     /// Concert-pitch deviation from A4 = 440 Hz, in cents (−50…+50). Optional
     /// so analyses cached before it existed still decode; filled on load.
     var tuningCents: Float?
@@ -71,10 +71,31 @@ enum TrackAnalyzer {
         var checked = analysis
         checked.tempoCheck = TrackAnalysis.tempoCheck
         var grid = analysis.grid
+        // If a cached steady grid disagrees sharply with the neural beat
+        // tracker (e.g. broadband flux locked onto a 16th hi-hat 120 ms off
+        // the real kick), re-estimate on the improved low-band-aware estimator.
+        var gridChanged = false
+        if grid.isSteady, heard.beats.count >= 32 {
+            let off = heard.beats.map { abs($0 - grid.snapped($0, division: 1)) }.sorted()
+            if off[off.count / 2] > 0.06 {
+                let sr = AudioIO.sampleRate
+                let drums = stems[.drums].map { $0.copyStereo().mono() } ?? []
+                let harmony = sum(of: [stems[.bass], stems[.other]].compactMap { $0 })
+                let rhythm = rms(drums) > 1e-3 ? drums : sum(of: Array(stems.values))
+                let layers = [StemKind.drums, .bass, .other].compactMap { stems[$0]?.copyStereo().mono() }
+                let reestimated = TempoEstimator.estimate(rhythm: rhythm, harmony: harmony, layers: layers,
+                                                          heard: heard, sampleRate: sr)
+                let newOff = heard.beats.map { abs($0 - reestimated.snapped($0, division: 1)) }.sorted()
+                if newOff[newOff.count / 2] < off[off.count / 2] * 0.5 {
+                    grid = reestimated
+                    gridChanged = true
+                }
+            }
+        }
         (grid.downbeats, grid.wanders, grid.doubtful) = (nil, nil, nil)
         checked.grid = bars(of: grid, heard: heard, duration: analysis.duration, stems: stems)
         // (Its bars have changed: its own now, or the grid's again.)
-        if checked.grid.downbeats != analysis.grid.downbeats {
+        if gridChanged || checked.grid.downbeats != analysis.grid.downbeats {
             let old = analysis.structure
             checked.structure = TrackStructure.measure(stems: stems, grid: checked.grid)
             checked.structure?.setLines(old?.vocalLines, tried: old?.lyricsTried, grid: checked.grid)
