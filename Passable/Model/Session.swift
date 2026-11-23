@@ -1024,7 +1024,8 @@ final class Session: ObservableObject {
         exportTask = Task.detached(priority: .userInitiated) { [weak self] in
             let result = Result {
                 try Exporter.render(snapshot: snapshot, range: frames, tail: 3, to: url) { [weak self] p in
-                    Task { @MainActor in self?.exportProgress = p }
+                    // (A late tick can't bring the bar back once it's done.)
+                    Task { @MainActor in if self?.exportTask != nil { self?.exportProgress = p } }
                 }
             }
             await self?.finishExport(result, url: url)

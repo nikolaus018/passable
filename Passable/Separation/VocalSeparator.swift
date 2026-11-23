@@ -191,15 +191,18 @@ final class VocalSeparator {
     }
 }
 
-/// `torch.stft` / `torch.istft` as the vocal model uses them: n_fft 2048,
-/// hop 441, periodic Hann, centred with reflection, not normalised; one
-/// chunk of 352,800 samples (801 frames, 1,025 bins).
+/// `torch.stft` / `torch.istft` as the RoFormer models use them: n_fft
+/// 2048, periodic Hann, centred with reflection, not normalised, over one
+/// chunk. The statics are the vocal model's (352,800 samples, hop 441: 801
+/// frames, 1,025 bins); the stem model's are its own (see `StemRoformer`).
 final class RoformerSTFT {
     static let chunk = 352_800
     static let nfft = 2048
     static let hop = 441
     static let bins = nfft / 2 + 1
     static let frames = chunk / hop + 1
+
+    let chunk: Int, hop: Int, frames: Int
 
     private let setup: FFTSetup
     private let log2n = vDSP_Length(11)
@@ -209,14 +212,18 @@ final class RoformerSTFT {
     private var frame = [Float](repeating: 0, count: nfft)
     private var re = [Float](repeating: 0, count: nfft / 2)
     private var im = [Float](repeating: 0, count: nfft / 2)
-    private var padded = [Float](repeating: 0, count: chunk + nfft)
+    private var padded: [Float]
 
-    init() {
+    init(chunk: Int = RoformerSTFT.chunk, hop: Int = RoformerSTFT.hop) {
+        self.chunk = chunk
+        self.hop = hop
+        frames = chunk / hop + 1
+        padded = [Float](repeating: 0, count: chunk + Self.nfft)
         setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))!
         window = (0..<Self.nfft).map { Float(0.5 - 0.5 * cos(2 * Double.pi * Double($0) / Double(Self.nfft))) }
-        var env = [Float](repeating: 0, count: Self.chunk + Self.nfft)
-        for t in 0..<Self.frames {
-            for i in 0..<Self.nfft { env[t * Self.hop + i] += window[i] * window[i] }
+        var env = [Float](repeating: 0, count: chunk + Self.nfft)
+        for t in 0..<frames {
+            for i in 0..<Self.nfft { env[t * hop + i] += window[i] * window[i] }
         }
         envelope = env
     }
@@ -228,10 +235,10 @@ final class RoformerSTFT {
     func forward(_ x: [Float], channel: Int, into spec: UnsafeMutablePointer<Float>) {
         let n = Self.nfft, half = n / 2, pad = n / 2
         // Centred: reflected half a window past both ends.
-        for i in 0..<pad { padded[i] = x[pad - i]; padded[pad + Self.chunk + i] = x[Self.chunk - 2 - i] }
-        padded.replaceSubrange(pad..<(pad + Self.chunk), with: x)
-        for t in 0..<Self.frames {
-            let at = t * Self.hop
+        for i in 0..<pad { padded[i] = x[pad - i]; padded[pad + chunk + i] = x[chunk - 2 - i] }
+        padded.replaceSubrange(pad..<(pad + chunk), with: x)
+        for t in 0..<frames {
+            let at = t * hop
             for i in 0..<n { frame[i] = padded[at + i] * window[i] }
             re.withUnsafeMutableBufferPointer { r in
                 im.withUnsafeMutableBufferPointer { m in
@@ -246,8 +253,8 @@ final class RoformerSTFT {
             for k in 0..<Self.bins {
                 let (a, b): (Float, Float) = k == 0 ? (re[0], 0) : k == half ? (im[0], 0) : (re[k], im[k])
                 let row = k * 2 + channel
-                spec[(row * Self.frames + t) * 2] = a / 2
-                spec[(row * Self.frames + t) * 2 + 1] = b / 2
+                spec[(row * frames + t) * 2] = a / 2
+                spec[(row * frames + t) * 2 + 1] = b / 2
             }
         }
     }
@@ -257,9 +264,9 @@ final class RoformerSTFT {
     func inverse(spec: UnsafePointer<Float>, mask: [Float], channel: Int, into out: inout [Float]) {
         let n = Self.nfft, half = n / 2, pad = n / 2
         for i in padded.indices { padded[i] = 0 }
-        for t in 0..<Self.frames {
+        for t in 0..<frames {
             for k in 0..<Self.bins {
-                let at = ((k * 2 + channel) * Self.frames + t) * 2
+                let at = ((k * 2 + channel) * frames + t) * 2
                 let a = spec[at], b = spec[at + 1], c = mask[at], d = mask[at + 1]
                 let y = (a * c - b * d, a * d + b * c)
                 if k == 0 { re[0] = y.0 } else if k == half { im[0] = y.0 } else { re[k] = y.0; im[k] = y.1 }
@@ -274,10 +281,10 @@ final class RoformerSTFT {
                 }
             }
             // (zrip's inverse of a spectrum gives n times its signal.)
-            let at = t * Self.hop
+            let at = t * hop
             for i in 0..<n { padded[at + i] += frame[i] / Float(n) * window[i] }
         }
-        for i in 0..<Self.chunk {
+        for i in 0..<chunk {
             let e = envelope[pad + i]
             out[i] = e > 1e-11 ? padded[pad + i] / e : 0
         }

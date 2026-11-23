@@ -884,7 +884,8 @@ final class SetSession: ObservableObject {
         exportTask = Task.detached(priority: .userInitiated) { [weak self] in
             let result = Result {
                 try Exporter.render(snapshot: snapshot, range: frames, tail: 3, to: url) { p in
-                    Task { @MainActor in self?.exportProgress = p }
+                    // (A late tick can't bring the bar back once it's done.)
+                    Task { @MainActor in if self?.exportTask != nil { self?.exportProgress = p } }
                 }
             }
             await self?.finishExport(result, url: url)
@@ -918,7 +919,8 @@ final class SetSession: ObservableObject {
         exportTask = Task.detached(priority: .userInitiated) { [weak self] in
             let result = Result {
                 try PassableFile.write(songs: songs, transitions: transitions, masterVolume: volume, to: url) { p in
-                    Task { @MainActor in self?.exportProgress = p }
+                    // (A late tick can't bring the bar back once it's done.)
+                    Task { @MainActor in if self?.exportTask != nil { self?.exportProgress = p } }
                 }
             }
             await self?.finishExport(result, url: url)
@@ -1060,7 +1062,8 @@ final class SetSession: ObservableObject {
         exportTask = Task.detached(priority: .userInitiated) { [weak self] in
             let result = Result {
                 try PassableFile.read(url, into: folder) { p in
-                    Task { @MainActor in self?.exportProgress = p }
+                    // (A late tick can't bring the bar back once it's done.)
+                    Task { @MainActor in if self?.exportTask != nil { self?.exportProgress = p } }
                 }
             }
             await self?.finishOpen(result)

@@ -39,6 +39,19 @@ jobs:
             -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO > build.log 2>&1 \
             || { grep -E "error:" build.log | sort -u | head -40; tail -20 build.log; exit 1; }
           tail -5 build.log
+      # The suites that need no Core ML model (those that do skip
+      # themselves): the planner, the mixer, analysis and set files.
+      - name: Run the unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building -project Passable.xcodeproj -scheme Passable \
+            -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO \
+            -only-testing:PassableTests/MixTests -only-testing:PassableTests/PayoffTests \
+            -only-testing:PassableTests/AnalysisTests -only-testing:PassableTests/BeatTrackerTests \
+            -only-testing:PassableTests/PassableFileTests > test.log 2>&1 \
+            || { grep -E "error:|failed" test.log | head -40; tail -30 test.log; exit 1; }
+          grep -E "Executed .* tests" test.log | tail -1
 
   ios:
     name: Build and test (iPhone)

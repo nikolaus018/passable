@@ -61,7 +61,7 @@ final class MixSnapshot: @unchecked Sendable {
         let start: Int, drop: Int, end: Int, cutBeforeDrop: Int
         /// Frame until which peak Club PA drop punch stays active after `drop`.
         var punchEnd: Int = 0
-        /// 1.0 = subtle club air; 1.35–1.75 = club/stadium riser & sub-impact punch.
+        /// 0.55 = subtle club air; 0.80 = a big drop's riser & sub-impact accent.
         var intensity: Float = 1.0
     }
 
@@ -112,11 +112,17 @@ final class MixRenderer: @unchecked Sendable {
         var lowIsolator = LowIsolator()
         var mid = Biquad(), high = Biquad()
         var midVocalDipper = MidVocalDipper()
+        /// Sub-130 Hz one-pole state for kick-energy detection, per drums lane
+        /// (one shared state leaked each deck's kick into the other's reading).
+        var kickLp: Float = 0
         var filterValue = -1.0, lowValue = -1.0, midValue = -1.0, highValue = -1.0
     }
 
     private var snapshot: MixSnapshot
     private var lanes: [LaneDSP] = []
+    /// Where a new snapshot's lanes are gathered from the old ones (see
+    /// `carryLaneState`): as large as `lanes`, so swapping never allocates.
+    private var spareLanes: [LaneDSP] = []
     private var reverb: Reverb
     private var delay: PingPongDelay
     private var glue: BusGlue
@@ -144,13 +150,12 @@ final class MixRenderer: @unchecked Sendable {
     /// send closes, so checking silence immediately would kill the echo
     /// before its first repeat ever arrives.
     private var reverbTailFrames = 0, delayTailFrames = 0
-    /// Wet-bus sidechain ducking gain (1 = open, down to 0.5 when a dry
+    /// Wet-bus sidechain ducking gain (1 = open, down to 0.3 when a dry
     /// incoming vocal sings over an outgoing effect tail).
     private var wetDuck: Float = 1
     /// Inter-deck kick sidechain state: smooth ducking (up to −2.5 dB) on the
     /// non-low-owning track's melody stem during blends so both tracks breathe
     /// with the active kick.
-    private var kickLpState: Float = 0
     private var kickDuck: Float = 1
     private var prevKickDuck: Float = 1
     private var kickOwnerTrack: Int = -1
@@ -184,6 +189,7 @@ final class MixRenderer: @unchecked Sendable {
         // Sized up front (four lanes a song, sets of up to 128 songs) so no
         // real snapshot makes the render thread allocate.
         lanes = Array(repeating: LaneDSP(), count: max(512, snapshot.lanes.count))
+        spareLanes = lanes
         prepare(for: snapshot)
     }
 
@@ -214,10 +220,12 @@ final class MixRenderer: @unchecked Sendable {
     func render(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, count: Int) {
         if lock.lockIfAvailable() {
             if let next = pendingSnapshot {
+                let old = snapshot
                 retired.append(snapshot)
                 snapshot = next
                 pendingSnapshot = nil
                 prepare(for: next)
+                carryLaneState(from: old, to: next)
             }
             if let seek = pendingSeek {
                 position = seek
@@ -267,11 +275,48 @@ final class MixRenderer: @unchecked Sendable {
     private func prepare(for snapshot: MixSnapshot) {
         if lanes.count < snapshot.lanes.count {
             lanes = Array(repeating: LaneDSP(), count: snapshot.lanes.count)
+            spareLanes = lanes
         }
         if snapshot.delaySchedule.isEmpty && snapshot.delaySeconds != delaySeconds {
             delaySeconds = snapshot.delaySeconds
             delay.setTime(seconds: delaySeconds, sampleRate: sampleRate)
         }
+    }
+
+    /// The audio a lane plays, as an identity that survives a rebuilt set:
+    /// 0 for none.
+    @inline(__always)
+    private static func laneKey(_ lane: MixSnapshot.LaneData) -> Int {
+        guard let audio = lane.audio, audio.count > 0 else { return 0 }
+        return Int(bitPattern: audio.left.pointer)
+    }
+
+    /// Each lane of `new` takes the filter and EQ state of the lane of `old`
+    /// that plays the same audio, or starts fresh. A set rebuilt while it
+    /// plays (a request put in, an edit) can put a stem at another index:
+    /// kept by index, a lane went on with another stem's filter memory, a
+    /// tick on the swap. On the render thread: nothing is allocated (the
+    /// two arrays trade places), and the usual case (same order) is one
+    /// comparison a lane.
+    private func carryLaneState(from old: MixSnapshot, to new: MixSnapshot) {
+        let n = new.lanes.count
+        guard n <= spareLanes.count, n <= lanes.count else { return }
+        var moved = false
+        for i in 0..<n {
+            let key = Self.laneKey(new.lanes[i])
+            var source = -1
+            if i < old.lanes.count, Self.laneKey(old.lanes[i]) == key {
+                source = i
+            } else if key != 0 {
+                for j in old.lanes.indices where j < lanes.count && Self.laneKey(old.lanes[j]) == key {
+                    source = j
+                    break
+                }
+            }
+            if source != i { moved = true }
+            spareLanes[i] = source >= 0 ? lanes[source] : LaneDSP()
+        }
+        if moved { swap(&lanes, &spareLanes) }
     }
 
     /// Silences effect tails and filter state after a jump, in place: this
@@ -287,7 +332,6 @@ final class MixRenderer: @unchecked Sendable {
         reverbTailFrames = 0
         delayTailFrames = 0
         wetDuck = 1
-        kickLpState = 0
         kickDuck = 1
         prevKickDuck = 1
         kickOwnerTrack = -1
@@ -375,7 +419,6 @@ final class MixRenderer: @unchecked Sendable {
                     (ll + lo).update(from: audio.left.pointer + src + lo, count: hi - lo)
                     (lr + lo).update(from: audio.right.pointer + src + lo, count: hi - lo)
                 }
-
                 updateFilters(lane: i, envelopes: lane.envelopes, at: tm)
                 lanes[i].filter.process(ll, lr, count: n)
                 lanes[i].lowIsolator.process(ll, lr, count: n)
@@ -414,13 +457,13 @@ final class MixRenderer: @unchecked Sendable {
                 // and subtly groove-pocket the opposing deck's melody (~2.2 dB).
                 if isBlending, lane.isDrums, lane.trackIndex >= 0, value(lane.envelopes, .low, tm) >= 0.45 {
                     let lpCoef = Float(exp(-2.0 * Double.pi * 130.0 / sampleRate))
-                    var lp = kickLpState, sumSq: Float = 0
+                    var lp = lanes[i].kickLp, sumSq: Float = 0
                     for j in 0..<n {
                         let m = 0.5 * (ll[j] + lr[j])
                         lp = m + lpCoef * (lp - m)
                         sumSq += lp * lp
                     }
-                    kickLpState = abs(lp) < 1e-20 ? 0 : lp
+                    lanes[i].kickLp = abs(lp) < 1e-20 ? 0 : lp
                     let e = sumSq / Float(n)
                     if e >= kickEnergy {
                         kickEnergy = e
@@ -474,7 +517,7 @@ final class MixRenderer: @unchecked Sendable {
             } else {
                 let rel = Float(exp(-Double(n) / (0.080 * sampleRate)))
                 kickDuck = 1 + rel * (kickDuck - 1)
-                if kickDuck > 0.9995 { kickDuck = 1; kickOwnerTrack = -1; kickLpState = 0 }
+                if kickDuck > 0.9995 { kickDuck = 1; kickOwnerTrack = -1 }
             }
 
             // Synthesize subtle stereo air riser + downlifter around drop moments.
@@ -507,11 +550,11 @@ final class MixRenderer: @unchecked Sendable {
             // and tuck cleanly behind the new singer's first words.
             if revActive || dlyActive {
                 let rms = dryVocalEnergy.squareRoot()
-                let depth = min(1, max(0, (rms - 0.03) / 0.12))
-                let target: Float = 1 - 0.5 * depth  // down to -6 dB
+                let depth = min(1, max(0, (rms - 0.02) / 0.09))
+                let target: Float = 1 - 0.70 * depth  // down to -10.5 dB: outgoing tails tuck cleanly behind incoming singer
                 let coef: Float = target < wetDuck
-                    ? Float(exp(-Double(n) / (0.015 * sampleRate)))
-                    : Float(exp(-Double(n) / (0.20 * sampleRate)))
+                    ? Float(exp(-Double(n) / (0.010 * sampleRate)))
+                    : Float(exp(-Double(n) / (0.18 * sampleRate)))
                 let nextDuck = target + coef * (wetDuck - target)
                 if wetDuck < 0.9999 || nextDuck < 0.9999 {
                     let slope = (nextDuck - wetDuck) / Float(n)
@@ -685,7 +728,7 @@ final class MixRenderer: @unchecked Sendable {
 
     @inline(__always)
     private func value(_ envelopes: [Envelope], _ p: LaneParameter, _ t: Double) -> Double {
-        envelopes[p.rawValue].value(at: t, default: p.defaultValue)
+        p.rawValue < envelopes.count ? envelopes[p.rawValue].value(at: t, default: p.defaultValue) : p.defaultValue
     }
 
     private func updateFilters(lane i: Int, envelopes: [Envelope], at t: Double) {

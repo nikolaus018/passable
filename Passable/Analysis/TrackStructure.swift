@@ -1540,7 +1540,9 @@ enum AutoPlacement {
         }
         let sung = level(voice, e), played = level(melody, c)
         guard sung > -40 else { return 0 }
-        return Double(min(10, max(0, (played - (sung - 6)).rounded())))
+        // Cap at 5 dB so B's melody stays audibly blended under A's singer
+        // instead of getting buried 12+ dB down and then jumping on the switch.
+        return Double(min(5, max(0, (played - (sung - 5)).rounded())))
     }
 
     /// What looping A's beat costs a spot. A loop makes a blend where the
@@ -1568,18 +1570,24 @@ enum AutoPlacement {
     /// finds a spot where B's part starts as A's ends.)
     /// - Parameter alone: A's voice is gone already (a loop, clashing swap, or
     ///   A silent at `aim`): nobody sings while B's waits, so cap the wait at
-    ///   `vocalWait` bars (never collapsing the window to 0 when `aim == bars`)
-    ///   so it never opens a 4–8 bar vocal hole while still finding a clean entry.
+    ///   1.25 bars so it never opens a multi-bar vocal hole while still
+    ///   finding a clean entry.
+    /// Never later than a quarter bar past the blend's end (and never before
+    /// `aim`), so B's voice isn't held muted while B already plays solo.
     static func entryLatest(_ s: TrackStructure?, aim: Double, bars: Int, alone: Bool = false) -> Double {
-        if alone { return aim + vocalWait }
-        return s?.midPart(at: 0) != nil ? max(aim + vocalWait, Double(bars)) : aim + vocalWait
+        // Never hold B's vocal muted bars past the end of the blend while B
+        // plays solo (which opened 8–12 beat vocal holes uncounted by placement).
+        let blendCap = max(aim, Double(bars) + 0.25)
+        if alone { return min(blendCap, aim + 1.25) }
+        let cap = min(blendCap, aim + vocalWait)
+        return s?.midPart(at: 0) != nil ? min(blendCap, max(cap, Double(bars))) : cap
     }
 
     /// Bars before the bar it's due to leave on that A's voice may leave
-    /// instead, at the end of a sentence (or a comma's clause): a beat or
-    /// two alone between two singers is a handover, a sentence cut off on
-    /// a breath isn't.
-    static let exitBack = 2.0
+    /// instead, at the end of a sentence (or a comma's clause): capped at
+    /// 1.25 bars so early A-exits and late B-entries don't stack into multi-bar
+    /// vocal holes.
+    static let exitBack = 1.25
 
     /// What it costs a spot that B's voice comes in in the middle of a
     /// part of it (see `TrackStructure.midPart`), on top of the part's edge
@@ -2240,7 +2248,7 @@ enum AutoPlacement {
                     let vBFirst = sb.meanActivity(.vocals, bars: c..<(c + h))
                     let vASecond = sa.meanActivity(.vocals, bars: (e + h)..<(e + n))
                     if spot == nil {
-                        guard !clashHere, drumsA >= 0.50, drumsB >= 0.50,
+                        guard drumsLock, !clashHere, drumsA >= 0.50, drumsB >= 0.50,
                               vBFirst < 0.55, vASecond < 0.60,
                               vBFirst + vASecond < 1.05,
                               lowShort(at: c + h) <= 4
@@ -2287,8 +2295,13 @@ enum AutoPlacement {
                 // landing there isn't muted until the end of the blend.
                 let options = sw.map { $0 > n / 2 && $0 < n && !handoffs.contains($0) ? handoffs + [$0] : handoffs } ?? handoffs
                 for handoff in options {
-                    // No mashup over notes that clash.
-                    if clashHere && handoff == mash { continue }
+                    // No mashup over notes that clash, or where B isn't actually
+                    // singing in the early mashup window (silent intro).
+                    if handoff == mash {
+                        if clashHere || sb.meanActivity(.vocals, bars: (c + handoff)..<(c + max(handoff + 2, n / 2))) < 0.25 {
+                            continue
+                        }
+                    }
                     var s = score + (handoff == vocalIn ? 0.15 : 0)
                     var heard: Int?
                     var heardVocal: Double?, heardOut: Double?
@@ -2358,10 +2371,11 @@ enum AutoPlacement {
                             }
                             let limit = Double(min(n, sw ?? n))
                             let untilB = AutoPlacement.vocalSounds(sb, cue: c, from: vin, limit: max(vin + 4, Double(n)))
-                            let target = AutoPlacement.phraseEnd(before: min(untilB, limit))
+                            let target = untilB > limit ? limit : AutoPlacement.phraseEnd(before: min(untilB, limit))
                             let after = clashHere ? 0 : target >= limit ? 0.5 : 2
+                            let gapBudget = max(0.75, AutoPlacement.exitBack - max(0, untilB - target))
                             return AutoPlacement.vocalCut(sa, at: e, opening: false, target: target,
-                                                          earliest: target - min(AutoPlacement.exitBack, target),
+                                                          earliest: max(0, target - gapBudget),
                                                           latest: min(target + after, max(target, untilB), Double(n)))
                         }
                         var plans: [Plan] = []
@@ -2479,7 +2493,7 @@ enum AutoPlacement {
                         if preset != .mashup {
                             plans.append(plan(from: floor, drumsLayer: true))
                         }
-                        if preset == .stemSwap, !drumsLock {
+                        if !echo, preset != .mashup, !drumsLock {
                             // First: usually the worst, so the rest can be
                             // skipped once the spot can't win.
                             plans.insert(plan(from: swap, drumsLayer: false), at: 0)
@@ -2493,7 +2507,7 @@ enum AutoPlacement {
                         // a part came in bars later in the middle of the
                         // next, after 12 bars with nobody singing.)
                         let heardPlan = plans.first { $0.mashup }
-                            ?? (preset == .stemSwap && !drumsLock ? plans[0] : plans[plans.count - 1])
+                            ?? (!echo && preset != .mashup && !drumsLock ? plans[0] : plans[plans.count - 1])
                         heardVocal = heardPlan.vin
                         heardOut = heardPlan.out
                         heardMid = sb.midPart(at: VocalPhrasing.slots * c
@@ -2707,8 +2721,11 @@ enum AutoPlacement {
                     // rounded down to 1 bar (zero penalty).
                     func silentBars(from: Double, to: Double) -> Float {
                         var sum: Double = 0
-                        for k in 0..<n {
-                            let a = whole.isActive(.vocals, bar: e + k), b = sb.isActive(.vocals, bar: c + k)
+                        let startBar = min(0, Int(from.rounded(.down)))
+                        let endBar = max(n, Int(to.rounded(.up)))
+                        for k in startBar..<endBar {
+                            let a = k < n && whole.isActive(.vocals, bar: e + k)
+                            let b = k >= 0 && sb.isActive(.vocals, bar: c + k)
                             guard a || b else { continue }
                             let k0 = Double(k), k1 = Double(k + 1)
                             // Portion of bar k where A is NOT heard singing and B is NOT heard singing.

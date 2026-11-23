@@ -403,13 +403,12 @@ final class HandoverPriceTests: XCTestCase {
         for bars in 1..<24 { XCTAssertGreaterThan(AutoPlacement.voiceless(bars + 1), AutoPlacement.voiceless(bars)) }
     }
 
-    /// Carried, A's melody is still going down as B's comes in: no bar
-    /// with neither.
+    /// Carried, A's melody dissolves as B's comes in: no bar with neither.
     func testCarriedMelodiesOverlapByABar() {
         for bars in [8, 16] {
             let q = Double(bars) / 4
             let from = TransitionBuilder.melodyDissolve(.stemSwap, bars: bars, switchAt: Double(bars), carry: true)
-            XCTAssertEqual(from, q - 1)
+            XCTAssertEqual(from, q)
             XCTAssertGreaterThan(from + 2, q, "A's melody gone before B's arrives at \(bars) bars")
         }
     }

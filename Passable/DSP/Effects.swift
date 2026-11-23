@@ -251,15 +251,28 @@ struct PingPongDelay {
     }
 }
 
-/// Peak limiter at −0.3 dBFS with `lookahead` frames of look-ahead:
-/// it sees a peak coming and lowers the gain smoothly into it (over the
-/// look-ahead), instead of jumping the gain on the peak itself (which is
-/// heard as a crackle), then lets it back over 150 ms. Stereo-linked. The
-/// output runs `lookahead` frames behind the input; `MixRenderer` renders
-/// that far ahead, so what plays stays on time. A safety net for summing
-/// eight stems, not a mastering tool.
+/// Peak limiter at −0.3 dBFS with look-ahead: it sees a peak coming and
+/// lowers the gain smoothly into it (over `window` frames), instead of
+/// jumping the gain on the peak itself (which is heard as a crackle), then
+/// lets it back over 40–150 ms. Stereo-linked. The output runs `lookahead`
+/// frames behind the input; `MixRenderer` renders that far ahead, so what
+/// plays stays on time. A safety net for summing eight stems, not a
+/// mastering tool.
+///
+/// Peaks are true peaks (ITU-R BS.1770-4's idea): besides each sample, the
+/// waveform between it and the next is estimated at three points (4×
+/// oversampling by a 12-tap windowed sinc), so what a DAC or a lossy
+/// decoder reconstructs between samples stays under the ceiling too, not
+/// only the samples themselves.
 struct Limiter {
-    static let lookahead = 88  // 2 ms
+    /// Frames the gain glides into a peak over (2 ms).
+    static let window = 88
+    /// Taps of the inter-sample interpolator, and the frames it needs
+    /// after the one it judges (the second half of its taps).
+    private static let taps = 12
+    private static let tpDelay = 6
+    /// Frames from input to output.
+    static let lookahead = window + tpDelay
     private let fastRelease: Float
     private let slowRelease: Float
     private let holdAlpha: Float
@@ -283,28 +296,69 @@ struct Limiter {
     /// spikes (fast recovery, no pumping) from sustained dense limiting
     /// (slower release, no distortion).
     private var sustained: Float = 0
+    /// The last `taps` input frames, each written twice (`taps` apart) so
+    /// they read as one contiguous run, oldest first, from `historyStart`.
+    private var historyL: [Float], historyR: [Float]
+    private var historyWrite = 0
+    /// Interpolator taps for the points ¼, ½ and ¾ of the way from the
+    /// judged frame to the next: `taps` each.
+    private let phases: [Float]
 
     init(sampleRate: Double, ceiling: Float = Limiter.playbackCeiling) {
         self.ceiling = ceiling
         fastRelease = Float(exp(-1 / (0.04 * sampleRate)))
         slowRelease = Float(exp(-1 / (0.15 * sampleRate)))
         holdAlpha = Float(exp(-1 / (0.03 * sampleRate)))
-        let n = Self.lookahead + 1
+        let n = Self.window + 1
         delayL = [Float](repeating: 0, count: n)
         delayR = delayL
         needed = [Float](repeating: 1, count: n)
         least = needed
         leastSum = Float(n)
+        historyL = [Float](repeating: 0, count: 2 * Self.taps)
+        historyR = historyL
+        var coefficients: [Float] = []
+        let center = Self.taps / 2 - 1
+        let halfWidth = Double(Self.taps) / 2 + 0.5
+        for f in [0.25, 0.5, 0.75] {
+            var row = (0..<Self.taps).map { k -> Double in
+                let x = f - Double(k - center)
+                let sinc = abs(x) < 1e-12 ? 1 : sin(Double.pi * x) / (Double.pi * x)
+                let hann = 0.5 * (1 + cos(Double.pi * x / halfWidth))
+                return sinc * hann
+            }
+            let sum = row.reduce(0, +)
+            row = row.map { $0 / sum }
+            coefficients += row.map(Float.init)
+        }
+        phases = coefficients
     }
 
     mutating func reset() {
-        let n = Self.lookahead + 1
+        let n = Self.window + 1
         for k in 0..<n { delayL[k] = 0; delayR[k] = 0; needed[k] = 1; least[k] = 1 }
+        for k in 0..<(2 * Self.taps) { historyL[k] = 0; historyR[k] = 0 }
+        historyWrite = 0
         leastSum = Float(n)
         gain = 1
         sustained = 0
         index = 0
         pending = 0
+    }
+
+    /// The largest magnitude of the waveform over the judged frame and the
+    /// stretch to the next one, from `x` (the last `taps` frames, oldest
+    /// first; the judged one at `taps / 2 - 1`).
+    @inline(__always)
+    private func truePeak(_ x: UnsafePointer<Float>, _ c: UnsafePointer<Float>) -> Float {
+        var top = abs(x[Self.taps / 2 - 1])
+        for p in 0..<3 {
+            var v: Float = 0
+            let row = c + p * Self.taps
+            for k in 0..<Self.taps { v += row[k] * x[k] }
+            top = max(top, abs(v))
+        }
+        return top
     }
 
     /// In place: frame `i` out is frame `i - lookahead` in, limited. The
@@ -313,9 +367,24 @@ struct Limiter {
     /// after it: every term covers the frame itself, so the peak is never
     /// over the ceiling, and the gain glides into it.
     mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>, count: Int) {
-        let n = Self.lookahead + 1
+        let n = Self.window + 1
+        let taps = Self.taps
         for i in 0..<count {
-            let peak = max(abs(left[i]), abs(right[i]))
+            // The new frame into the interpolator's history; the frame
+            // `tpDelay` back is the one judged and passed on.
+            historyL[historyWrite] = left[i]; historyL[historyWrite + taps] = left[i]
+            historyR[historyWrite] = right[i]; historyR[historyWrite + taps] = right[i]
+            historyWrite = historyWrite + 1 == taps ? 0 : historyWrite + 1
+            let from = historyWrite
+            let (inL, inR, peak): (Float, Float, Float) = historyL.withUnsafeBufferPointer { hl in
+                historyR.withUnsafeBufferPointer { hr in
+                    phases.withUnsafeBufferPointer { c in
+                        let xl = hl.baseAddress! + from, xr = hr.baseAddress! + from
+                        return (xl[taps / 2 - 1], xr[taps / 2 - 1],
+                                max(truePeak(xl, c.baseAddress!), truePeak(xr, c.baseAddress!)))
+                    }
+                }
+            }
             if needed[index] < 1 { pending -= 1 }
             needed[index] = peak > ceiling ? ceiling / peak : 1
             if needed[index] < 1 { pending += 1 }
@@ -336,8 +405,8 @@ struct Limiter {
             // overwritten).
             let next = (index + 1) % n
             let outL = delayL[next], outR = delayR[next]
-            delayL[index] = left[i]
-            delayR[index] = right[i]
+            delayL[index] = inL
+            delayR[index] = inR
             left[i] = outL * gain
             right[i] = outR * gain
             index = next
@@ -524,9 +593,9 @@ struct AirSweep {
         let a1 = 1 / (1 + g * (g + k))
         let a2 = g * a1
         let a3 = g * a2
-        let boomSpanDyn = max(boomSpan, Int((0.23 + 0.05 * Double(max(0, intensity - 1))) * sampleRate))
-        let boomTopHz = 88.0 + 14.0 * Double(max(0, intensity - 1))
-        let boomAmp = 0.145 * Double(min(1.65, intensity))
+        let boomSpanDyn = max(boomSpan, Int((0.18 + 0.04 * Double(max(0, intensity - 1))) * sampleRate))
+        let boomTopHz = 82.0 + 10.0 * Double(max(0, intensity - 1))
+        let boomAmp = 0.075 * Double(min(1.25, intensity))
 
         var z1L = s1L, z2L = s2L, z1R = s1R, z2R = s2R
         var wrote = false
@@ -535,7 +604,7 @@ struct AirSweep {
             var env: Float = 0
             if p >= sw.start && p < riserEnd {
                 let u = Float(p - sw.start) / Float(riserSpan)
-                env = 0.088 * intensity * u * u
+                env = 0.060 * intensity * u * u
                 let rem = riserEnd - p
                 if rem < cutFade {
                     let fu = Float(rem) / Float(cutFade)
@@ -544,13 +613,13 @@ struct AirSweep {
             } else if p >= sw.drop && p < sw.end {
                 let v = Float(p - sw.drop) / Float(downSpan)
                 let omv = 1 - v
-                env = 0.082 * intensity * omv * omv
+                env = 0.056 * intensity * omv * omv
                 let elapsed = p - sw.drop
                 if elapsed < attackFade {
                     env *= Float(elapsed) / Float(attackFade)
                 }
-                // Chest-felt club 808 sub-impact thump (88–102 Hz → 32 Hz over
-                // 230–280 ms) right on beat 1 of the drop.
+                // Tight sub-impact accent (82–92 Hz → 32 Hz over 180–220 ms)
+                // right on beat 1 of the drop.
                 if elapsed < boomSpanDyn {
                     let tSec = Double(elapsed) / sampleRate
                     let dur = Double(boomSpanDyn) / sampleRate

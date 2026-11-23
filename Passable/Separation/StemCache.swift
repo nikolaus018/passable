@@ -10,7 +10,12 @@ enum StemCache {
     /// Bump when the model or the stem format changes.
     private static let version = 1
 
+    /// (`PASSABLE_CACHE` puts it elsewhere: a tool trying another model
+    /// on a copy, without touching what the app has.)
     static let root: URL = {
+        if let path = ProcessInfo.processInfo.environment["PASSABLE_CACHE"], !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         return caches.appendingPathComponent("Passable/tracks", isDirectory: true)
     }()
@@ -104,6 +109,16 @@ enum StemCache {
 
     static func markModelVocals(_ directory: URL) {
         FileManager.default.createFile(atPath: directory.appendingPathComponent("vocals.roformer.1").path, contents: Data())
+    }
+
+    /// Whether drums, bass and melody are the stem model's (see
+    /// `StemRoformer`), not HTDemucs'.
+    static func hasRoformerStems(_ directory: URL) -> Bool {
+        FileManager.default.fileExists(atPath: directory.appendingPathComponent("stems.bsroformer.1").path)
+    }
+
+    static func markRoformerStems(_ directory: URL) {
+        FileManager.default.createFile(atPath: directory.appendingPathComponent("stems.bsroformer.1").path, contents: Data())
     }
 
     /// Renditions and waveform overviews made from the stems as they were.

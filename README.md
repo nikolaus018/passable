@@ -29,7 +29,7 @@ flowchart LR
 
 ## Features
 
-- **Stem separation** into vocals, melody, drums and bass on Core ML: drums, bass and melody from HTDemucs v4, the voice from Mel-Band RoFormer, 2.9 dB closer to the true vocal (about 45 s for a 4-minute track the first time; cached after)
+- **Stem separation** into vocals, melody, drums and bass on Core ML: drums, bass and melody from BS-RoFormer SW (on the MUSDB18 test excerpts 2.2 dB closer to the true drums than HTDemucs v4, 2.9 dB closer to the true melody), the voice from two RoFormers together, 3.2 dB closer than HTDemucs' (about 100 s for a 3½-minute track on an M5 the first time, separation and analysis together; cached after)
 - **Analysis**: neural beat tracking, per-bar grids for songs with a drifting tempo, key detection, song structure and vocal line timing
 - **Automatic set ordering and transitions** based on tempo, key, energy and section alignment
 - **Vocal handovers between lines**: line timing from on-device speech recognition and a map of each singer's breaths, so one voice leaves and the next comes in on a breath, not in the middle of a word
@@ -99,6 +99,12 @@ cd tools/convert-roformer && uv venv --python 3.12 .venv && \
     mkdir -p upstream/$(dirname $f) && curl -sL -o upstream/$f \
       https://raw.githubusercontent.com/KimberleyJensen/Mel-Band-Roformer-Vocal-Model/main/$f; done && \
   .venv/bin/python convert.py && cd ../..
+# The drums, bass and melody model (~335 MB): BS-RoFormer SW (699 MB) and the code it was trained with
+cd tools/convert-roformer && \
+  curl -L -o BS-Rofo-SW-Fixed.ckpt https://huggingface.co/ChanTrail/BS-RoFormer/resolve/main/BS-Rofo-SW-Fixed.ckpt && \
+  curl -L -o BS-Rofo-SW-Fixed.yaml https://huggingface.co/ChanTrail/BS-RoFormer/resolve/main/BS-Rofo-SW-Fixed.yaml && \
+  git clone --depth 1 https://github.com/ZFTurbo/Music-Source-Separation-Training.git msst && \
+  .venv/bin/python convert_stems.py && cd ../..
 xcodegen generate && open Passable.xcodeproj
 ```
 
@@ -109,6 +115,8 @@ The iPhone app needs no models: `cd ios && xcodegen generate && open PassableIos
 Core ML has no complex tensors, so `convert.py` exports HTDemucs **without** its STFT/iSTFT. `Separation/DemucsSTFT.swift` reimplements those in Accelerate to match torch exactly. `StemSeparator` also reproduces `demucs.apply_model` chunking: 7.8 s segments, 25 % overlap, triangular cross-fades, and context padding for the last chunk.
 
 The voice comes from a third model, Kim's [Mel-Band RoFormer](https://huggingface.co/KimberleyJSN/melbandroformer) (MIT), exported by `tools/convert-roformer/convert.py` with its STFT and its mask averaging (a complex scatter) left out; `Separation/VocalSeparator.swift` does those and upstream's chunking (8 s chunks, half overlapping, faded). Its vocal replaces HTDemucs', and what the mix holds beyond it and the other three stems goes back to those three by their power per bin (`StemResidual`), so the four still add up to the song. On the MUSDB18 test excerpts its vocal is 11.5 dB SDR against HTDemucs' 8.9 (better on 49 of 50; `tools/convert-roformer/evaluate.py`, with `passable-render --dump-vocals` giving Passable's own). Songs separated before it get the new voice once, on their next load; their beat grids and keys are kept.
+
+Drums, bass and melody come from BS-RoFormer SW (jarredou; six stems: its guitar and piano go into the melody), exported by `tools/convert-roformer/convert_stems.py` the same way and run by `Separation/StemRoformer.swift` (13.4 s chunks, half overlapping). On the 50 MUSDB18 test excerpts (`tools/convert-roformer/evaluate_stems.py`, median SDR) it beats HTDemucs v4 on every stem: drums 11.65 against 9.48 dB (better on 49 of 50), bass 9.65 against 9.19 (42 of 50), melody 8.07 against 5.20 (44 of 50). Its voice and the vocal model's are about as close to the true one (11.7 and 11.8 dB) and wrong in different places, so the voice is the two mixed, 70 % the vocal model's: 12.05 dB, better than the vocal model alone on 48 of 50. Songs separated before it get the new stems once, on their next load, their grids and keys kept. Without the model in the bundle, HTDemucs separates as before.
 
 Beat grids start from a second model, [Beat This!](https://github.com/CPJKU/beat_this) (MIT), exported by `tools/convert-beats/convert.py` with its mel filterbank inside the graph; `Analysis/BeatTracker.swift` does the STFT and the 30-second chunking. It says which tempo, which hits the beat is on and which beat is the one; `TempoEstimator` then fits the grid to the drum hits to the millisecond. Without the model in the bundle, analysis falls back to onsets alone.
 
@@ -131,12 +139,20 @@ swift build -c release
 .build/release/passable-render --order --report --list songs.txt                    # Auto-Order, then every transition measured
 ```
 
-Songs play in the order given (`--order` orders them as the app's Auto-Order does and writes `order.txt`). Other measures: `--detail N` (one transition, every part bar by bar), `--steps` (where parts switch against the hits), `--levels` (each song's loudness as heard), `--limiter`, `--aac-peaks` (the iPhone file decoded again), `--renditions` (tempo-matched copies against a fresh render, and their size), `--tempos`, `--grids` (how far a beat tracker hears each song off its grid), `--scores`, `--twins` (the same song twice), `--prune-dry` (what a launch would clear from the cache), `--prune-now` (clears every folder of a song in neither the set nor the library, however recent; `--dry` to list them first). The tool's own tempo-matched copies (`render-matched`) are cleared a day after they were made. `--cut-cost`, `--clash-cost` and `--arc` try other ordering prices; `--as-listed` prices the list's own order instead of searching one (`--order --order-only -v` shows each song's energy and its distance from the set's arc), and `--report -v` lists every voice that came in or left between words. `--vocals` measures each handover of the voices (beats both sing, the longest silence the blend made, singer level, cuts mid-sentence or mid-part, and words cut in two: the voice within 15 dB of its loud moments, on the audio, where its channel shuts or opens; `-v` lists those), `--word-times` how far the speech recogniser's word starts and ends fall from the vocal stem's own rises and falls, and `--breaths` each song's breath map (how many, how long, how many at a line's edge). `--clicks` measures every switch a transition makes (a part cut in or out, a filter, an EQ band or a send opened or shut): the energy the switch itself adds in a band, against what the whole mix carries there (`-v` lists the loudest). Songs never loaded are separated with the installed app's models. `PassableTests/SetLab` builds a set from a list of songs and measures every transition (levels, both songs heard, doubled lows and voices, flams). Its measures come from Passable's own analysis, so a wrong beat grid looks fine to it. For a second opinion, have it write each transition out and run the audit, which tracks the songs and the rendered blends with Beat This! in PyTorch and says where two songs don't share a beat or a bar:
+Songs play in the order given (`--order` orders them as the app's Auto-Order does and writes `order.txt`). Other measures: `--detail N` (one transition, every part bar by bar), `--steps` (where parts switch against the hits; a switch inside a held note is counted apart from one on an attack), `--levels` (each song's loudness as heard), `--limiter`, `--aac-peaks` (the iPhone file decoded again), `--renditions` (tempo-matched copies against a fresh render, and their size), `--tempos`, `--grids` (how far a beat tracker hears each song off its grid), `--scores`, `--twins` (the same song twice), `--prune-dry` (what a launch would clear from the cache), `--prune-now` (clears every folder of a song in neither the set nor the library, however recent; `--dry` to list them first). The tool's own tempo-matched copies (`render-matched`) are cleared a day after they were made. `--cut-cost`, `--clash-cost` and `--arc` try other ordering prices; `--as-listed` prices the list's own order instead of searching one (`--order --order-only -v` shows each song's energy and its distance from the set's arc), and `--report -v` lists every voice that came in or left between words. `--vocals` measures each handover of the voices (beats both sing, the longest silence the blend made, singer level, cuts mid-sentence or mid-part, and words cut in two: the voice within 15 dB of its loud moments, on the audio, where its channel shuts or opens; `-v` lists those), `--word-times` how far the speech recogniser's word starts and ends fall from the vocal stem's own rises and falls, and `--breaths` each song's breath map (how many, how long, how many at a line's edge). `--clicks` measures every switch a transition makes (a part cut in or out, a filter, an EQ band or a send opened or shut): the energy the switch itself adds in a band, against what the whole mix carries there (`-v` lists the loudest). Songs never loaded are separated with the installed app's models. `PassableTests/SetLab` builds a set from a list of songs and measures every transition (levels, both songs heard, doubled lows and voices, flams). Its measures come from Passable's own analysis, so a wrong beat grid looks fine to it. For a second opinion, have it write each transition out and run the audit, which tracks the songs and the rendered blends with Beat This! in PyTorch and says where two songs don't share a beat or a bar:
 
 ```sh
 TEST_RUNNER_PASSABLE_SET=songs.txt TEST_RUNNER_PASSABLE_SET_AUDIT=/tmp/audit \
   xcodebuild test -project Passable.xcodeproj -scheme Passable -only-testing:PassableTests/SetLab
 tools/convert-beats/.venv/bin/python tools/audit/audit.py /tmp/audit
+```
+
+To judge a change to the planner as a whole, `tools/score/score.py` runs `--report`, `--vocals`, `--clicks`, `--steps` and `--shifts` on one list of songs and adds every defect they find into one score, weighted by how bad it is (a click or a word cut in two at full voice far above a busy bar; lower is better). Measure the version before and after, then compare; `--fixed` keeps the list's order so both judge the same pairs:
+
+```sh
+python3 tools/score/score.py run --fixed --bin before/passable-render --out render-out/before songs.txt
+python3 tools/score/score.py run --fixed --out render-out/after songs.txt
+python3 tools/score/score.py diff render-out/before render-out/after
 ```
 
 `PassableTests/GridProbe` (`TEST_RUNNER_PASSABLE_GRIDS`, `TEST_RUNNER_PASSABLE_GRIDS_OUT`) lists each song's grid and key as cached and as estimated now, without touching the cache.
@@ -150,7 +166,7 @@ With `TEST_RUNNER_PASSABLE_SET_FIXED=1`, SetLab plays the songs in the order lis
 | `Passable/Separation` | Core ML HTDemucs and Mel-Band RoFormer, STFTs, stem cache |
 | `Passable/Analysis` | beat grid (Beat This! tracker for the metre, onset comb search for the fit; per-bar grids for songs without a steady tempo), key (Krumhansl chroma), lyrics (line times from on-device speech recognition) |
 | `Passable/Audio` | decoding/resampling, mmap'd stems, time map + sample-exact stretcher (phase vocoder, transient copy, sinc resampler) |
-| `Passable/DSP` | mixer, biquads, Freeverb, ping-pong delay, limiter: shared by preview and render |
+| `Passable/DSP` | mixer, biquads, FDN reverb, ping-pong delay, true-peak limiter: shared by preview and render |
 | `Passable/Model` | automation envelopes, presets, session |
 | `Passable/Library` | online search and download: YouTube (yt-dlp) |
 | `Passable/UI` | SwiftUI: decks, transition panel, timeline, search |
@@ -167,4 +183,4 @@ Measurement harnesses (skipped unless their variable is set; `xcodebuild` only p
 
 ## License
 
-MIT, see [`LICENSE`](LICENSE). [Beat This!](https://github.com/CPJKU/beat_this) (MIT), HTDemucs (MIT) and Mel-Band RoFormer (Kim's vocal model, MIT) are used under their own licenses.
+MIT, see [`LICENSE`](LICENSE). [Beat This!](https://github.com/CPJKU/beat_this) (MIT), HTDemucs (MIT) and Mel-Band RoFormer (Kim's vocal model, MIT) are used under their own licenses. The drums, bass and melody model is BS-RoFormer SW by jarredou, trained with [Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (ZFTurbo, MIT); its weights carry no license of their own, and are included here for free, non-commercial use with credit to their author (as CC-BY-NC-SA 4.0 would ask).

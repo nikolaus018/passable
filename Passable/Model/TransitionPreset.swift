@@ -645,7 +645,14 @@ struct TransitionBuilder {
     private mutating func bringInVocal(at vin: Double) {
         vocalEntry = vin
         if vocalInFade > 0 {
-            automate(.b, .vocals, .volume, [(vin, 0, .sCurve), (vin + vocalInFade, 1, .linear)])
+            if let g = Self.voiceMatch(voiceStep) {
+                let settle = min(Self.voiceSettle, max(Self.voiceSettleLeast, Double(bars) - vin - Self.voiceHold))
+                let holdEnd = max(vin + vocalInFade + 0.05, vin + Self.voiceHold)
+                automate(.b, .vocals, .volume, [(vin, 0, .sCurve), (vin + vocalInFade, g, .linear),
+                                                (holdEnd, g, .sCurve), (holdEnd + settle, 1, .linear)])
+            } else {
+                automate(.b, .vocals, .volume, [(vin, 0, .sCurve), (vin + vocalInFade, 1, .linear)])
+            }
         } else if let g = Self.voiceMatch(voiceStep) {
             // (Back by the blend's end where there are four bars for it:
             // still easing past it, B was heard held back once it played
@@ -688,9 +695,10 @@ struct TransitionBuilder {
         guard room > 0.25, at > 0, until > at else { return }
         let cut = 0.5 - min(room, 12) / 80
         let reset = Double(bars) + 4
+        let startAt = max(0, at - 0.5)
         for stem in melody ? [StemKind.drums, .other] : [.drums] {
             for band in [LaneParameter.mid, .high] {
-                automate(.a, stem, band, [(at - 0.25, 0.5, .sCurve), (at, cut, .hold), (reset, 0.5, .hold)])
+                automate(.a, stem, band, [(startAt, 0.5, .sCurve), (at, cut, .hold), (reset, 0.5, .hold)])
             }
         }
     }
@@ -729,7 +737,14 @@ struct TransitionBuilder {
             }
         }
         if vocalOutFade > 0 {
-            automate(.a, .vocals, .volume, [(out - vocalOutFade, 1, .logarithmic), (out, 0, .linear)])
+            if let g = Self.voiceMatch(-voiceStep) {
+                let fadeStart = out - vocalOutFade
+                let held = fadeStart - Self.voiceHold
+                automate(.a, .vocals, .volume, [(held - Self.voiceYield, 1, .sCurve), (held, g, .linear),
+                                                (fadeStart, g, .logarithmic), (out, 0, .linear)])
+            } else {
+                automate(.a, .vocals, .volume, [(out - vocalOutFade, 1, .logarithmic), (out, 0, .linear)])
+            }
         } else {
             // Closed over `vocalRelease`, shut by `out`: nothing of what
             // follows gets through. Cut on the beat (nothing to cut on was
@@ -777,11 +792,18 @@ struct TransitionBuilder {
     /// a cappella break where A's voice carries solo into B's drop.
     private mutating func buildDrop(at s: Double) {
         guard s >= 2 else { return buildUp(to: s, drumsContinue: false) }
+        // Only sweep A's melody during the drop build if A's melody hasn't
+        // already dissolved away before the build starts (avoids sweeping dead
+        // channels and creating filter discontinuities on an already-silent lane).
+        let aOtherLive = lanes.first { $0.side == .a && $0.stem == .other }
+            .map { $0.value(.volume, at: start + (s - 1.5) * barSeconds) > 0.05 } ?? false
         switch buildStyle {
         case .snareRoll:
             automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.85, .hold), (s, 0.5, .linear)])
-            automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.82, .hold), (s, 0.5, .linear)])
-            automate(.a, .other, .reverb, [(s - 1.5, 0, .exponential), (s - 0.25, 0.65, .linear), (s - 0.125, 0, .linear)])
+            if aOtherLive {
+                automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.82, .hold), (s, 0.5, .linear)])
+                automate(.a, .other, .reverb, [(s - 1.5, 0, .exponential), (s - 0.25, 0.65, .linear), (s - 0.125, 0, .linear)])
+            }
             // Only the tightest roll goes into the echo, and nothing once the
             // music stops: its first repeat fills the silence, and what's left
             // by the drop is faint, so B lands clean instead of under a smear.
@@ -804,7 +826,9 @@ struct TransitionBuilder {
             // eighth, and sixteenth while high-passing into half a beat of
             // silence before B slams in.
             automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.86, .hold), (s, 0.5, .linear)])
-            automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.83, .hold), (s, 0.5, .linear)])
+            if aOtherLive {
+                automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.83, .hold), (s, 0.5, .linear)])
+            }
             automate(.a, .drums, .delay, [(s - 0.5, 0, .exponential), (s - 0.25, 0.45, .linear), (s - 0.125, 0, .linear)])
             var anchor = s - 2
             if loop > 0, anchor >= 0 { anchor = Double(-loopBack) + anchor.truncatingRemainder(dividingBy: Double(loop)) }
@@ -823,8 +847,10 @@ struct TransitionBuilder {
             // sweeps up to ~1.9 kHz on drums and ~1.5 kHz on melody into a crisp
             // drop release.
             automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.87, .hold), (s, 0.5, .linear)])
-            automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.85, .hold), (s, 0.5, .linear)])
-            automate(.a, .other, .reverb, [(s - 2, 0, .sCurve), (s - 0.5, 0.85, .linear), (s - 0.125, 0.85, .linear), (s + 0.05, 0, .linear)])
+            if aOtherLive {
+                automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.85, .hold), (s, 0.5, .linear)])
+                automate(.a, .other, .reverb, [(s - 2, 0, .sCurve), (s - 0.5, 0.85, .linear), (s - 0.125, 0.85, .linear), (s + 0.05, 0, .linear)])
+            }
             silences.append((.a, .bass, s - 0.5, s))
             silences.append((.b, .drums, s - 0.5, s))
             for stem in [StemKind.drums, .other] { silences.append((.a, stem, s - 0.125, s)) }
@@ -955,7 +981,9 @@ struct TransitionBuilder {
             let side: DeckSide = useB ? .b : .a
             let anchor = useB ? (vocalChop?.anchor ?? s) : (vocalChop?.anchor ?? (s - 1))
             automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.88, .hold), (s, 0.5, .linear)])
-            automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.86, .hold), (s, 0.5, .linear)])
+            if aOtherLive {
+                automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.86, .hold), (s, 0.5, .linear)])
+            }
             for (from, to, length) in [(s - 1.0, s - 0.5, 0.25), (s - 0.5, s - 0.375, 0.125),
                                        (s - 0.375, s - 0.25, 0.0625), (s - 0.25, s - 0.125, 0.03125)] {
                 rolls.append(Roll(side: side, stem: .vocals,
@@ -978,11 +1006,19 @@ struct TransitionBuilder {
                     (s - 1.0, 0, .sCurve), (s - 0.25, 0.56, .linear), (s - 0.06, 0, .linear),
                 ])
             } else {
+                // Clear any overlapping echoOutVocal points on A's vocal before
+                // writing the chop's filter/delay envelopes so points never
+                // interleave or leave delay stuck open past the drop.
+                if let ai = lanes.firstIndex(where: { $0.side == .a && $0.stem == .vocals }) {
+                    let lo = start + (s - 1.05) * barSeconds, hi = start + (s + 1.5) * barSeconds
+                    lanes[ai][.filter].clear(lo...hi)
+                    lanes[ai][.delay].clear(lo...hi)
+                }
                 automate(.a, .vocals, .filter, [
                     (s - 1.0, 0.5, .exponential), (s - 0.125, 0.82, .hold), (s, 0.5, .linear),
                 ])
                 automate(.a, .vocals, .delay, [
-                    (s - 1.0, 0, .sCurve), (s - 0.5, 0.78, .linear), (s - 0.125, 0, .linear),
+                    (s - 1.0, 0, .sCurve), (s - 0.5, 0.72, .linear), (s - 0.125, 0, .linear),
                 ])
             }
             silences.append((.a, .bass, s - 1, s))
@@ -1059,7 +1095,7 @@ struct TransitionBuilder {
             // before B's full drop slams in on `s`.
             automate(.a, .drums, .filter, [(s - 1.75, 0.5, .exponential), (s - 0.5, 0.87, .hold), (s, 0.5, .linear)])
             automate(.a, .other, .filter, [(s - 1.75, 0.5, .exponential), (s - 0.5, 0.85, .hold), (s, 0.5, .linear)])
-            automate(.a, .drums, .delay, [(s - 1.5, 0, .sCurve), (s - 0.875, 0.82, .linear),
+            automate(.a, .drums, .delay, [(s - 1.5, 0, .sCurve), (s - 0.75, 0.82, .linear),
                                           (s - 0.5, 0.82, .linear), (s - 0.45, 0, .linear)])
             automate(.a, .other, .reverb, [(s - 1.5, 0, .sCurve), (s - 0.75, 0.86, .linear),
                                            (s - 0.5, 0.86, .linear), (s - 0.45, 0, .linear)])
@@ -1135,9 +1171,9 @@ struct TransitionBuilder {
             // the same instant A's drums hand it off.
             if drumsLayer {
                 // B's hats, snares and percussion in on the first downbeat
-                // (the low kill keeps its kick out), high-passed at ~1,310 Hz
-                // (24 dB/oct DJ sweep) opening smoothly over the first phrase.
-                bringIn(.drums, at: 0, filter: 0.84, open: min(q, sw))
+                // (the low kill keeps its kick out), high-passed cleanly above
+                // the snare body (~1.5 kHz) so bar 0 enters silky without a pop.
+                bringIn(.drums, at: 0, filter: 0.83, open: min(q, sw))
             } else if hats {
                 automate(.b, .drums, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
                 automate(.b, .drums, .filter, [(0, Self.hatsFilter, .hold), (sw - 0.001, Self.hatsFilter, .hold), (sw, 0.5, .linear)])
@@ -1169,7 +1205,9 @@ struct TransitionBuilder {
             // keep A's past the moment B's (still silent) channel opens.
             // (Never past the swap on clashing keys: B's melody lands there.)
             let out = min(vocalOut ?? min(vin, sw), keysClash ? sw : .infinity)
-            echoOutVocal(at: out, send: vocalSend)
+            let tightHandover = vin - out < 0.75
+            echoOutVocal(at: out, send: tightHandover ? min(vocalSend, 0.56) : vocalSend,
+                         tail: tightHandover ? 0.5 : 1.0)
             if keysClash {
                 // Two keys never sound together, and the one changes into
                 // the other the way a DJ does it with the filters: A's
@@ -1209,17 +1247,19 @@ struct TransitionBuilder {
                 // then dissolves (low-pass sweep into a reverb wash), so
                 // there's never more than one song's harmony for long.
                 let lift = min(out, underUntil ?? out)
-                let bMelFilter = carry ? 0.72 : 0.82
+                let bMelFilter = carry ? 0.68 : 0.74
                 let bMelOpen = carry ? q + 1.0 : q + max(1, q / 2)
                 if under > 0.25, lift > q + 0.01 {
-                    // Under A's voice for as long as it sings (volume + gentle
-                    // mid vocal pocket), then up to full on the beat it leaves
-                    // on: a step, not a fade.
-                    let held = pow(10, -min(under, 12) / 20)
+                    // Under A's voice for as long as it sings (gentle volume +
+                    // mid vocal pocket), then smoothly riding up to full over
+                    // two beats as A's singer finishes.
+                    let held = pow(10, -min(under, 5) / 20)
                     bringIn(.other, at: q, filter: bMelFilter, open: bMelOpen, level: held)
-                    automate(.b, .other, .volume, [(lift, held, .hold), (lift + 0.001, 1, .linear)])
-                    let midCut = 0.5 - min(under, 4) / 80
-                    automate(.b, .other, .mid, [(q, midCut, .linear), (max(q + 0.01, lift - 0.125), midCut, .sCurve), (lift, 0.5, .linear)])
+                    let liftStart = max(q + 0.01, lift - 0.25)
+                    let liftEnd = min(Double(bars), lift + 0.25)
+                    automate(.b, .other, .volume, [(liftStart, held, .sCurve), (max(liftStart + 0.05, liftEnd), 1, .linear)])
+                    let midCut = 0.5 - min(under, 3) / 80
+                    automate(.b, .other, .mid, [(q, midCut, .linear), (liftStart, midCut, .sCurve), (max(liftStart + 0.05, liftEnd), 0.5, .linear)])
                 } else {
                     bringIn(.other, at: q, filter: bMelFilter, open: bMelOpen)
                     // Reverse mashup: if A's voice carries on past the swap over
@@ -1262,15 +1302,15 @@ struct TransitionBuilder {
         case .dropSwap:
             // A rides its build; on the drop everything flips to B at once.
             let h = Self.switchBar(preset, bars: bars, lowSwap: lowSwap)
-            let vin = max(h, vocalIn ?? v)
+            let vin = keysClash ? max(h, vocalIn ?? v) : (vocalIn.map { max(0, $0) } ?? v)
             // A caller that heard where B's voice really starts singing may
             // keep A's past the moment B's (still silent) channel opens.
             let out = min(vocalOut ?? min(vin, h), keysClash ? h : .infinity)
             if drumsLayer {
                 // B's tops from the first downbeat, opening like a riser from
-                // ~1 kHz down to ~100 Hz before slamming full on the drop.
+                // silky cymbals down to ~100 Hz before slamming full on the drop.
                 automate(.b, .drums, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
-                automate(.b, .drums, .filter, [(0, 0.80, .exponential), (h - 0.001, 0.54, .hold), (h, 0.5, .linear)])
+                automate(.b, .drums, .filter, [(0, 0.83, .exponential), (h - 0.001, 0.54, .hold), (h, 0.5, .linear)])
             } else {
                 automate(.b, .drums, .volume, [(h, 0, .hold), (h + 0.001, 1, .linear)])
             }
@@ -1286,15 +1326,17 @@ struct TransitionBuilder {
                 // (pocketed under A's vocal when `under` is active).
                 let lift = min(out, underUntil ?? out)
                 if under > 0.25, lift > h / 2 + 0.01 {
-                    let held = pow(10, -min(under, 12) / 20)
+                    let held = pow(10, -min(under, 5) / 20)
+                    let liftStart = max(h / 2 + 0.01, lift - 0.25)
+                    let liftEnd = min(Double(bars), lift + 0.25)
                     automate(.b, .other, .volume, [(h / 2, 0, .hold), (h / 2 + 0.001, held, .linear),
-                                                   (lift, held, .hold), (lift + 0.001, 1, .linear)])
-                    let midCut = 0.5 - min(under, 4) / 80
-                    automate(.b, .other, .mid, [(h / 2, midCut, .linear), (max(h / 2 + 0.01, lift - 0.125), midCut, .sCurve), (lift, 0.5, .linear)])
+                                                   (liftStart, held, .sCurve), (max(liftStart + 0.05, liftEnd), 1, .linear)])
+                    let midCut = 0.5 - min(under, 3) / 80
+                    automate(.b, .other, .mid, [(h / 2, midCut, .linear), (liftStart, midCut, .sCurve), (max(liftStart + 0.05, liftEnd), 0.5, .linear)])
                 } else {
                     automate(.b, .other, .volume, [(h / 2, 0, .hold), (h / 2 + 0.001, 1, .linear)])
                 }
-                automate(.b, .other, .filter, [(h / 2, 0.74, .exponential), (h - 0.001, 0.54, .hold), (h, 0.5, .linear)])
+                automate(.b, .other, .filter, [(h / 2, 0.70, .exponential), (h - 0.001, 0.54, .hold), (h, 0.5, .linear)])
                 automate(.b, .other, .low, [(h, 0, .hold), (h + 0.001, 0.5, .linear)])
             }
             for stem in [StemKind.drums, .bass] {
@@ -1310,7 +1352,9 @@ struct TransitionBuilder {
             } else {
                 dissolveMelody(from: h)
             }
-            echoOutVocal(at: out, send: min(0.85, vocalSend + 0.07))
+            let dropTight = vin - out < 0.75
+            echoOutVocal(at: out, send: dropTight ? min(vocalSend, 0.58) : min(0.82, vocalSend + 0.04),
+                         tail: dropTight ? 0.5 : 1.0)
             bringInVocal(at: vin)
             if dropMoment {
                 buildDrop(at: h)
@@ -1339,7 +1383,7 @@ struct TransitionBuilder {
             // (or B's hats alone if only hats lock); otherwise B's drums land
             // cleanly on the half-way swap so two non-locking kits never flam.
             if drumsLayer {
-                bringIn(.drums, at: 0, filter: 0.82, open: q)
+                bringIn(.drums, at: 0, filter: 0.83, open: q)
             } else if hats {
                 automate(.b, .drums, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
                 automate(.b, .drums, .filter, [(0, Self.hatsFilter, .hold), (2 * q - 0.001, Self.hatsFilter, .hold), (2 * q, 0.5, .linear)])
@@ -1348,11 +1392,13 @@ struct TransitionBuilder {
             }
             automate(.b, .bass, .volume, [(2 * q, 0, .hold), (2 * q + 0.001, 1, .linear)])
             automate(.a, .bass, .volume, [(2 * q, 1, .hold), (2 * q + 0.001, 0, .linear)])
-            // The voices hand over like a Drop Swap's: B's from the swap,
-            // between lines where the caller found them; A's until then.
-            let vin = max(2 * q, vocalIn ?? v)
+            // The voices hand over cleanly where the builder placed them (honoring
+            // early quarter-in handovers when A is silent and keys fit).
+            let vin = keysClash ? max(2 * q, vocalIn ?? v) : (vocalIn.map { max(0, $0) } ?? v)
             let out = min(vocalOut ?? min(vin, 2 * q), keysClash ? 2 * q : n)
-            echoOutVocal(at: out, send: vocalSend)
+            let longTight = vin - out < 0.75
+            echoOutVocal(at: out, send: longTight ? min(vocalSend, 0.56) : vocalSend,
+                         tail: longTight ? 0.5 : 1.0)
             if keysClash {
                 automate(.a, .other, .reverb, [(2 * q - 1, 0, .sCurve), (2 * q - 0.25, 0.8, .linear),
                                                (2 * q, 0.8, .linear), (2 * q + 0.05, 0, .linear)])
@@ -1361,13 +1407,15 @@ struct TransitionBuilder {
             } else {
                 let lift = min(out, underUntil ?? out)
                 if under > 0.25, lift > q + 0.01 {
-                    let held = pow(10, -min(under, 12) / 20)
-                    bringIn(.other, at: q, filter: 0.78, open: min(2 * q, q + max(2, q / 2)), level: held)
-                    automate(.b, .other, .volume, [(lift, held, .hold), (lift + 0.001, 1, .linear)])
-                    let midCut = 0.5 - min(under, 4) / 80
-                    automate(.b, .other, .mid, [(q, midCut, .linear), (max(q + 0.01, lift - 0.125), midCut, .sCurve), (lift, 0.5, .linear)])
+                    let held = pow(10, -min(under, 5) / 20)
+                    bringIn(.other, at: q, filter: 0.72, open: min(2 * q, q + max(2, q / 2)), level: held)
+                    let liftStart = max(q + 0.01, lift - 0.25)
+                    let liftEnd = min(Double(bars), lift + 0.25)
+                    automate(.b, .other, .volume, [(liftStart, held, .sCurve), (max(liftStart + 0.05, liftEnd), 1, .linear)])
+                    let midCut = 0.5 - min(under, 3) / 80
+                    automate(.b, .other, .mid, [(q, midCut, .linear), (liftStart, midCut, .sCurve), (max(liftStart + 0.05, liftEnd), 0.5, .linear)])
                 } else {
-                    bringIn(.other, at: q, filter: 0.78, open: min(2 * q, q + max(2, q / 2)))
+                    bringIn(.other, at: q, filter: 0.72, open: min(2 * q, q + max(2, q / 2)))
                 }
                 // Warm progressive melody handover: A's melody begins receding
                 // gently into a low-pass wash half a phrase before the swap and
@@ -1399,7 +1447,7 @@ struct TransitionBuilder {
             // underneath B's vocal to build energy into the drop; otherwise
             // A's beat drives cleanly solo until B slams in on `sw`.
             if drumsLayer {
-                bringIn(.drums, at: 0, filter: 0.86, open: sw)
+                bringIn(.drums, at: 0, filter: 0.83, open: sw)
             } else if hats {
                 automate(.b, .drums, .volume, [(0, 0, .hold), (0.001, 1, .linear)])
                 automate(.b, .drums, .filter, [(0, Self.hatsFilter, .hold), (sw - 0.001, Self.hatsFilter, .hold), (sw, 0.5, .linear)])
@@ -1416,7 +1464,9 @@ struct TransitionBuilder {
             automate(.b, .bass, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
             handOverVocalLows(at: sw)
             // A's vocal echoes out with a lush reverb tail right before B's singer takes over.
-            echoOutVocal(at: out, send: vocalSend, reverb: 0.42)
+            let mashTight = vin - out < 0.75
+            echoOutVocal(at: out, send: mashTight ? min(vocalSend, 0.56) : vocalSend,
+                         tail: mashTight ? 0.5 : 1.0, reverb: mashTight ? 0.25 : 0.42)
             bringInVocal(at: vin)
 
             if keysClash {
@@ -1444,7 +1494,7 @@ struct TransitionBuilder {
                 if dropMoment {
                     automate(.b, .other, .volume, [(sw, 0, .hold), (sw + 0.001, 1, .linear)])
                 } else {
-                    bringIn(.other, at: sw, filter: 0.78, open: min(n, sw + 1.5))
+                    bringIn(.other, at: sw, filter: 0.72, open: min(n, sw + 1.5))
                 }
             }
             if drumsLayer && drumsLinger && sw < n && !dropMoment {
@@ -1472,7 +1522,11 @@ struct TransitionBuilder {
                 for stem in [StemKind.drums, .bass, .other] {
                     rolls.append(Roll(side: .a, stem: stem, start: brakeStart, end: brakeEnd,
                                       anchor: brakeStart, length: brakeEnd - brakeStart, brake: true))
-                    automate(.a, stem, .volume, [(-0.06, 1, .hold), (-0.059, 0, .linear)])
+                    // (Faded out with the platter's last turn rather than
+                    // shut on its end: the roll is nearly silent by then,
+                    // and a part shut in a step there, a bass's sub after
+                    // all, still put a tick on the mix.)
+                    automate(.a, stem, .volume, [(-0.16, 1, .sCurve), (-0.06, 0, .linear)])
                 }
                 automate(.a, .other, .reverb, [(-0.625, 0, .sCurve), (-0.375, 0.55, .linear),
                                                (-0.25, 0.55, .linear), (-0.06, 0, .linear)])
@@ -1482,7 +1536,11 @@ struct TransitionBuilder {
                 for stem in [StemKind.drums, .bass, .other] {
                     rolls.append(Roll(side: .a, stem: stem, start: spinStart, end: spinEnd,
                                       anchor: spinStart, length: spinEnd - spinStart, spinback: true))
-                    automate(.a, stem, .volume, [(-0.06, 1, .hold), (-0.059, 0, .linear)])
+                    // (Faded out with the platter's last turn rather than
+                    // shut on its end: the roll is nearly silent by then,
+                    // and a part shut in a step there, a bass's sub after
+                    // all, still put a tick on the mix.)
+                    automate(.a, stem, .volume, [(-0.16, 1, .sCurve), (-0.06, 0, .linear)])
                 }
                 automate(.a, .other, .reverb, [(-0.375, 0, .sCurve), (-0.25, 0.68, .linear),
                                                (-0.125, 0.68, .linear), (-0.06, 0, .linear)])

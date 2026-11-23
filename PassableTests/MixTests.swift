@@ -49,6 +49,62 @@ final class MixTests: XCTestCase {
         XCTAssertLessThan(gains.map(\.1).min()!, 0.33)
     }
 
+    /// Peaks between samples count: a tone at a quarter of the sample rate,
+    /// phased so every sample sits at 0.707 of its true peak, has samples
+    /// under the ceiling and a waveform well over it. The limiter brings
+    /// the waveform (what a DAC or an AAC decoder rebuilds) under it.
+    func testLimiterCatchesPeaksBetweenSamples() {
+        var limiter = Limiter(sampleRate: 44_100)
+        let n = 8192, amplitude: Float = 1.2
+        var l = (0..<n).map { amplitude * Float(sin(Double.pi / 2 * Double($0) + Double.pi / 4)) }
+        var r = l
+        XCTAssertLessThan(l.map(abs).max()!, Limiter.playbackCeiling, "every sample is under the ceiling")
+        l.withUnsafeMutableBufferPointer { lp in r.withUnsafeMutableBufferPointer { rp in
+            limiter.process(lp.baseAddress!, rp.baseAddress!, count: n)
+        } }
+        // Once the gain has settled, the output is the same tone, scaled:
+        // its true peak is its sample peak times √2.
+        let settled = l[(n / 2)...].map(abs).max()!
+        XCTAssertLessThanOrEqual(settled * Float(2).squareRoot(), Limiter.playbackCeiling * 1.01)
+        XCTAssertGreaterThan(settled * Float(2).squareRoot(), Limiter.playbackCeiling * 0.9, "limited, not muted")
+    }
+
+    /// A set rebuilt while it plays can list the same stems in another
+    /// order. Each lane's filter state goes with its audio, so the output
+    /// is what it would have been with no rebuild at all.
+    func testRebuiltSnapshotKeepsEachStemsFilterState() {
+        let sr = AudioIO.sampleRate
+        let n = 44_100
+        func stem(_ hz: Double, _ level: Double) -> StemAudio {
+            let x = (0..<n).map { Float(level * sin(2 * Double.pi * hz * Double($0) / sr)) }
+            return StemAudio(left: MappedChannel(samples: x), right: MappedChannel(samples: x))
+        }
+        // Two parts through different filters (a low-pass and a high-pass):
+        // swapped, each filter's memory rings out into the other's sound.
+        // (Through the same filter, swapped states would sum the same.)
+        var low = Lane(side: .a, stem: .other), high = Lane(side: .b, stem: .other)
+        low[.filter].insert(AutomationPoint(time: 0, value: 0.2))
+        high[.filter].insert(AutomationPoint(time: 0, value: 0.8))
+        let one = MixSnapshot.LaneData(audio: stem(220, 0.4), offset: 0, envelopes: low.envelopes, audible: true)
+        let two = MixSnapshot.LaneData(audio: stem(5_000, 0.3), offset: 0, envelopes: high.envelopes, audible: true)
+        func snapshot(_ lanes: [MixSnapshot.LaneData]) -> MixSnapshot {
+            MixSnapshot(lanes: lanes, length: n, delaySeconds: 0.35, masterGain: 1)
+        }
+        let half = 8_192, rest = 8_192
+        func play(swapping: Bool) -> [Float] {
+            let renderer = MixRenderer(snapshot: snapshot([one, two]))
+            var l = [Float](repeating: 0, count: half), r = l
+            renderer.render(left: &l, right: &r, count: half)
+            if swapping { renderer.setSnapshot(snapshot([two, one])) }
+            var l2 = [Float](repeating: 0, count: rest), r2 = l2
+            renderer.render(left: &l2, right: &r2, count: rest)
+            return l2
+        }
+        let steady = play(swapping: false), rebuilt = play(swapping: true)
+        let worst = zip(steady, rebuilt).map { abs($0 - $1) }.max()!
+        XCTAssertLessThan(worst, 1e-4, "the reordered lanes carry on with their own filters")
+    }
+
     /// A tempo-matched copy saved as a clone of its song (sped up: the
     /// copy is the song further on; slowed down: it starts before the
     /// song's first frame) reads back exactly as it was rendered.
@@ -477,9 +533,9 @@ final class SetShapeTests: XCTestCase {
         XCTAssertEqual(step ?? 0, 20 * log10(0.08 / 0.3), accuracy: 0.5)
     }
 
-    /// Taken out where the only cut would go through what's sung at full,
-    /// a breath the song really falls silent in is taken instead, even one
-    /// the recogniser has a word running through. Let in, never.
+    /// Where the only cut would go through what's sung at full, a breath the
+    /// song really falls silent in is taken instead, even one the recogniser
+    /// has a word running through (for both outgoing and incoming vocals).
     func testAVoiceSungAtFullIsTakenOutOnABreathNotThroughAWord() {
         let level: (Int) -> Float = { $0 == -6 ? -18 : 0 }
         func cut(_ opening: Bool, _ breaths: [ClosedRange<Double>]) -> (slot: Int, kind: VocalPhrasing.Cut, at: Double?)? {
@@ -492,8 +548,10 @@ final class SetShapeTests: XCTestCase {
         XCTAssertNotEqual(exit?.kind, .through)
         // Without the breath: through the word, told as such.
         XCTAssertEqual(cut(false, [])?.kind, .through)
-        // Let in: the breath isn't taken over the word.
-        XCTAssertNotEqual(cut(true, [-6.0 ... -5.4])?.slot, -5)
+        // Let in: a real breath also beats cutting through a full-volume word.
+        let entry = cut(true, [-6.0 ... -5.4])
+        XCTAssertEqual(entry?.slot, -5)
+        XCTAssertNotEqual(entry?.kind, .through)
     }
 
     /// A voice let in after a breath doesn't open on a short scrap, clearly

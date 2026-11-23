@@ -676,7 +676,7 @@ if CommandLine.arguments.contains("--steps") {
     // transition, against the part's own audio there: how much of a hit
     // or note an opening leaves out before it (chopped attack: a click and
     // a weak first hit) and how much a closing cuts off after it.
-    var chopped = 0, total = 0
+    var chopped = 0, total = 0, through = 0
     var leads: [Double] = []
     for (i, t) in mix.transitions.enumerated() {
         for (side, k) in [("A", t.from), ("B", t.to)] {
@@ -716,19 +716,26 @@ if CommandLine.arguments.contains("--steps") {
                     while onset > -40 && rms(frame + (onset - 1) * ms, frame + (onset + 4) * ms) > bestE * 0.25 { onset -= 1 }
                     total += 1
                     if stem == .drums || stem == .bass { leads.append(Double(onset)) }
-                    let bad = opening ? (onset < 0 && best >= -2) : (onset < 0 && best >= 0)
+                    // (Sounding all through the 40 ms looked at: a switch
+                    // inside a held note or a sung vowel, not on a hit's
+                    // attack. Whether that's heard is what --clicks
+                    // measures; it's counted apart.)
+                    let held = onset <= -40
+                    let bad = !held && (opening ? (onset < 0 && best >= -2) : (onset < 0 && best >= 0))
                     if bad { chopped += 1 }
+                    if held && (opening ? best >= -2 : best >= 0) { through += 1 }
                     if CommandLine.arguments.contains("-v") {
                         print(String(format: "%02d %@ %@ %@ at bar %.2f: hit peaks %+d ms, starts %+d ms%@", i + 1, side, stem.rawValue,
-                                     opening ? "opens" : "closes", (at - t.start) / t.barSeconds, best, onset, bad ? "  CHOPPED" : ""))
+                                     opening ? "opens" : "closes", (at - t.start) / t.barSeconds, best, onset,
+                                     bad ? "  CHOPPED" : held ? "  (through a held sound)" : ""))
                     }
                 }
             }
         }
     }
     leads.sort()
-    print(String(format: "steps %d, chopped %d; drum/bass hit onsets relative to the step: median %+.0f ms, 10th %+.0f, 90th %+.0f",
-                 total, chopped, leads.isEmpty ? 0 : leads[leads.count / 2], leads.isEmpty ? 0 : leads[leads.count / 10],
+    print(String(format: "steps %d, chopped %d, through a held sound %d; drum/bass hit onsets relative to the step: median %+.0f ms, 10th %+.0f, 90th %+.0f",
+                 total, chopped, through, leads.isEmpty ? 0 : leads[leads.count / 2], leads.isEmpty ? 0 : leads[leads.count / 10],
                  leads.isEmpty ? 0 : leads[leads.count * 9 / 10]))
     exit(0)
 }
@@ -990,8 +997,14 @@ if CommandLine.arguments.contains("--report") {
         // (Through two bars past the end: a swap lands on the blend's last
         // downbeat.)
         let heard = barLevels(from: t.begins, bars: n + 2, barSeconds: t.barSeconds) { _, _ in true }
+        // (The drop's bar of silence, and a fakeout's bare bar after it,
+        // are meant: each reads as the bar before it.)
         let quiet = silenceBar.map { $0 - 2 }
-        let around = heard.indices.map { $0 == quiet ? heard[max(0, $0 - 1)] : heard[$0] }
+        let bare = quiet.map { $0 + Int(t.dropDelayBars.rounded()) }
+        let around = heard.indices.map { j -> Double in
+            guard let q = quiet, j >= q, j <= (bare ?? q) else { return heard[j] }
+            return heard[max(0, q - 1)]
+        }
         row.dip = median - (around.min() ?? median)
         // (Where: bars from B's entry, and whose: A alone, B alone, both.)
         if let low = around.indices.min(by: { around[$0] < around[$1] }) {

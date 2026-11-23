@@ -220,16 +220,39 @@ struct Lane: Identifiable, Equatable, Codable {
     var isSoloed = false
     var visibleParameter: LaneParameter = .volume
 
+    enum CodingKeys: String, CodingKey { case side, stem, envelopes, isMuted, isSoloed, visibleParameter }
+
     var id: String { "\(side.rawValue).\(stem.rawValue)" }
     var title: String { "\(side.rawValue) · \(stem.displayName)" }
 
     subscript(parameter: LaneParameter) -> Envelope {
-        get { envelopes[parameter.rawValue] }
-        set { envelopes[parameter.rawValue] = newValue }
+        get { parameter.rawValue < envelopes.count ? envelopes[parameter.rawValue] : Envelope() }
+        set {
+            while envelopes.count <= parameter.rawValue { envelopes.append(Envelope()) }
+            envelopes[parameter.rawValue] = newValue
+        }
     }
 
     func value(_ parameter: LaneParameter, at time: Double) -> Double {
-        envelopes[parameter.rawValue].value(at: time, default: parameter.defaultValue)
+        self[parameter].value(at: time, default: parameter.defaultValue)
+    }
+
+    /// A lane saved before a parameter existed has no envelope for it:
+    /// one is added, empty (the parameter at its default).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        side = try c.decode(DeckSide.self, forKey: .side)
+        stem = try c.decode(StemKind.self, forKey: .stem)
+        envelopes = try c.decodeIfPresent([Envelope].self, forKey: .envelopes) ?? []
+        while envelopes.count < LaneParameter.allCases.count { envelopes.append(Envelope()) }
+        isMuted = try c.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
+        isSoloed = try c.decodeIfPresent(Bool.self, forKey: .isSoloed) ?? false
+        visibleParameter = try c.decodeIfPresent(LaneParameter.self, forKey: .visibleParameter) ?? .volume
+    }
+
+    init(side: DeckSide, stem: StemKind) {
+        self.side = side
+        self.stem = stem
     }
 
     /// A and B of each stem sit next to each other, so a swap reads as one

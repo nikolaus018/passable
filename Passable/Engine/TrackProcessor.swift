@@ -85,7 +85,8 @@ final class TrackProcessor: @unchecked Sendable {
             let mix = try AudioIO.loadStereo(url: url)
             if ticket.isCancelled { throw CancellationError() }
             var stems = try Self.separate(mix, progress: progress, isCancelled: { ticket.isCancelled })
-            let modelVocals = try Self.replaceVocals(mix: mix, stems: &stems, progress: progress,
+            let bandVoice = StemRoformer.isAvailable ? stems[.vocals] : nil
+            let modelVocals = try Self.replaceVocals(mix: mix, stems: &stems, blending: bandVoice, progress: progress,
                                                      isCancelled: { ticket.isCancelled })
             if !modelVocals { StemResidual.redistribute(mix: mix, stems: &stems) }
             for (kind, buffer) in stems {
@@ -93,6 +94,49 @@ final class TrackProcessor: @unchecked Sendable {
             }
             StemCache.markExact(directory)
             if modelVocals { StemCache.markModelVocals(directory) }
+            if StemRoformer.isAvailable { StemCache.markRoformerStems(directory) }
+        } else if StemRoformer.isAvailable, !StemCache.hasRoformerStems(directory) {
+            // Separated by HTDemucs: drums, bass and melody from the stem
+            // model once. The voice is kept (it's the vocal model's, or
+            // made so here), what was derived from the old stems dropped,
+            // and the measures of the parts taken again; the beat grid and
+            // key stay, so hand edits still sit where they were made.
+            progress(.decoding)
+            let mix = try AudioIO.loadStereo(url: url)
+            var stems = try StemCache.loadStems(from: directory).mapValues { $0.copyStereo() }
+            let band = try Self.separateBand(mix, progress: { progress(.separating(0.7 * $0)) },
+                                             isCancelled: { ticket.isCancelled })
+            for kind in [StemKind.drums, .bass, .other] { stems[kind] = band[kind] }
+            var modelVocals = StemCache.hasModelVocals(directory)
+            if !modelVocals {
+                modelVocals = try Self.replaceVocals(mix: mix, stems: &stems, blending: band[.vocals], progress: progress,
+                                                     isCancelled: { ticket.isCancelled })
+            } else if let kim = stems[.vocals], let voice = band[.vocals] {
+                stems[.vocals] = Self.blendVoices(kim, voice)
+            }
+            if modelVocals, let vocals = stems[.vocals] {
+                var rest = mix
+                vDSP_vsub(vocals.left, 1, mix.left, 1, &rest.left, 1, vDSP_Length(mix.count))
+                vDSP_vsub(vocals.right, 1, mix.right, 1, &rest.right, 1, vDSP_Length(mix.count))
+                var others = stems.filter { $0.key != .vocals }
+                StemResidual.redistribute(mix: rest, stems: &others)
+                others[.vocals] = vocals
+                stems = others
+            } else {
+                if let voice = band[.vocals] { stems[.vocals] = voice }
+                StemResidual.redistribute(mix: mix, stems: &stems)
+            }
+            for (kind, buffer) in stems {
+                try StemAudio.save(buffer, directory: directory, name: kind.rawValue)
+            }
+            StemCache.forgetDerivedAudio(in: directory)
+            if var analysis = StemCache.loadAnalysis(from: directory) {
+                analysis.structure = nil
+                StemCache.saveAnalysis(analysis, to: directory)
+            }
+            StemCache.markExact(directory)
+            if modelVocals { StemCache.markModelVocals(directory) }
+            StemCache.markRoformerStems(directory)
         } else if VocalSeparator.isAvailable, !StemCache.hasModelVocals(directory) {
             // Separated before the vocal model: its voice from the model
             // once (the other stems kept, and made to add up again), what
@@ -246,6 +290,7 @@ final class TrackProcessor: @unchecked Sendable {
     nonisolated(unsafe) private static var separator: StemSeparator?
 
     nonisolated(unsafe) private static var vocalSeparator: VocalSeparator?
+    nonisolated(unsafe) private static var stemRoformer: StemRoformer?
 
     /// The vocal model's voice in place of HTDemucs', and what the mix
     /// holds beyond it and the other three stems handed to those three by
@@ -253,6 +298,7 @@ final class TrackProcessor: @unchecked Sendable {
     /// and what the vocal model doesn't call voice goes where it sounds.
     /// False (stems untouched) where the app has no vocal model.
     private static func replaceVocals(mix: StereoBuffer, stems: inout [StemKind: StereoBuffer],
+                                      blending bandVoice: StereoBuffer? = nil,
                                       progress: @escaping @Sendable (Progress) -> Void,
                                       isCancelled: @escaping () -> Bool) throws -> Bool {
         guard VocalSeparator.isAvailable else { return false }
@@ -260,8 +306,9 @@ final class TrackProcessor: @unchecked Sendable {
         defer { gpu.signal() }
         if isCancelled() { throw CancellationError() }
         if vocalSeparator == nil { vocalSeparator = try VocalSeparator() }
-        let vocals = try vocalSeparator!.vocals(mix, progress: { progress(.separating(0.3 + 0.7 * $0)) },
+        var vocals = try vocalSeparator!.vocals(mix, progress: { progress(.separating(0.3 + 0.7 * $0)) },
                                                 isCancelled: isCancelled)
+        if let bandVoice, bandVoice.count == vocals.count { vocals = blendVoices(vocals, bandVoice) }
         var rest = mix
         vDSP_vsub(vocals.left, 1, mix.left, 1, &rest.left, 1, vDSP_Length(mix.count))
         vDSP_vsub(vocals.right, 1, mix.right, 1, &rest.right, 1, vDSP_Length(mix.count))
@@ -272,16 +319,50 @@ final class TrackProcessor: @unchecked Sendable {
         return true
     }
 
+    /// The vocal model's voice with the stem model's mixed in: the two
+    /// are as close to the true voice as each other (median SDR 11.8 and
+    /// 11.7 dB on the MUSDB18 test excerpts), and wrong in different
+    /// places, so together they're closer than either (12.05 dB at this
+    /// share, better than the vocal model alone on 48 of 50;
+    /// tools/convert-roformer/evaluate_stems.py and its ensemble trial).
+    static let bandVoiceShare: Float = 0.3
+
+    private static func blendVoices(_ vocal: StereoBuffer, _ band: StereoBuffer) -> StereoBuffer {
+        var out = vocal
+        let n = vDSP_Length(min(vocal.count, band.count))
+        var keep = 1 - bandVoiceShare, share = bandVoiceShare
+        vDSP_vsmul(vocal.left, 1, &keep, &out.left, 1, n)
+        vDSP_vsma(band.left, 1, &share, out.left, 1, &out.left, 1, n)
+        vDSP_vsmul(vocal.right, 1, &keep, &out.right, 1, n)
+        vDSP_vsma(band.right, 1, &share, out.right, 1, &out.right, 1, n)
+        return out
+    }
+
     private static func separate(_ mix: StereoBuffer, progress: @escaping @Sendable (Progress) -> Void,
                                  isCancelled: @escaping () -> Bool) throws -> [StemKind: StereoBuffer] {
         progress(.separating(0))
+        // (Most of the time is the vocal model's, where there is one.)
+        let share = VocalSeparator.isAvailable ? 0.3 : 1
+        if StemRoformer.isAvailable {
+            // Drums, bass and melody from the stem model; the voice too,
+            // unless the vocal model replaces it (`replaceVocals`).
+            return try separateBand(mix, progress: { progress(.separating($0 * share)) }, isCancelled: isCancelled)
+        }
         gpu.wait()
         defer { gpu.signal() }
         if isCancelled() { throw CancellationError() }
         if separator == nil { separator = try StemSeparator() }
-        // (Most of the time is the vocal model's, where there is one.)
-        let share = VocalSeparator.isAvailable ? 0.3 : 1
         return try separator!.separate(mix, progress: { progress(.separating($0 * share)) }, isCancelled: isCancelled)
+    }
+
+    /// The stem model's four stems (see `StemRoformer`).
+    private static func separateBand(_ mix: StereoBuffer, progress: @escaping (Double) -> Void,
+                                     isCancelled: @escaping () -> Bool) throws -> [StemKind: StereoBuffer] {
+        gpu.wait()
+        defer { gpu.signal() }
+        if isCancelled() { throw CancellationError() }
+        if stemRoformer == nil { stemRoformer = try StemRoformer() }
+        return try stemRoformer!.separate(mix, progress: progress, isCancelled: isCancelled)
     }
 
     /// One load of a song at a time, for any processor: two (the editor and
@@ -356,20 +437,22 @@ final class TrackProcessor: @unchecked Sendable {
 
                 final class Box: @unchecked Sendable { var error: Error?; let lock = NSLock() }
                 let box = Box()
-                DispatchQueue.concurrentPerform(iterations: StemKind.allCases.count) { i in
-                    let kind = StemKind.allCases[i]
+                let jobs: [(name: String, source: StemAudio, kind: StemKind)] =
+                    StemKind.allCases.map { ($0.rawValue, loaded.stems[$0]!, $0) }
+                DispatchQueue.concurrentPerform(iterations: jobs.count) { i in
+                    let job = jobs[i], kind = job.kind
                     do {
                         if ticket.isCancelled { throw CancellationError() }
                         let shift = kind == .drums ? 0 : plan.semitones
-                        let matched = TimeStretcher.process(loaded.stems[kind]!.copyStereo(), map: plan.map,
+                        let matched = TimeStretcher.process(job.source.copyStereo(), map: plan.map,
                                                             semitones: shift, percussive: kind == .drums,
                                                             vocal: kind == .vocals,
                                                             harmonicPercussive: kind == .other)
                         if ticket.isCancelled { throw CancellationError() }
                         // (Sharing the song's file where it plays unchanged.)
-                        try StemAudio.saveRendition(matched, source: loaded.stems[kind]!, sourceDirectory: loaded.directory,
-                                                    sourceName: kind.rawValue, offset: plan.semitones == 0 ? plan.map.tailOffset : nil,
-                                                    directory: staging, name: kind.rawValue)
+                        try StemAudio.saveRendition(matched, source: job.source, sourceDirectory: loaded.directory,
+                                                    sourceName: job.name, offset: plan.semitones == 0 ? plan.map.tailOffset : nil,
+                                                    directory: staging, name: job.name)
                     } catch {
                         box.lock.lock(); box.error = box.error ?? error; box.lock.unlock()
                     }

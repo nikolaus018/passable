@@ -483,7 +483,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "37"
+    static let planner = "43"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -1266,6 +1266,10 @@ struct SetMix: @unchecked Sendable {
         /// Extra bars after `dropAt` before B's kick & bass slam in (1.0 on a
         /// fakeout drop; 0 on standard drops).
         var dropDelayBars: Double = 0
+        /// Whether this drop style calls for a subtle stereo air riser/downlifter
+        /// (false for natural tension moves like bass pull, a cappella break,
+        /// echo freeze, or turntable drops).
+        var wantsAirSweep: Bool = true
         /// How B's vocal came in: "breath" (before a line), "word" (in the
         /// gap before a word), "bar" (opened on the downbeat, singing),
         /// "grid" (on the bar, nothing sounding); nil if automatic phrasing
@@ -1405,28 +1409,27 @@ struct SetMix: @unchecked Sendable {
             previousEnd = tr.end
         }
         let first = schedule.first?.seconds ?? 0.35
-        // Stereo air riser, 808 sub-impact boom, crash downlifter, and 4-bar
-        // post-drop Club PA punch around every drop moment.
+        // Subtle stereo air riser, tight sub-impact accent, and post-drop
+        // punch ONLY on drop styles that benefit from an air sweep.
         var sweeps: [MixSnapshot.FrameSweep] = []
         for tr in transitions {
-            guard let dropAt = tr.dropAt, tr.edit.preset != .echoOut else { continue }
+            guard let dropAt = tr.dropAt, tr.edit.preset != .echoOut, tr.wantsAirSweep else { continue }
             let realDrop = dropAt + tr.dropDelayBars * tr.barSeconds
             let startF = Int(((dropAt - 2 * tr.barSeconds) * sr).rounded())
             let dropF = Int((realDrop * sr).rounded())
-            let endF = Int(((realDrop + min(2.6, 1.5 * tr.barSeconds)) * sr).rounded())
+            let endF = Int(((realDrop + min(2.0, 1.25 * tr.barSeconds)) * sr).rounded())
             let cutF = Int(((tr.dropDelayBars + 0.125) * tr.barSeconds * sr).rounded())
             let punchEndF = Int(((realDrop + 4.0 * tr.barSeconds) * sr).rounded())
-            let isStadiumDrop = tr.edit.preset == .dropSwap || tr.edit.preset == .mashup
-                || tr.dropDelayBars > 0
-                || (tracks.indices.contains(tr.to) && SetOrdering.energy(tracks[tr.to].loaded.analysis) >= 0.62)
-            let sweepIntensity: Float = isStadiumDrop ? 1.70 : 1.35
+            let isBigDrop = tr.edit.preset == .dropSwap || tr.dropDelayBars > 0
+                || (tracks.indices.contains(tr.to) && SetOrdering.energy(tracks[tr.to].loaded.analysis) >= 0.72)
+            let sweepIntensity: Float = isBigDrop ? 0.80 : 0.55
             if startF >= 0 && dropF > startF {
                 sweeps.append(.init(start: startF, drop: dropF, end: endF, cutBeforeDrop: cutF,
                                     punchEnd: punchEndF, intensity: sweepIntensity))
             }
         }
         return MixSnapshot(lanes: lanes, length: Int(length * sr), delaySeconds: first, masterGain: masterGain,
-                           delaySchedule: schedule, sweeps: sweeps, energyPunch: 0.90)
+                           delaySchedule: schedule, sweeps: sweeps, energyPunch: 0.35)
     }
 }
 
@@ -2616,6 +2619,7 @@ enum VocalPhrasing {
             // beats and read several dB too loud, so a voice already
             // quieter than the last was turned down further.)
             let local = heard.sorted()[(heard.count - 1) * 9 / 10]
+            guard local > -55 else { return nil }
             let beats = heard.filter { $0 > max(local - sungWithin, reference - 2 * sungWithin) }
             guard beats.count >= 4 else { return nil }
             let eight = (last ? Array(beats.suffix(8)) : Array(beats.prefix(8))).sorted()
@@ -2624,6 +2628,27 @@ enum VocalPhrasing {
         guard let la = sung(a, offsetA, referenceA, from: out - 16 * beat, last: true),
               let lb = sung(b, offsetB, referenceB, from: vin, last: false) else { return nil }
         return Double(lb - la) + trimB - trimA
+    }
+
+    /// Peak 5 ms RMS inside the actual switch window (`[t - 30 ms, t + 20 ms]`
+    /// when closing, `[t - 40 ms, t]` when opening) relative to the local ±2 bar
+    /// 90th-percentile singing level (dB). Values above about −14 dB mean the
+    /// singer is still actively vocalizing right across the cut.
+    static func cutHotness(_ stem: StemAudio, offset: Double, at time: Double, opening: Bool, bar: Double) -> Float {
+        let p90 = localFiveMsP90(stem, offset: offset, around: time, bar: bar)
+        guard p90 > -55 else { return -90 }
+        let before = opening ? 0.040 : TransitionBuilder.vocalRelease
+        let after = opening ? 0.0 : 0.020
+        let frame = 0.005
+        var worst: Float = -120
+        var t = time - before
+        let end = time + after - frame
+        while t <= end + 1e-6 {
+            let db = level(stem, at: t - offset, length: frame)
+            if db > worst { worst = db }
+            t += gapFrame
+        }
+        return worst - p90
     }
 
     /// dB under what a voice sings at in its song that a beat of it still
@@ -2702,7 +2727,7 @@ enum VocalPhrasing {
                 }
                 if var placed = placeCleanCut(stem, offset: offset, from: lo, to: hi, opening: opening, localP90: p90) {
                     if placed.worstDB > p90 - 15 {
-                        let reachSlots = placed.worstDB > p90 - 10 ? 16.0 : 8.0
+                        let reachSlots = placed.worstDB > p90 - 10 ? 24.0 : 12.0
                         let wideLo = max(earliest, anchor - reachSlots * slot)
                         let wideHi = min(latest, anchor + reachSlots * slot)
                         if let alt = placeCleanCut(stem, offset: offset, from: wideLo, to: wideHi, opening: opening, localP90: p90),
@@ -2737,10 +2762,10 @@ enum VocalPhrasing {
             }
             // Acoustic trough safeguard: if the chosen switch window still lands
             // inside hot vocal energy (>-15 dB vs local 5 ms p90), widen locally
-            // (±8 sixteenths, or ±16 if near full volume >-10 dB, strictly within
+            // (±12 sixteenths, or ±24 if near full volume >-10 dB, strictly within
             // earliest...latest) and shift if a genuinely quiet valley is found.
             if worstDB > p90 - 15 {
-                let reachSlots = worstDB > p90 - 10 ? 16.0 : 8.0
+                let reachSlots = worstDB > p90 - 10 ? 24.0 : 12.0
                 let wideLo = max(earliest, t - reachSlots * slot)
                 let wideHi = min(latest, t + reachSlots * slot)
                 if let alt = placeCleanCut(stem, offset: offset, from: wideLo, to: wideHi, opening: opening, localP90: p90),
@@ -2807,13 +2832,13 @@ enum SetBuilder {
     /// Multiplier on B's chorus/drop hook landing bonus during placement.
     static let clubHookBoost: Float = 1.7
 
-    /// Unified club move cadence (minimum transitions between repeats of a
-    /// signature move so the set stays explosive yet never repetitive).
-    static let dropSpacing = 1
-    static let fakeoutSpacing = 3
-    static let teaseSpacing = 2
-    static let turntableSpacing = 4
-    static let mashupSpacing = 2
+    /// Tasteful club move cadence: let smooth musical blends carry the set so
+    /// big drop builds and signature stunts feel earned instead of repetitive.
+    static let dropSpacing = 3
+    static let fakeoutSpacing = 6
+    static let teaseSpacing = 4
+    static let turntableSpacing = 8
+    static let mashupSpacing = 3
 
     /// The same in bars of a song.
     static func minimumSoloBars(_ grid: BeatGrid, seconds: Double = minimumSoloSeconds) -> Int {
@@ -2852,7 +2877,7 @@ enum SetBuilder {
     static let dropMomentBars = 8
 
     /// Bars with nobody singing over a loop that make it not worth looping.
-    static let loopVoicelessBars = 1.5
+    static let loopVoicelessBars = 1.0
 
     /// dB under A's own level (as the automation predicts it, which reads
     /// shallower than the audio) that makes a bar of the blend a hole, and
@@ -3141,13 +3166,12 @@ enum SetBuilder {
             let offset = start - gb.scaled(by: draft.rateB).downbeat(edit.cueBar)
             let map = plans[k].map
             let matched = try await rendition(k)
-            // High-impact club drop cadence: Drop Swaps, Mashups, and peak
-            // bangers (energy >= 0.65) can fire a drop build even back-to-back
-            // because our 14-weapon choreographer never repeats a style within
-            // 3 transitions; calmer Stem Swaps breathe by `dropSpacing` (1).
+            // Tasteful club drop cadence: let smooth musical blends breathe between
+            // big drop moments (`dropSpacing = 3`). Only an explicit Drop Swap can
+            // fire sooner (`sinceDrop >= 2`), never back-to-back.
             let bEnergy = SetOrdering.energy(b.analysis)
-            let canDropNow = edit.preset == .dropSwap || edit.preset == .mashup
-                || (edit.bars >= dropMomentBars && (sinceDrop >= dropSpacing || bEnergy >= 0.65))
+            let canDropNow = (edit.preset == .dropSwap && sinceDrop >= 2)
+                || (edit.bars >= dropMomentBars && sinceDrop >= dropSpacing)
             let drops = !byHand && plan.placement.dropMoment && edit.preset != .echoOut && canDropNow
             // Rotate tempo-jump Cut flavors across eligible Cuts:
             // Vinyl Brake → Turntable Spinback → Echo Lift Cut.
@@ -3172,7 +3196,7 @@ enum SetBuilder {
                                     rampLengthB: map.rampLength, skip: skippedBars > 0 ? draft.skip : nil, plan: plan,
                                     edit: draft.edit, isEdited: isEdited, entryRange: entryRange, rateA: draft.rateA,
                                     barSeconds: blendBar, shiftA: shifts[k - 1], drops: drops,
-                                    dropSlot: drops ? dropIndex % 5 : -1,
+                                    dropSlot: drops ? dropIndex % 6 : -1,
                                     recentStyles: drops ? recentBuildStyles : [], vinylBrake: vinylBrake,
                                     spinback: spinback, acapellaBridge: acapellaBridge,
                                     allowFakeout: allowFakeout, allowTease: allowTease,
@@ -3500,7 +3524,7 @@ enum SetBuilder {
                                      from: start, to: start + sw * bar) {
                         keysClash = true
                     }
-                    let earliestMash = start - 0.5 * bar
+                    let earliestMash = start
                     let latestMash = start + (sw / 2) * bar
                     if let refB = VocalPhrasing.reference(bCounted.structure),
                        let entry = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: refB, opening: true,
@@ -3517,8 +3541,13 @@ enum SetBuilder {
                     }
                     if loop == 0, let refA {
                         let tin = start + (vocalIn ?? 0) * bar
+                        // (Not before the blend begins, give or take a breath:
+                        // A's voice gone before B is even heard is A's beat
+                        // alone with nobody singing. With clean stems that
+                        // read as an 11 dB hole the bar before B came in.)
                         if let exit = VocalPhrasing.cut(vocalsA, offset: aOffset, reference: refA, opening: false, target: tin,
-                                                        earliest: tin - 2 * bar, latest: tin, bar: bar, lines: linesA(tin)) {
+                                                        earliest: max(tin - 2 * bar, start - 0.25 * bar), latest: tin,
+                                                        bar: bar, lines: linesA(tin)) {
                             vocalOut = (exit.time - start) / bar
                             vocalOutKind = exit.kind.rawValue
                         } else {
@@ -3536,6 +3565,9 @@ enum SetBuilder {
                                                      target: start + window.earliest * bar,
                                                      earliest: start + window.earliest * bar,
                                                      latest: start + window.latest * bar, bar: bar, lines: linesB(start + window.earliest * bar)), entry.kind == .line,
+                       // B must actually start singing right after `entry.time` —
+                       // never cut A's vocal early for a silent-intro "mashup".
+                       VocalPhrasing.sounding(vocalsB, offset: offset + nudge, reference: refB, at: entry.time, beat: 0.75 * bar),
                        // (On the start of a part of B's, not a line in the middle of its verse.)
                        linesB(entry.time).map({ $0.song.midPart(at: $0.slot) != true }) ?? true {
                         let tin = entry.time
@@ -3636,7 +3668,7 @@ enum SetBuilder {
                         // ahead of its bar.)
                         let aSingsAtAim = saPlays?.isActive(.vocals, bar: edit.entryBar + Int(aim)) ?? true
                         let alone = loop > 0 || keysClash || !aSingsAtAim
-                        let earliestIn = start + max(0, aim - (keysClash ? 0 : 0.5)) * bar - (keysClash ? 0.05 : 0)
+                        let earliestIn = start + max(0, aim - (keysClash ? 0 : 0.5)) * bar
                         let latestIn = start + AutoPlacement.entryLatest(bCounted.structure, aim: aim, bars: edit.bars, alone: alone) * bar
                         if let cut = VocalPhrasing.cut(vocalsB, offset: offset + nudge, reference: ref, opening: true,
                                                        target: start + aim * bar,
@@ -3684,23 +3716,28 @@ enum SetBuilder {
                     // while B's isn't singing yet.
                     // (At the end of the phrase it's in rather than a bar or two
                     // into the next: see `AutoPlacement.phraseEnd`.)
-                    let target = acappella ? untilB : AutoPlacement.phraseEnd(before: min(untilB, sw))
+                    let target = acappella ? untilB : (untilB > sw ? sw : AutoPlacement.phraseEnd(before: min(untilB, sw)))
                     if let refA, loop == 0 {
                         let after = acappella || keysClash ? 0 : target >= sw ? 0.5 : 2
-                        let earliestOut = start + (target - min(AutoPlacement.exitBack, target)) * bar
-                        let latestOut = start + min(target + after, max(target, untilB), n) * bar
+                        // Couple A's backward search window to B's actual singing
+                        // start while keeping at least a full bar of reach so real
+                        // sentence/clause ends aren't clipped off.
+                        let gapBudget = max(0.75, AutoPlacement.exitBack - max(0, untilB - target))
+                        let earliestOut = start + max(0, target - min(AutoPlacement.exitBack, gapBudget)) * bar
+                        let bTightCap = (vocalIn.map { untilB <= $0 + 0.125 ? $0 : untilB }) ?? untilB
+                        let latestOut = start + min(target + after, max(target, untilB), bTightCap, n) * bar
                         let cut = VocalPhrasing.cut(vocalsA, offset: aOffset, reference: refA, opening: false,
                                                     target: start + target * bar,
                                                     earliest: earliestOut,
-                                                    latest: latestOut, bar: bar, lines: linesA(start + target * bar))
+                                                    latest: max(earliestOut, latestOut), bar: bar, lines: linesA(start + target * bar))
                         if let cut {
                             vocalOut = (cut.time - start) / bar
                             vocalOutKind = cut.kind.rawValue
                         } else {
-                            let fallbackBar = min(max(target.rounded(), 0), max(target, untilB), n)
+                            let fallbackBar = min(max(target.rounded(), 0), max(target, untilB), bTightCap, n)
                             let cleanT = VocalPhrasing.cleanNear(vocalsA, offset: aOffset, opening: false,
                                                                  target: start + fallbackBar * bar,
-                                                                 earliest: earliestOut, latest: latestOut, bar: bar)
+                                                                 earliest: earliestOut, latest: max(earliestOut, latestOut), bar: bar)
                             vocalOut = (cleanT - start) / bar
                             vocalOutKind = nil
                         }
@@ -3711,6 +3748,9 @@ enum SetBuilder {
             var room = 0.0
             var dropAt: Double?
             var dropDelayBars = 0.0
+            var wantsAirSweep = false
+            var realizedVocalOut: Double? = vocalOut
+            var realizedVocalIn: Double? = vocalIn
             if !byHand {
                 // Grooves that won't lock (a swung beat against a straight
                 // one) aren't layered: A's beat plays on and B's drums come
@@ -3809,49 +3849,40 @@ enum SetBuilder {
                             }
                         }
                     }
+                    let aEnergy = SetOrdering.energy(a.loaded.analysis)
                     let canJuggle = moves.contains(.gates) && align.grooves && !keysClash && edit.bars >= 8
                         && switchBar >= 4 && !aSingsIntoDrop && !bSingsIntoDrop
+                        && aEnergy >= 0.65 && bEnergy >= 0.70
+                    // Backbone = clean, timeless musical DJ builds (bass pull,
+                    // filter/reverb riser, a cappella break, underwater filter
+                    // slam, echo freeze, snare roll). Flashier stunts (fakeout,
+                    // vocal chop, beat juggle, turntable drops) are rare earned
+                    // highlights rather than the default every drop.
                     let preferred: [TransitionBuilder.BuildStyle]
                     if aSingsIntoDrop || bSingsIntoDrop {
-                        preferred = [.vocalChop, .echoFreeze, .filterSlam, .acappellaBreak, .riser, .bassDrop, .snareRoll]
+                        preferred = [.acappellaBreak, .riser, .bassDrop, .filterSlam, .echoFreeze, .snareRoll]
                     } else if rollBeat != nil {
-                        preferred = [.vocalChop, .beatJuggle, .echoFreeze, .filterSlam, .stutterGate, .polyRoll, .snareRoll, .loopHalve, .riser, .bassDrop]
+                        preferred = [.bassDrop, .riser, .filterSlam, .echoFreeze, .snareRoll, .loopHalve, .polyRoll, .stutterGate]
                     } else {
-                        preferred = [.vocalChop, .beatJuggle, .echoFreeze, .filterSlam, .stutterGate, .polyRoll, .loopHalve, .riser, .bassDrop]
+                        preferred = [.bassDrop, .riser, .filterSlam, .echoFreeze, .loopHalve, .polyRoll, .stutterGate]
                     }
                     var usable = moves.contains(.gates) ? preferred
                         : preferred.filter { $0 != .stutterGate && $0 != .polyRoll && $0 != .vocalChop && $0 != .beatJuggle && $0 != .echoFreeze && $0 != .filterSlam }
-                    if vocalChopSource == nil { usable.removeAll { $0 == .vocalChop } }
-                    if !canJuggle { usable.removeAll { $0 == .beatJuggle } }
-                    if usable.isEmpty { usable = [.riser, .bassDrop, .snareRoll] }
+                    if usable.isEmpty { usable = [.bassDrop, .riser, .snareRoll] }
                     let fresh = usable.filter { !recentBuildStyles.contains($0) }
                     let varied = fresh.isEmpty ? usable.filter { $0 != recentBuildStyles.last } : fresh
                     let pool = varied.isEmpty ? usable : varied
                     let canTurntableDrop = allowTurntableDrop && !aSingsIntoDrop && !bSingsIntoDrop
-                        && (vocalOut ?? switchBar) <= switchBar - 0.5 && bEnergy >= 0.48
-                    // Rotate across signature club weapons so every drop feels
-                    // fresh and surprising (fakeouts, vocal chops, full-bass
-                    // beat juggles, RMX echo freezes, underwater filter slams,
-                    // spinbacks/brakes, poly-rolls, stutter gates).
-                    let slot = dropIndex % 5
-                    if slot == 0 && vocalChopSource != nil && !recentBuildStyles.contains(.vocalChop) {
-                        buildStyle = .vocalChop
-                    } else if slot == 1 && canJuggle && !recentBuildStyles.contains(.beatJuggle) {
-                        buildStyle = .beatJuggle
-                    } else if slot == 2 && canFakeout && !recentBuildStyles.contains(.fakeoutDrop) {
+                        && (vocalOut ?? switchBar) <= switchBar - 0.5 && bEnergy >= 0.60
+                    let slot = dropIndex % 6
+                    if slot == 2 && canFakeout && !recentBuildStyles.contains(.fakeoutDrop) {
                         buildStyle = .fakeoutDrop
-                    } else if slot == 3 && moves.contains(.gates) && !recentBuildStyles.contains(.echoFreeze) {
-                        buildStyle = .echoFreeze
-                    } else if slot == 4 && canTurntableDrop && !recentBuildStyles.contains(.spinbackDrop) && !recentBuildStyles.contains(.brakeDrop) {
-                        buildStyle = (dropIndex % 2 == 0) ? .spinbackDrop : .brakeDrop
-                    } else if vocalChopSource != nil && !recentBuildStyles.contains(.vocalChop) {
+                    } else if slot == 4 && vocalChopSource != nil && vocalChopSource?.side == .b && !recentBuildStyles.contains(.vocalChop) {
                         buildStyle = .vocalChop
-                    } else if canJuggle && !recentBuildStyles.contains(.beatJuggle) {
-                        buildStyle = .beatJuggle
-                    } else if canFakeout && !recentBuildStyles.contains(.fakeoutDrop) {
-                        buildStyle = .fakeoutDrop
-                    } else if canTurntableDrop && !recentBuildStyles.contains(.spinbackDrop) && !recentBuildStyles.contains(.brakeDrop) {
+                    } else if slot == 5 && canTurntableDrop && !recentBuildStyles.contains(.spinbackDrop) && !recentBuildStyles.contains(.brakeDrop) {
                         buildStyle = (dropIndex % 2 == 0) ? .spinbackDrop : .brakeDrop
+                    } else if slot == 3 && canJuggle && !recentBuildStyles.contains(.beatJuggle) {
+                        buildStyle = .beatJuggle
                     } else {
                         let window = min(5, pool.count)
                         buildStyle = pool[dropIndex % window]
@@ -4124,6 +4155,23 @@ enum SetBuilder {
                     }
                 }
                 var made = make(outFade: 0, inFade: 0, room: room)
+                // Acoustic hot-cut safeguard: if either realized vocal cut
+                // still lands inside hot singing (no clean breath in reach, e.g.
+                // continuous layered vocals), use a crisp musical fade into the
+                // echo / onto the beat instead of guillotining a syllable.
+                var outFade = 0.0, inFade = 0.0
+                if let exit = made.vocalExit, let vocalsA = a.stems[.vocals] {
+                    let hotOut = VocalPhrasing.cutHotness(vocalsA, offset: aOffset, at: start + exit * blendBar,
+                                                          opening: false, bar: blendBar)
+                    // (Never longer than the time A has sung in the blend:
+                    // a fade can't start before bar 0.)
+                    if hotOut > -14, exit > 0 { outFade = min(0.25, max(0.125, exit / 2), exit) }
+                }
+                if let entry = made.vocalEntry, let vocalsB = matched.stems[.vocals] {
+                    let hotIn = VocalPhrasing.cutHotness(vocalsB, offset: offset + nudge, at: start + entry * blendBar,
+                                                         opening: true, bar: blendBar)
+                    if hotIn > -12 { inFade = 0.125 }
+                }
                 var voiceStep = 0.0, underUntil: Double?
                 // The two voices met at one level where they change hands
                 // (see `TransitionBuilder.voiceStep`), judged where the
@@ -4151,9 +4199,11 @@ enum SetBuilder {
                     let lift = (exit - Double(k) / 4).rounded(.up)
                     if exit - lift >= 1 { underUntil = lift }
                 }
-                if voiceStep != 0 || underUntil != nil {
-                    made = make(outFade: 0, inFade: 0, room: room, voiceStep: voiceStep, underUntil: underUntil)
+                if voiceStep != 0 || underUntil != nil || outFade > 0 || inFade > 0 {
+                    made = make(outFade: outFade, inFade: inFade, room: room, voiceStep: voiceStep, underUntil: underUntil)
                 }
+                realizedVocalOut = made.vocalExit
+                realizedVocalIn = made.vocalEntry
                 // (The builder may have moved the exit off the cut found: then
                 // it's judged where it ended up.)
                 let onCut = vocalOutKind != nil && made.vocalExit.map { abs($0 - (vocalOut ?? .infinity)) < 1e-6 } ?? false
@@ -4222,6 +4272,13 @@ enum SetBuilder {
                     payoff.append(styleNote)
                     dropAt = start + switchBar * blendBar
                     dropDelayBars = buildStyle == .fakeoutDrop ? 1.0 : 0.0
+                    switch buildStyle {
+                    case .riser, .snareRoll, .loopHalve, .fakeoutDrop, .filterSlam:
+                        wantsAirSweep = true
+                    case .bassDrop, .acappellaBreak, .stutterGate, .polyRoll,
+                         .spinbackDrop, .brakeDrop, .vocalChop, .beatJuggle, .echoFreeze:
+                        wantsAirSweep = false
+                    }
                 }
                 if vinylBrake { payoff.append("vinyl brake") }
                 if spinback { payoff.append("spinback") }
@@ -4263,9 +4320,9 @@ enum SetBuilder {
                                      end: end, settled: settled, barSeconds: blendBar, delta: delta,
                                      entryRange: entryRange, nudge: nudge, grooveLock: align.lock, grooveLags: align.lags,
                                      drumsLayered: align.grooves, drumsLinger: align.groovesAfter, hatsLayered: hats,
-                                     vocalOut: vocalOut.map { start + $0 * blendBar },
-                                     vocalIn: vocalIn.map { start + $0 * blendBar }, payoff: payoff, dropAt: dropAt,
-                                     dropDelayBars: dropDelayBars,
+                                     vocalOut: realizedVocalOut.map { start + $0 * blendBar },
+                                     vocalIn: realizedVocalIn.map { start + $0 * blendBar }, payoff: payoff, dropAt: dropAt,
+                                     dropDelayBars: dropDelayBars, wantsAirSweep: wantsAirSweep,
                                      vocalInKind: vocalInKind, vocalOutKind: vocalOutKind,
                                      skippedBars: skippedBars,
                                      melodiesClash: keysClash, room: room, loopBars: loop,
