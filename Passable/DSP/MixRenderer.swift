@@ -55,10 +55,13 @@ final class MixSnapshot: @unchecked Sendable {
         }
     }
 
-    /// A subtle stereo air riser + drop downlifter around a drop moment, in master frames.
+    /// A stereo club air riser, 808 sub-impact boom, and crash downlifter around
+    /// a drop moment, in master frames.
     struct FrameSweep {
         let start: Int, drop: Int, end: Int, cutBeforeDrop: Int
-        /// 1.0 = subtle club air; >1.0 = festival/peak-time riser & sub-impact punch.
+        /// Frame until which peak Club PA drop punch stays active after `drop`.
+        var punchEnd: Int = 0
+        /// 1.0 = subtle club air; 1.35–1.75 = club/stadium riser & sub-impact punch.
         var intensity: Float = 1.0
     }
 
@@ -72,7 +75,7 @@ final class MixSnapshot: @unchecked Sendable {
     let delaySchedule: [(from: Int, seconds: Double)]
     /// Drop-moment air sweeps, sorted by start.
     let sweeps: [FrameSweep]
-    /// Peak-time Club PA exciter & punch (0 = bit-exact bypass in Chill/Club).
+    /// Dynamic Club PA punch engaged during blends and drop landings (0 = bypass).
     let energyPunch: Float
 
     init(lanes: [LaneData], length: Int, delaySeconds: Double, masterGain: Float,
@@ -533,7 +536,22 @@ final class MixRenderer: @unchecked Sendable {
             // Blend-only VCA bus glue: welds overlapping tracks together and
             // eases limiter pumping without touching solo playback.
             glue.process(left, right, count: n, active: isBlending)
-            exciter.process(left, right, count: n, amount: snap.energyPunch)
+            // Dynamic Club PA punch: elevates blends and slams extra hard for
+            // 4 bars after every drop landing, while returning bit-exact
+            // bypassed during normal solo playback.
+            var punchTarget: Float = 0
+            if snap.energyPunch > 1e-4 {
+                var inDropPunch = false
+                for sw in snap.sweeps where sw.punchEnd > sw.drop {
+                    if position + n > sw.drop && position < sw.punchEnd { inDropPunch = true; break }
+                }
+                if inDropPunch {
+                    punchTarget = snap.energyPunch
+                } else if isBlending {
+                    punchTarget = snap.energyPunch * 0.60
+                }
+            }
+            exciter.process(left, right, count: n, amount: punchTarget)
             var master = snap.masterGain
             vDSP_vsmul(left, 1, &master, left, 1, vDSP_Length(n))
             vDSP_vsmul(right, 1, &master, right, 1, vDSP_Length(n))

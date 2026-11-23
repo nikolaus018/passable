@@ -783,15 +783,15 @@ final class PayoffTests: XCTestCase {
         XCTAssertEqual(late.placement.entryBar % 4, 0)
     }
 
-    /// The set builder rolls into a drop only from a blend of sixteen bars:
-    /// placement doesn't plan (and simulate) one for a shorter Stem Swap.
+    /// The set builder rolls into a drop only from `SetBuilder.dropMomentBars`
+    /// (8 bars) up: placement doesn't plan (and simulate) one for a shorter Stem Swap.
     func testNoDropIsPlannedForAShortStemSwap() {
         let s = popSong()
         let song = TrackAnalysis(grid: BeatGrid(bpm: 120, firstDownbeat: 0), key: MusicalKey(tonicPitchClass: 0, isMajor: true),
                                  duration: 128, structure: s, version: TrackAnalysis.currentVersion)
         for cue in [16, 20] {
             let long = AutoPlacement.place(a: song, b: song, bars: 16, preset: .stemSwap, at: (32, cue))
-            let short = AutoPlacement.place(a: song, b: song, bars: 8, preset: .stemSwap, at: (32, cue))
+            let short = AutoPlacement.place(a: song, b: song, bars: 4, preset: .stemSwap, at: (32, cue))
             XCTAssertFalse(short.dropMoment)
             XCTAssertFalse(short.payoff.contains("roll into the drop"))
             XCTAssertEqual(long.entryBar, 32)

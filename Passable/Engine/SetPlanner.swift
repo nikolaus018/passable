@@ -335,14 +335,21 @@ struct PairPlan: Equatable {
                 }
             }
             // Full club mashup candidates (16 or 24 bars, with or without A's
-            // 4-bar groove looped underneath) when tempos and keys fit.
-            // Placement strictly verifies B's vocal presence and chord fit.
-            if allowMashup, !clash(0), MixMath.stretch(rate) < MixMath.mashupStretch {
-                options.append((.mashup, 16, length(16) + 0.25, 0))
-                if loops { options.append((.mashup, 16, length(16) + 0.25, MixMath.loopBars)) }
-                if Double(24) * barSeconds <= MixMath.maxBlendSeconds {
-                    options.append((.mashup, 24, length(24) + 0.15, 0))
-                    if loops { options.append((.mashup, 24, length(24) + 0.15, MixMath.loopBars)) }
+            // 4-bar groove looped underneath) when tempos fit. On compatible
+            // keys, B sings over A's full groove; on clashing keys with locking
+            // grooves, Drum-Bed Mashup strips A's melody so B's vocal soars
+            // clash-free over A's beat into B's drop.
+            if allowMashup, MixMath.stretch(rate) < MixMath.mashupStretch {
+                if !clash(0) {
+                    options.append((.mashup, 16, length(16) + 0.45, 0))
+                    if loops { options.append((.mashup, 16, length(16) + 0.45, MixMath.loopBars)) }
+                    if Double(24) * barSeconds <= MixMath.maxBlendSeconds {
+                        options.append((.mashup, 24, length(24) + 0.30, 0))
+                        if loops { options.append((.mashup, 24, length(24) + 0.30, MixMath.loopBars)) }
+                    }
+                } else if loops {
+                    // Drum-bed mashup over A's looped iconic beat.
+                    options.append((.mashup, 16, length(16) + 0.25, MixMath.loopBars))
                 }
             }
             // And each Stem Swap over A's beat looped (see
@@ -476,7 +483,7 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "36"
+    static let planner = "37"
     static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
 
     /// One file per version: prices of another planner are dropped with
@@ -569,11 +576,9 @@ enum SetOrdering {
     ///   rendered audio (`SetMix.Learned`) so Auto-Order avoids pairs known to
     ///   flam or clash.
     static func costMatrix(_ analyses: [TrackAnalysis], drums: [[Float]?]? = nil, remembered: Bool = false,
-                           urls: [URL]? = nil, pacing: SetPacing? = nil) -> [[Double]] {
+                           urls: [URL]? = nil) -> [[Double]] {
         let n = analyses.count
-        // (A pair is priced for the pace the set plays at, and remembered per pace.)
-        let paceTag = pacing?.rawValue ?? ""
-        let prints = remembered ? analyses.map { PairCosts.fingerprint($0) + paceTag } : []
+        let prints = remembered ? analyses.map { PairCosts.fingerprint($0) } : []
         let known = remembered ? PairCosts.load() : [:]
         let learned = urls != nil ? SetMix.Learned.load() : SetMix.Learned()
         // Every pair is independent: all cores at once.
@@ -591,19 +596,19 @@ enum SetOrdering {
                 if remembered, !hasLearned, let cost = known[prints[i] + prints[j]] { out[k] = cost; return }
                 // As the set will play it: A has the floor from about a
                 // quarter in (after its own transition in), and leaves
-                // paced for a crowd, not wherever suits this pair best.
+                // paced for a club crowd, not wherever suits this pair best.
                 let a = analyses[i], soloFrom = a.grid.barCount(duration: a.duration) / 4
                 let hits = isUnlocked ? nil : drums.flatMap { d in d[i].flatMap { x in d[j].map { (a: x, b: $0) } } }
                 // (Priced without a loop, which only ever makes a pair
                 // better, and is decided when the set is built: twice as
                 // quick, for a long set half a minute less of ordering.)
-                let solo = pacing?.soloSeconds(energy: energy(a)) ?? SetBuilder.minimumSoloSeconds
+                let solo = SetBuilder.clubSoloSeconds(energy: energy(a))
                 out[k] = PairPlan.make(a: a, b: analyses[j],
                                        entryRange: (soloFrom + SetBuilder.minimumSoloBars(a.grid, seconds: solo))...Int.max,
                                        soloFrom: soloFrom, drums: hits, clashing: isClashed, locking: isLocked,
                                        loops: false, targetSoloSeconds: solo,
-                                       hookBoost: pacing?.hookBoost ?? 1.0,
-                                       dropMinBars: pacing?.dropMinBars ?? SetBuilder.dropMomentBars).cost(a: a, b: analyses[j])
+                                       hookBoost: SetBuilder.clubHookBoost,
+                                       dropMinBars: SetBuilder.dropMomentBars).cost(a: a, b: analyses[j])
             }
         }
         if remembered {
@@ -1316,9 +1321,6 @@ struct SetMix: @unchecked Sendable {
     /// didn't bear out (see `SetBuilder.build`): carried into the next
     /// build, which then plans them right first time.
     var learned = Learned()
-    /// Pacing mode this set was built under (drives drop sweep intensity and
-    /// peak-time Club PA punch in `snapshot`).
-    var pacing: SetPacing? = nil
 
     struct Learned: Codable {
         var unlocked: Set<PairKey> = [], clashed: Set<PairKey> = [], locked: Set<PairKey> = []
@@ -1403,22 +1405,28 @@ struct SetMix: @unchecked Sendable {
             previousEnd = tr.end
         }
         let first = schedule.first?.seconds ?? 0.35
-        // Stereo air riser + club sub-impact & drop downlifter around drop moments.
-        let sweepIntensity = pacing?.sweepIntensity ?? 1.0
+        // Stereo air riser, 808 sub-impact boom, crash downlifter, and 4-bar
+        // post-drop Club PA punch around every drop moment.
         var sweeps: [MixSnapshot.FrameSweep] = []
         for tr in transitions {
             guard let dropAt = tr.dropAt, tr.edit.preset != .echoOut else { continue }
             let realDrop = dropAt + tr.dropDelayBars * tr.barSeconds
             let startF = Int(((dropAt - 2 * tr.barSeconds) * sr).rounded())
             let dropF = Int((realDrop * sr).rounded())
-            let endF = Int(((realDrop + min(2.5, 1.5 * tr.barSeconds)) * sr).rounded())
+            let endF = Int(((realDrop + min(2.6, 1.5 * tr.barSeconds)) * sr).rounded())
             let cutF = Int(((tr.dropDelayBars + 0.125) * tr.barSeconds * sr).rounded())
+            let punchEndF = Int(((realDrop + 4.0 * tr.barSeconds) * sr).rounded())
+            let isStadiumDrop = tr.edit.preset == .dropSwap || tr.edit.preset == .mashup
+                || tr.dropDelayBars > 0
+                || (tracks.indices.contains(tr.to) && SetOrdering.energy(tracks[tr.to].loaded.analysis) >= 0.62)
+            let sweepIntensity: Float = isStadiumDrop ? 1.70 : 1.35
             if startF >= 0 && dropF > startF {
-                sweeps.append(.init(start: startF, drop: dropF, end: endF, cutBeforeDrop: cutF, intensity: sweepIntensity))
+                sweeps.append(.init(start: startF, drop: dropF, end: endF, cutBeforeDrop: cutF,
+                                    punchEnd: punchEndF, intensity: sweepIntensity))
             }
         }
         return MixSnapshot(lanes: lanes, length: Int(length * sr), delaySeconds: first, masterGain: masterGain,
-                           delaySchedule: schedule, sweeps: sweeps, energyPunch: pacing?.energyPunch ?? 0)
+                           delaySchedule: schedule, sweeps: sweeps, energyPunch: 0.90)
     }
 }
 
@@ -2768,118 +2776,6 @@ enum VocalPhrasing {
     }
 }
 
-/// How quickly a set moves from song to song and how hard its builds hit.
-enum SetPacing: String, CaseIterable, Codable, Identifiable {
-    case chill = "Chill"
-    case club = "Club"
-    case hype = "Hype"
-    case rush = "Rush"
-    var id: String { rawValue }
-
-    var icon: String {
-        switch self {
-        case .chill: return "wind"
-        case .club: return "flame"
-        case .hype: return "flame.fill"
-        case .rush: return "bolt.fill"
-        }
-    }
-
-    var help: String {
-        switch self {
-        case .chill: return "Longer solo sections (~55 s) so full songs breathe"
-        case .club: return "Club pacing (~42 s, accelerating to ~32 s on peak bangers)"
-        case .hype: return "Quick-mix open-format pacing (~24 s) with 8-bar drops & tighter moves"
-        case .rush: return "Peak-time rush (~16 s hook-to-hook quick-mix, nonstop drops, vocal chops, beat juggles & club PA punch)"
-        }
-    }
-
-    func soloSeconds(energy: Double) -> Double {
-        switch self {
-        case .chill: return 55.0
-        case .club: return energy >= 0.72 ? 32.0 : 42.0
-        case .hype: return 24.0
-        case .rush: return 16.0
-        }
-    }
-
-    /// Peak-time Club PA exciter & transient punch (0 = bit-exact bypass).
-    var energyPunch: Float {
-        switch self {
-        case .chill, .club: return 0
-        case .hype: return 0.45
-        case .rush: return 1.0
-        }
-    }
-
-    /// Stereo air riser, crash downlifter, and sub-impact intensity on drops.
-    var sweepIntensity: Float {
-        switch self {
-        case .chill, .club: return 1.0
-        case .hype: return 1.45
-        case .rush: return 2.0
-        }
-    }
-
-    /// Multiplier on B's chorus/hook landing bonus during placement.
-    var hookBoost: Float {
-        switch self {
-        case .chill, .club: return 1.0
-        case .hype: return 1.5
-        case .rush: return 2.2
-        }
-    }
-
-    /// Minimum Stem Swap bars eligible for a full drop build.
-    var dropMinBars: Int {
-        switch self {
-        case .chill, .club: return SetBuilder.dropMomentBars
-        case .hype, .rush: return 8
-        }
-    }
-
-    /// Minimum transitions between showy moves.
-    var dropSpacing: Int {
-        switch self {
-        case .chill, .club: return 2
-        case .hype: return 1
-        case .rush: return 0
-        }
-    }
-
-    var fakeoutSpacing: Int {
-        switch self {
-        case .chill, .club: return 4
-        case .hype: return 3
-        case .rush: return 2
-        }
-    }
-
-    var teaseSpacing: Int {
-        switch self {
-        case .chill, .club: return 3
-        case .hype: return 2
-        case .rush: return 1
-        }
-    }
-
-    var turntableSpacing: Int {
-        switch self {
-        case .chill, .club: return 8
-        case .hype: return 5
-        case .rush: return 3
-        }
-    }
-
-    var mashupSpacing: Int {
-        switch self {
-        case .chill, .club: return 3
-        case .hype: return 2
-        case .rush: return 1
-        }
-    }
-}
-
 /// The showier moves the automatic planner may use. Turned off, a transition
 /// falls back on its plainer build; the blend itself is planned the same.
 struct AutoMoves: OptionSet, Hashable, Sendable {
@@ -2892,23 +2788,36 @@ struct AutoMoves: OptionSet, Hashable, Sendable {
     /// For the menu, in its order.
     static let named: [(name: String, move: AutoMoves)] = [
         ("Fake Drops", .fakeouts), ("Vocal Teases", .vocalTeases),
-        ("Stutters, Chops & Juggles", .gates), ("Vinyl Brakes & Spinbacks", .turntable),
+        ("Stutters, Chops, Juggles & FX", .gates), ("Vinyl Brakes & Spinbacks", .turntable),
     ]
 }
 
 /// Plans and renders a set from loaded tracks in a given order.
 enum SetBuilder {
-    /// Seconds every track gets on its own between its glide home and the
-    /// next transition, so no record is just passed through: a verse or a
-    /// hook, not a taste of one. (Eight bars, as this was, is 15 seconds of
-    /// house: with a blend on either side the song was gone before anyone
-    /// knew it.) Placement's pacing decides how much longer: as long as the
-    /// song keeps its power.
-    static let minimumSoloSeconds = 45.0
+    /// Default solo baseline (used by unit tests and placement helpers).
+    static let minimumSoloSeconds = 30.0
+
+    /// Unified adaptive club pacing: mid-energy grooves hold ~28–30 s so the
+    /// crowd locks into the groove, tightening smoothly down to ~21–24 s on
+    /// peak-time bangers so the dancefloor stays electrified with zero dead air.
+    static func clubSoloSeconds(energy: Double) -> Double {
+        max(20.0, min(32.0, 33.0 - 13.0 * energy))
+    }
+
+    /// Multiplier on B's chorus/drop hook landing bonus during placement.
+    static let clubHookBoost: Float = 1.7
+
+    /// Unified club move cadence (minimum transitions between repeats of a
+    /// signature move so the set stays explosive yet never repetitive).
+    static let dropSpacing = 1
+    static let fakeoutSpacing = 3
+    static let teaseSpacing = 2
+    static let turntableSpacing = 4
+    static let mashupSpacing = 2
 
     /// The same in bars of a song.
     static func minimumSoloBars(_ grid: BeatGrid, seconds: Double = minimumSoloSeconds) -> Int {
-        let floorBars = seconds <= 20 ? 4 : 8
+        let floorBars = seconds <= 22 ? 6 : 8
         return max(floorBars, Int((seconds / grid.barSeconds).rounded(.up)))
     }
 
@@ -2927,20 +2836,20 @@ enum SetBuilder {
         let rateA: Double, barSeconds: Double
         let shiftA: Int
         let drops: Bool
-        let lastStyle: TransitionBuilder.BuildStyle?
+        let dropSlot: Int
+        let recentStyles: [TransitionBuilder.BuildStyle]
         let vinylBrake: Bool
         let spinback: Bool
         let acapellaBridge: Bool
         let allowFakeout: Bool
         let allowTease: Bool
         let allowTurntableDrop: Bool
-        let pacing: SetPacing?
         let moves: AutoMoves
     }
 
-    /// A Stem Swap rolls into a drop only from a blend at least this long:
-    /// shorter, and there is no build for the roll to end.
-    static let dropMomentBars = 16
+    /// A Stem Swap rolls into a drop from 8 bars up so tight club blends get
+    /// full explosive drop builds too.
+    static let dropMomentBars = 8
 
     /// Bars with nobody singing over a loop that make it not worth looping.
     static let loopVoicelessBars = 1.5
@@ -2966,7 +2875,7 @@ enum SetBuilder {
     static func build(_ tracks: [(url: URL, loaded: TrackProcessor.Loaded)], edits: [PairKey: TransitionEdit] = [:],
                       reuse: [URL: TrackProcessor.Matched] = [:], previous: SetMix? = nil,
                       unlocked: Set<PairKey> = [], clashed: Set<PairKey> = [],
-                      locked: Set<PairKey> = [], pacing: SetPacing? = nil, moves: AutoMoves = .all,
+                      locked: Set<PairKey> = [], moves: AutoMoves = .all,
                       processor: TrackProcessor,
                       progress: @escaping @Sendable (String) -> Void) async throws -> SetMix {
         precondition(!tracks.isEmpty)
@@ -3008,16 +2917,13 @@ enum SetBuilder {
             // transitions out of it start no earlier, and automatic ones
             // allow it some time on its own first.
             func soloSecondsFor(_ analysis: TrackAnalysis) -> Double {
-                pacing.map { $0.soloSeconds(energy: SetOrdering.energy(analysis)) } ?? minimumSoloSeconds
+                clubSoloSeconds(energy: SetOrdering.energy(analysis))
             }
             func soloBarsFor(_ analysis: TrackAnalysis) -> Int {
                 minimumSoloBars(analysis.grid, seconds: soloSecondsFor(analysis))
             }
-            let mashupSpacing = pacing?.mashupSpacing ?? 3
-            let hookBoost = pacing?.hookBoost ?? 1.0
-            let dropMinBars = pacing?.dropMinBars ?? dropMomentBars
             var settledBar = startBar
-            var soloBars = max(pacing == .rush ? 8 : pacing == .hype ? 16 : 32, soloBarsFor(first.analysis))
+            var soloBars = max(14, soloBarsFor(first.analysis))
             let hits = BeatAlign.attacks(of: tracks.map(\.loaded))
             // Semitones each track plays shifted by.
             var shifts = [0]
@@ -3062,7 +2968,7 @@ enum SetBuilder {
                                   locking: locked.contains(key) && !unlocked.contains(key),
                                   loops: loops, allowMashup: sinceMashup >= mashupSpacing,
                                   targetSoloSeconds: soloSecondsFor(a.analysis),
-                                  hookBoost: hookBoost, dropMinBars: dropMinBars)
+                                  hookBoost: clubHookBoost, dropMinBars: dropMomentBars)
                 }
                 var plan = planned(loops: true)
                 // A's voice leaves as its beat starts to loop: where B's
@@ -3170,13 +3076,13 @@ enum SetBuilder {
                                     matched: plans[0].map.isIdentity ? nil : opener,
                                     offset: -first.analysis.grid.downbeat(startBar), envelopes: [:])]
         var shifts = [0]
-        let dropSpacing = pacing?.dropSpacing ?? 2
-        let fakeoutSpacing = pacing?.fakeoutSpacing ?? 4
-        let teaseSpacing = pacing?.teaseSpacing ?? 3
-        let turntableSpacing = pacing?.turntableSpacing ?? 8
-        let dropMinBars = pacing?.dropMinBars ?? dropMomentBars
         var sinceDrop = dropSpacing
-        var lastBuildStyle: TransitionBuilder.BuildStyle?
+        var dropIndex = 0
+        var recentBuildStyles: [TransitionBuilder.BuildStyle] = []
+        func rememberStyle(_ style: TransitionBuilder.BuildStyle) {
+            recentBuildStyles.append(style)
+            if recentBuildStyles.count > 2 { recentBuildStyles.removeFirst() }
+        }
         var cutFxIndex = 0
         var sinceFakeout = fakeoutSpacing
         var sinceTease = teaseSpacing
@@ -3235,12 +3141,14 @@ enum SetBuilder {
             let offset = start - gb.scaled(by: draft.rateB).downbeat(edit.cueBar)
             let map = plans[k].map
             let matched = try await rendition(k)
-            // A roll into the drop is a moment only if it isn't every
-            // transition: two without one in between, and only after a blend
-            // long enough to be one. A Drop Swap is built on it, but
-            // never right after another roll: two in a row is a routine.
-            let drops = !byHand && plan.placement.dropMoment && edit.preset != .echoOut
-                && (edit.preset == .dropSwap ? sinceDrop >= min(1, dropSpacing) : edit.bars >= dropMinBars && sinceDrop >= dropSpacing)
+            // High-impact club drop cadence: Drop Swaps, Mashups, and peak
+            // bangers (energy >= 0.65) can fire a drop build even back-to-back
+            // because our 14-weapon choreographer never repeats a style within
+            // 3 transitions; calmer Stem Swaps breathe by `dropSpacing` (1).
+            let bEnergy = SetOrdering.energy(b.analysis)
+            let canDropNow = edit.preset == .dropSwap || edit.preset == .mashup
+                || (edit.bars >= dropMomentBars && (sinceDrop >= dropSpacing || bEnergy >= 0.65))
+            let drops = !byHand && plan.placement.dropMoment && edit.preset != .echoOut && canDropNow
             // Rotate tempo-jump Cut flavors across eligible Cuts:
             // Vinyl Brake → Turntable Spinback → Echo Lift Cut.
             let isCut = !byHand && edit.preset == .echoOut && edit.bars <= 1
@@ -3264,10 +3172,11 @@ enum SetBuilder {
                                     rampLengthB: map.rampLength, skip: skippedBars > 0 ? draft.skip : nil, plan: plan,
                                     edit: draft.edit, isEdited: isEdited, entryRange: entryRange, rateA: draft.rateA,
                                     barSeconds: blendBar, shiftA: shifts[k - 1], drops: drops,
-                                    lastStyle: drops ? lastBuildStyle : nil, vinylBrake: vinylBrake,
+                                    dropSlot: drops ? dropIndex % 5 : -1,
+                                    recentStyles: drops ? recentBuildStyles : [], vinylBrake: vinylBrake,
                                     spinback: spinback, acapellaBridge: acapellaBridge,
                                     allowFakeout: allowFakeout, allowTease: allowTease,
-                                    allowTurntableDrop: allowTurntableDrop, pacing: pacing, moves: moves)
+                                    allowTurntableDrop: allowTurntableDrop, moves: moves)
             if let previous, let old = previous.transitions.first(where: { $0.made?.key == buildKey }), let made = old.made,
                previous.tracks.indices.contains(old.to) {
                 // Built before from exactly this: the same transition, at
@@ -3288,18 +3197,21 @@ enum SetBuilder {
                 sinceDrop = byHand ? (old.edit.rolls.contains { $0.seamless != true } ? 0 : sinceDrop + 1)
                     : drops ? 0 : sinceDrop + 1
                 if drops {
-                    if old.payoff.contains("fakeout drop") { lastBuildStyle = .fakeoutDrop; sinceFakeout = 0 }
-                    else if old.payoff.contains("spinback into the drop") { lastBuildStyle = .spinbackDrop; sinceTurntable = 0 }
-                    else if old.payoff.contains("vinyl brake into the drop") { lastBuildStyle = .brakeDrop; sinceTurntable = 0 }
-                    else if old.payoff.contains("vocal chop into the drop") { lastBuildStyle = .vocalChop }
-                    else if old.payoff.contains("beat juggle into the drop") { lastBuildStyle = .beatJuggle }
-                    else if old.payoff.contains("3/16 poly-roll into the drop") { lastBuildStyle = .polyRoll }
-                    else if old.payoff.contains("stutter gate into the drop") { lastBuildStyle = .stutterGate }
-                    else if old.payoff.contains("a cappella break into the drop") { lastBuildStyle = .acappellaBreak }
-                    else if old.payoff.contains("loop-halve into the drop") { lastBuildStyle = .loopHalve }
-                    else if old.payoff.contains("riser into the drop") { lastBuildStyle = .riser }
-                    else if old.payoff.contains("bass pull into the drop") { lastBuildStyle = .bassDrop }
-                    else if old.payoff.contains("roll into the drop") { lastBuildStyle = .snareRoll }
+                    dropIndex += 1
+                    if old.payoff.contains("fakeout drop") { rememberStyle(.fakeoutDrop); sinceFakeout = 0 }
+                    else if old.payoff.contains("spinback into the drop") { rememberStyle(.spinbackDrop); sinceTurntable = 0 }
+                    else if old.payoff.contains("vinyl brake into the drop") { rememberStyle(.brakeDrop); sinceTurntable = 0 }
+                    else if old.payoff.contains("vocal chop into the drop") { rememberStyle(.vocalChop) }
+                    else if old.payoff.contains("beat juggle into the drop") { rememberStyle(.beatJuggle) }
+                    else if old.payoff.contains("echo freeze into the drop") { rememberStyle(.echoFreeze) }
+                    else if old.payoff.contains("underwater filter slam into the drop") { rememberStyle(.filterSlam) }
+                    else if old.payoff.contains("3/16 poly-roll into the drop") { rememberStyle(.polyRoll) }
+                    else if old.payoff.contains("stutter gate into the drop") { rememberStyle(.stutterGate) }
+                    else if old.payoff.contains("a cappella break into the drop") { rememberStyle(.acappellaBreak) }
+                    else if old.payoff.contains("loop-halve into the drop") { rememberStyle(.loopHalve) }
+                    else if old.payoff.contains("riser into the drop") { rememberStyle(.riser) }
+                    else if old.payoff.contains("bass pull into the drop") { rememberStyle(.bassDrop) }
+                    else if old.payoff.contains("roll into the drop") { rememberStyle(.snareRoll) }
                 }
                 if !old.payoff.contains("fakeout drop") { sinceFakeout += 1 }
                 if !old.payoff.contains("spinback into the drop") && !old.payoff.contains("vinyl brake into the drop") {
@@ -3834,35 +3746,54 @@ enum SetBuilder {
                         } ?? false)
                     let bVocalHookAtDrop = (vocalIn ?? .infinity) <= switchBar + 0.25 && (bCounted.structure.map { sb in
                         let swBar = cueCounted + Int(switchBar.rounded())
-                        return sb.meanActivity(.vocals, bars: swBar..<(swBar + 1)) >= 0.50
-                            && sb.meanActivity(.other, bars: swBar..<(swBar + 1)) >= 0.35
-                            && sb.meanLoudness(bars: swBar..<(swBar + 1)) >= sb.referenceLoudness - 3.5
+                        return sb.meanActivity(.vocals, bars: swBar..<(swBar + 1)) >= 0.45
+                            && sb.meanActivity(.other, bars: swBar..<(swBar + 1)) >= 0.30
+                            && sb.meanLoudness(bars: swBar..<(swBar + 1)) >= sb.referenceLoudness - 3.8
                     } ?? false)
                     let canFakeout = allowFakeout && edit.bars >= 8 && switchBar + 2 <= Double(edit.bars) && bVocalHookAtDrop
-                    // Vocal-chop stutter candidate: either B's upcoming hook word
-                    // when A's vocal has already exited cleanly (`vocalOut <= switchBar - 1`),
-                    // or A's active word near `switchBar - 1`.
+                    // Vocal-chop stutter candidate: prefer B's iconic upcoming
+                    // hook word (pulling A's vocal out cleanly at a line end
+                    // before `switchBar - 1.0` if available), or chop A's own
+                    // active word near `switchBar - 1.0`.
+                    var bChopEarlyOut: (bar: Double, kind: String)?
                     if moves.contains(.gates), !keysClash, edit.bars >= 8, switchBar >= 4 {
-                        if !aSingsIntoDrop && !bSingsIntoDrop && (vocalOut ?? switchBar) <= switchBar - 1.0
-                            && (vocalIn ?? switchBar) >= switchBar - 0.125,
+                        if !bSingsIntoDrop, (vocalIn ?? switchBar) >= switchBar - 0.125,
                            let vocalsB = matched.stems[.vocals],
                            let refB = VocalPhrasing.reference(bCounted.structure) {
-                            var hookAt = max(switchBar, vocalIn ?? switchBar)
-                            if let words = bCounted.structure?.wordSpans, words.count >= 2 {
-                                let slots = Double(VocalPhrasing.slots)
-                                let baseSlot = (Double(cueCounted) + hookAt) * slots
-                                for i in stride(from: 0, to: words.count - 1, by: 2) where words[i] >= baseSlot - 2 && words[i] <= baseSlot + 16 {
-                                    hookAt = max(switchBar, words[i] / slots - Double(cueCounted))
-                                    break
+                            var aClear = !aSingsIntoDrop && (vocalOut ?? switchBar) <= switchBar - 1.0
+                            if !aClear && loop == 0, let vocalsA = a.stems[.vocals],
+                               let refA = VocalPhrasing.reference(a.loaded.analysis.structure) {
+                                // Check if A has a clean line/word end between s-2 and s-1
+                                // so B's upcoming hook word can stutter solo in s-1..s!
+                                if let earlyCut = VocalPhrasing.cut(vocalsA, offset: aOffset, reference: refA, opening: false,
+                                                                    target: start + (switchBar - 1.0) * blendBar,
+                                                                    earliest: start + max(0, switchBar - 2.0) * blendBar,
+                                                                    latest: start + (switchBar - 1.0) * blendBar,
+                                                                    bar: blendBar, lines: linesA(start + (switchBar - 1.0) * blendBar)),
+                                   earlyCut.kind == .line || earlyCut.kind == .word {
+                                    bChopEarlyOut = ((earlyCut.time - start) / blendBar, earlyCut.kind.rawValue)
+                                    aClear = true
                                 }
                             }
-                            if VocalPhrasing.sounding(vocalsB, offset: offset + nudge, reference: refB,
-                                                      at: start + hookAt * blendBar, beat: 0.5 * blendBar) {
-                                vocalChopSource = (side: .b, anchor: hookAt)
+                            if aClear {
+                                var hookAt = max(switchBar, vocalIn ?? switchBar)
+                                if let words = bCounted.structure?.wordSpans, words.count >= 2 {
+                                    let slots = Double(VocalPhrasing.slots)
+                                    let baseSlot = (Double(cueCounted) + hookAt) * slots
+                                    for i in stride(from: 0, to: words.count - 1, by: 2) where words[i] >= baseSlot - 2 && words[i] <= baseSlot + 16 {
+                                        hookAt = max(switchBar, words[i] / slots - Double(cueCounted))
+                                        break
+                                    }
+                                }
+                                if VocalPhrasing.sounding(vocalsB, offset: offset + nudge, reference: refB,
+                                                          at: start + hookAt * blendBar, beat: 0.5 * blendBar) {
+                                    vocalChopSource = (side: .b, anchor: hookAt)
+                                }
                             }
-                        } else if !bSingsIntoDrop, loop == 0, (vocalOut ?? switchBar) >= switchBar - 0.25,
-                                  let vocalsA = a.stems[.vocals],
-                                  let refA = VocalPhrasing.reference(a.loaded.analysis.structure) {
+                        }
+                        if vocalChopSource == nil, !bSingsIntoDrop, loop == 0, (vocalOut ?? switchBar) >= switchBar - 0.5,
+                           let vocalsA = a.stems[.vocals],
+                           let refA = VocalPhrasing.reference(a.loaded.analysis.structure) {
                             var wordAt = switchBar - 1.0
                             if let words = a.loaded.analysis.structure?.wordSpans, words.count >= 2 {
                                 let slots = Double(VocalPhrasing.slots)
@@ -3880,47 +3811,59 @@ enum SetBuilder {
                     }
                     let canJuggle = moves.contains(.gates) && align.grooves && !keysClash && edit.bars >= 8
                         && switchBar >= 4 && !aSingsIntoDrop && !bSingsIntoDrop
-                    let isPeakMode = pacing == .rush || pacing == .hype
                     let preferred: [TransitionBuilder.BuildStyle]
                     if aSingsIntoDrop || bSingsIntoDrop {
-                        preferred = (isPeakMode && vocalChopSource != nil)
-                            ? [.vocalChop, .acappellaBreak, .riser, .bassDrop, .snareRoll]
-                            : [.acappellaBreak, .vocalChop, .riser, .bassDrop, .snareRoll]
-                    } else if isPeakMode {
-                        // Peak-time Rush/Hype weapon rotation: maximum dopamine,
-                        // prioritizing vocal chops, beat juggles, stutter gates,
-                        // poly-rolls, loop-halving, and crisp snare rolls.
-                        preferred = [.vocalChop, .beatJuggle, .stutterGate, .polyRoll, .loopHalve, .snareRoll, .riser, .bassDrop]
+                        preferred = [.vocalChop, .echoFreeze, .filterSlam, .acappellaBreak, .riser, .bassDrop, .snareRoll]
                     } else if rollBeat != nil {
-                        let highEnergy = SetOrdering.energy(b.analysis) >= 0.65
-                        preferred = highEnergy ? [.snareRoll, .vocalChop, .beatJuggle, .stutterGate, .polyRoll, .loopHalve, .riser, .bassDrop]
-                                               : [.bassDrop, .riser, .polyRoll, .stutterGate, .vocalChop, .loopHalve, .snareRoll]
+                        preferred = [.vocalChop, .beatJuggle, .echoFreeze, .filterSlam, .stutterGate, .polyRoll, .snareRoll, .loopHalve, .riser, .bassDrop]
                     } else {
-                        preferred = [.riser, .vocalChop, .beatJuggle, .stutterGate, .polyRoll, .bassDrop, .loopHalve]
+                        preferred = [.vocalChop, .beatJuggle, .echoFreeze, .filterSlam, .stutterGate, .polyRoll, .loopHalve, .riser, .bassDrop]
                     }
                     var usable = moves.contains(.gates) ? preferred
-                        : preferred.filter { $0 != .stutterGate && $0 != .polyRoll && $0 != .vocalChop && $0 != .beatJuggle }
+                        : preferred.filter { $0 != .stutterGate && $0 != .polyRoll && $0 != .vocalChop && $0 != .beatJuggle && $0 != .echoFreeze && $0 != .filterSlam }
                     if vocalChopSource == nil { usable.removeAll { $0 == .vocalChop } }
                     if !canJuggle { usable.removeAll { $0 == .beatJuggle } }
                     if usable.isEmpty { usable = [.riser, .bassDrop, .snareRoll] }
-                    let varied = usable.filter { $0 != lastBuildStyle }
+                    let fresh = usable.filter { !recentBuildStyles.contains($0) }
+                    let varied = fresh.isEmpty ? usable.filter { $0 != recentBuildStyles.last } : fresh
                     let pool = varied.isEmpty ? usable : varied
                     let canTurntableDrop = allowTurntableDrop && !aSingsIntoDrop && !bSingsIntoDrop
-                        && (vocalOut ?? switchBar) <= switchBar - 0.5
-                        && SetOrdering.energy(b.analysis) >= (pacing == .rush ? 0.45 : 0.58)
-                    if canFakeout && lastBuildStyle != .fakeoutDrop {
-                        buildStyle = .fakeoutDrop
-                    } else if isPeakMode, vocalChopSource != nil, lastBuildStyle != .vocalChop, k % 3 == 0 {
+                        && (vocalOut ?? switchBar) <= switchBar - 0.5 && bEnergy >= 0.48
+                    // Rotate across signature club weapons so every drop feels
+                    // fresh and surprising (fakeouts, vocal chops, full-bass
+                    // beat juggles, RMX echo freezes, underwater filter slams,
+                    // spinbacks/brakes, poly-rolls, stutter gates).
+                    let slot = dropIndex % 5
+                    if slot == 0 && vocalChopSource != nil && !recentBuildStyles.contains(.vocalChop) {
                         buildStyle = .vocalChop
-                    } else if isPeakMode, canJuggle, lastBuildStyle != .beatJuggle, k % 3 == 1 {
+                    } else if slot == 1 && canJuggle && !recentBuildStyles.contains(.beatJuggle) {
                         buildStyle = .beatJuggle
-                    } else if canTurntableDrop && lastBuildStyle != .spinbackDrop && lastBuildStyle != .brakeDrop {
-                        buildStyle = (k % 2 == 0) ? .spinbackDrop : .brakeDrop
+                    } else if slot == 2 && canFakeout && !recentBuildStyles.contains(.fakeoutDrop) {
+                        buildStyle = .fakeoutDrop
+                    } else if slot == 3 && moves.contains(.gates) && !recentBuildStyles.contains(.echoFreeze) {
+                        buildStyle = .echoFreeze
+                    } else if slot == 4 && canTurntableDrop && !recentBuildStyles.contains(.spinbackDrop) && !recentBuildStyles.contains(.brakeDrop) {
+                        buildStyle = (dropIndex % 2 == 0) ? .spinbackDrop : .brakeDrop
+                    } else if vocalChopSource != nil && !recentBuildStyles.contains(.vocalChop) {
+                        buildStyle = .vocalChop
+                    } else if canJuggle && !recentBuildStyles.contains(.beatJuggle) {
+                        buildStyle = .beatJuggle
+                    } else if canFakeout && !recentBuildStyles.contains(.fakeoutDrop) {
+                        buildStyle = .fakeoutDrop
+                    } else if canTurntableDrop && !recentBuildStyles.contains(.spinbackDrop) && !recentBuildStyles.contains(.brakeDrop) {
+                        buildStyle = (dropIndex % 2 == 0) ? .spinbackDrop : .brakeDrop
                     } else {
-                        let window = isPeakMode ? min(4, pool.count) : min(3, pool.count)
-                        buildStyle = pool[k % window]
+                        let window = min(5, pool.count)
+                        buildStyle = pool[dropIndex % window]
                     }
-                    lastBuildStyle = buildStyle
+                    dropIndex += 1
+                    // If we chose a B-hook vocal chop using an earlier clean line
+                    // end in A, apply that exit now so A exits cleanly before B stutters.
+                    if buildStyle == .vocalChop, vocalChopSource?.side == .b, let early = bChopEarlyOut {
+                        vocalOut = early.bar
+                        vocalOutKind = early.kind
+                    }
+                    rememberStyle(buildStyle)
                 }
                 sinceFakeout = (dropMoment && buildStyle == .fakeoutDrop) ? 0 : sinceFakeout + 1
                 sinceTurntable = (dropMoment && (buildStyle == .spinbackDrop || buildStyle == .brakeDrop)) ? 0 : sinceTurntable + 1
@@ -4273,6 +4216,8 @@ enum SetBuilder {
                     case .brakeDrop: styleNote = "vinyl brake into the drop"
                     case .vocalChop: styleNote = "vocal chop into the drop"
                     case .beatJuggle: styleNote = "beat juggle into the drop"
+                    case .echoFreeze: styleNote = "echo freeze into the drop"
+                    case .filterSlam: styleNote = "underwater filter slam into the drop"
                     }
                     payoff.append(styleNote)
                     dropAt = start + switchBar * blendBar
@@ -4340,7 +4285,7 @@ enum SetBuilder {
                                    previous: SetMix(tracks: planned, transitions: transitions, length: 0,
                                                     learned: .init(unlocked: unlocked, clashed: clashed, locked: locked)),
                                    unlocked: unlocked.union(broken), clashed: clashed.union(clashing),
-                                   locked: locked.union(locking), pacing: pacing, moves: moves,
+                                   locked: locked.union(locking), moves: moves,
                                    processor: processor, progress: progress)
         }
 
@@ -4361,7 +4306,7 @@ enum SetBuilder {
         }
         let learned = SetMix.Learned(unlocked: unlocked, clashed: clashed, locked: locked)
         SetMix.Learned.remember(learned)
-        return SetMix(tracks: planned, transitions: transitions, length: end + 1, learned: learned, pacing: pacing)
+        return SetMix(tracks: planned, transitions: transitions, length: end + 1, learned: learned)
     }
 
     /// Snaps hard volume switches on drums, bass, and melody cleanly ahead of

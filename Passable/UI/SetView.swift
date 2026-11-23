@@ -81,24 +81,6 @@ struct SetView: View {
             .disabled(set.exportProgress != nil)
             .help("Save the set with its songs as one .passable file, or open one")
             Menu {
-                ForEach(SetPacing.allCases) { p in
-                    Button {
-                        set.pacing = p
-                    } label: {
-                        if set.pacing == p {
-                            Label(p.rawValue, systemImage: "checkmark")
-                        } else {
-                            Text(p.rawValue)
-                        }
-                    }
-                }
-            } label: {
-                Label(set.pacing.rawValue, systemImage: set.pacing.icon)
-            }
-            .menuStyle(.borderedButton)
-            .fixedSize()
-            .help(set.pacing.help)
-            Menu {
                 ForEach(AutoMoves.named, id: \.name) { item in
                     Toggle(item.name, isOn: Binding(
                         get: { set.moves.contains(item.move) },

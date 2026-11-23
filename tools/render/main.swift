@@ -250,8 +250,7 @@ if ordered {
     let t0 = Date()
     let hits = BeatAlign.attacks(of: tracks.map(\.loaded))
     let t1 = Date()
-    let pace = ProcessInfo.processInfo.environment["PASSABLE_PACING"].flatMap { SetPacing(rawValue: $0) }
-    let costs = SetOrdering.costMatrix(analyses, drums: hits, remembered: true, urls: tracks.map(\.url), pacing: pace)
+    let costs = SetOrdering.costMatrix(analyses, drums: hits, remembered: true, urls: tracks.map(\.url))
     let t2 = Date()
     let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
     let shakes = CommandLine.arguments.firstIndex(of: "--shakes").map { Int(CommandLine.arguments[$0 + 1])! }
@@ -366,8 +365,7 @@ if CommandLine.arguments.contains("--word-times") {
 let built = Date()
 // (PASSABLE_MOVES: which automatic moves are allowed, as `AutoMoves` bits.)
 let allowedMoves = ProcessInfo.processInfo.environment["PASSABLE_MOVES"].flatMap(Int.init).map(AutoMoves.init(rawValue:)) ?? .all
-let buildPace = ProcessInfo.processInfo.environment["PASSABLE_PACING"].flatMap { SetPacing(rawValue: $0) }
-let mix = try await SetBuilder.build(tracks, pacing: buildPace, moves: allowedMoves, processor: processor) { _ in }
+let mix = try await SetBuilder.build(tracks, moves: allowedMoves, processor: processor) { _ in }
 print("built in \(seconds(built))")
 
 try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)

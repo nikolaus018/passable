@@ -149,8 +149,8 @@ struct PingPongDelay {
         let hpCoef: Float, lpCoef: Float
 
         init(sampleRate: Double) {
-            hpCoef = Float(exp(-2 * Double.pi * 350 / sampleRate))
-            lpCoef = Float(exp(-2 * Double.pi * 5_000 / sampleRate))
+            hpCoef = Float(exp(-2 * Double.pi * 320 / sampleRate))
+            lpCoef = Float(exp(-2 * Double.pi * 5_800 / sampleRate))
         }
 
         init(hpCoef: Float, lpCoef: Float) {
@@ -176,7 +176,7 @@ struct PingPongDelay {
     private let delaySlew: Float
     private var modPhase: Float = 0
     private let modStep: Float
-    var feedback: Float = 0.55
+    var feedback: Float = 0.58
 
     init(sampleRate: Double, maxSeconds: Double = 4) {
         let size = Int(sampleRate * maxSeconds)
@@ -505,28 +505,28 @@ struct AirSweep {
         let boomAttack = max(1, Int(0.004 * sampleRate))
 
         // Mid-block filter parameters (updated once per 64-sample block = smooth).
-        let intensity = max(0.5, min(2.5, sw.intensity))
+        let intensity = max(0.5, min(2.2, sw.intensity))
         let midP = position + count / 2
         let freq: Double
         let k: Float
         if midP < sw.drop {
             let u = max(0.0, min(1.0, Double(midP - sw.start) / Double(riserSpan)))
-            let topFreq = 5_500.0 + 1_800.0 * Double(max(0, intensity - 1))
-            freq = 480.0 * pow(topFreq / 480.0, u * u) // 480 Hz → 5.5–7.3 kHz
-            let q = 1.6 + 0.65 * Double(max(0, intensity - 1))
+            let topFreq = 6_200.0 + 2_200.0 * Double(max(0, intensity - 1))
+            freq = 420.0 * pow(topFreq / 420.0, u * u) // 420 Hz → 6.2–8.4 kHz
+            let q = 1.55 + 1.15 * u + 0.35 * Double(max(0, intensity - 1))
             k = Float(1.0 / q)
         } else {
             let v = max(0.0, min(1.0, Double(midP - sw.drop) / Double(downSpan)))
-            freq = 4_200.0 * pow(300.0 / 4_200.0, pow(v, 0.7)) // 4.2 kHz → 300 Hz
-            k = Float(1.0 / 1.15)
+            freq = 6_400.0 * pow(240.0 / 6_400.0, pow(v, 0.65)) // 6.4 kHz → 240 Hz wide crash
+            k = Float(1.0 / 1.1)
         }
         let g = Float(tan(Double.pi * min(freq, sampleRate * 0.42) / sampleRate))
         let a1 = 1 / (1 + g * (g + k))
         let a2 = g * a1
         let a3 = g * a2
-        let boomSpanDyn = max(boomSpan, Int((0.20 + 0.06 * Double(max(0, intensity - 1))) * sampleRate))
-        let boomTopHz = 78.0 + 18.0 * Double(max(0, intensity - 1))
-        let boomAmp = 0.11 * Double(min(1.85, intensity))
+        let boomSpanDyn = max(boomSpan, Int((0.23 + 0.05 * Double(max(0, intensity - 1))) * sampleRate))
+        let boomTopHz = 88.0 + 14.0 * Double(max(0, intensity - 1))
+        let boomAmp = 0.145 * Double(min(1.65, intensity))
 
         var z1L = s1L, z2L = s2L, z1R = s1R, z2R = s2R
         var wrote = false
@@ -535,7 +535,7 @@ struct AirSweep {
             var env: Float = 0
             if p >= sw.start && p < riserEnd {
                 let u = Float(p - sw.start) / Float(riserSpan)
-                env = 0.075 * intensity * u * u
+                env = 0.088 * intensity * u * u
                 let rem = riserEnd - p
                 if rem < cutFade {
                     let fu = Float(rem) / Float(cutFade)
@@ -544,20 +544,20 @@ struct AirSweep {
             } else if p >= sw.drop && p < sw.end {
                 let v = Float(p - sw.drop) / Float(downSpan)
                 let omv = 1 - v
-                env = 0.068 * intensity * omv * omv
+                env = 0.082 * intensity * omv * omv
                 let elapsed = p - sw.drop
                 if elapsed < attackFade {
                     env *= Float(elapsed) / Float(attackFade)
                 }
-                // Club sub-impact thump (78–96 Hz → 34 Hz over 200–260 ms)
-                // right on beat 1 of the drop for chest-felt sound-system weight.
+                // Chest-felt club 808 sub-impact thump (88–102 Hz → 32 Hz over
+                // 230–280 ms) right on beat 1 of the drop.
                 if elapsed < boomSpanDyn {
                     let tSec = Double(elapsed) / sampleRate
                     let dur = Double(boomSpanDyn) / sampleRate
-                    let spanHz = boomTopHz - 34.0
+                    let spanHz = boomTopHz - 32.0
                     let u = tSec / dur
                     let omu = 1.0 - u
-                    let phase = 2.0 * Double.pi * (34.0 * tSec + spanHz * dur * (1.0 - omu * omu * omu) / 3.0)
+                    let phase = 2.0 * Double.pi * (32.0 * tSec + spanHz * dur * (1.0 - omu * omu * omu) / 3.0)
                     var bEnv = Float(boomAmp * omu * omu)
                     if elapsed < boomAttack {
                         let fa = Float(elapsed) / Float(boomAttack)
@@ -588,8 +588,9 @@ struct AirSweep {
 
             dryL[i] += outL
             dryR[i] += outR
-            revL[i] += outL * 0.35
-            revR[i] += outR * 0.35
+            let revSend: Float = p >= sw.drop ? 0.42 : 0.35
+            revL[i] += outL * revSend
+            revR[i] += outR * revSend
         }
         s1L = abs(z1L) < 1e-20 ? 0 : z1L
         s2L = abs(z2L) < 1e-20 ? 0 : z2L
@@ -599,48 +600,83 @@ struct AirSweep {
     }
 }
 
-/// Peak-time Club PA Exciter & Transient Punch: adds chest-felt 110 Hz kick
-/// lift, crisp 8.5 kHz air sheen, and warm parallel harmonic density in Hype
-/// and Rush modes while staying bit-exact bypassed (`amount == 0`) in Chill/Club.
-/// Zero allocations, audio-thread safe.
+/// Dynamic Club PA Exciter & Drop Punch: adds chest-felt 105 Hz kick lift,
+/// silky 9 kHz club air sheen, and warm parallel harmonic density during
+/// transitions and drop landings, while smoothly easing back to bit-exact
+/// bypass (`amount == 0`) during solo playback. Zero allocations, audio-thread safe.
 struct ClubExciter {
     private let sampleRate: Double
+    private let attackCoef: Float
+    private let releaseCoef: Float
     private var lowShelf = Biquad()
     private var highShelf = Biquad()
-    private var configuredAmount: Float = -1
+    private var blend: Float = 0
 
     init(sampleRate: Double) {
         self.sampleRate = sampleRate
+        attackCoef = Float(exp(-1.0 / (0.015 * sampleRate)))
+        releaseCoef = Float(exp(-1.0 / (0.180 * sampleRate)))
+        lowShelf.set(.lowShelf(frequency: 105, gainDB: 1.9), sampleRate: sampleRate)
+        highShelf.set(.highShelf(frequency: 9_000, gainDB: 1.6), sampleRate: sampleRate)
     }
 
     mutating func reset() {
         lowShelf.reset()
         highShelf.reset()
-        configuredAmount = -1
+        blend = 0
     }
 
     mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>,
                           count: Int, amount: Float) {
-        let amt = max(0, min(1, amount))
-        guard amt > 1e-4, count > 0 else { return }
-        if abs(amt - configuredAmount) > 1e-3 {
-            lowShelf.set(.lowShelf(frequency: 110, gainDB: Double(2.1 * amt)), sampleRate: sampleRate)
-            highShelf.set(.highShelf(frequency: 8_500, gainDB: Double(1.7 * amt)), sampleRate: sampleRate)
-            configuredAmount = amt
+        let target = max(0, min(1, amount))
+        guard blend > 1e-4 || target > 1e-4, count > 0 else { return }
+        let coef = target > blend ? attackCoef : releaseCoef
+        var cur = blend
+        // Process wet parallel club PA signal smoothly mixed by `cur` on a
+        // fixed stack buffer (zero heap allocations) so transitions into and
+        // out of solo playback are click-free and bit-exact when `blend == 0`.
+        var offset = 0
+        var bufL = (Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0),
+                    Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0),
+                    Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0),
+                    Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0),
+                    Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0),
+                    Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0),
+                    Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0),
+                    Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0), Float(0))
+        var bufR = bufL
+        while offset < count {
+            let chunk = min(64, count - offset)
+            withUnsafeMutableBytes(of: &bufL) { rawL in
+                withUnsafeMutableBytes(of: &bufR) { rawR in
+                    let wl = rawL.bindMemory(to: Float.self).baseAddress!
+                    let wr = rawR.bindMemory(to: Float.self).baseAddress!
+                    for i in 0..<chunk {
+                        wl[i] = left[offset + i]
+                        wr[i] = right[offset + i]
+                    }
+                    lowShelf.process(wl, wr, count: chunk)
+                    highShelf.process(wl, wr, count: chunk)
+                    for i in 0..<chunk {
+                        cur = target + coef * (cur - target)
+                        let dl = left[offset + i], dr = right[offset + i]
+                        let xl = wl[i], xr = wr[i]
+                        // Warm analog harmonic density on the wet club bus.
+                        let sl = xl * 1.48 / (1 + 0.48 * abs(xl))
+                        let sr = xr * 1.48 / (1 + 0.48 * abs(xr))
+                        let punchL = (0.72 * xl + 0.28 * sl) * 0.90
+                        let punchR = (0.72 * xr + 0.28 * sr) * 0.90
+                        left[offset + i] = dl + cur * (punchL - dl)
+                        right[offset + i] = dr + cur * (punchR - dr)
+                    }
+                }
+            }
+            offset += chunk
         }
-        lowShelf.process(left, right, count: count)
-        highShelf.process(left, right, count: count)
-        // Warm parallel harmonic density + crisp loudness excitement before the limiter.
-        let drive: Float = 0.55 * amt
-        let wet: Float = 0.28 * amt
-        let dry: Float = 1 - wet
-        let trim: Float = 1 / (1 + 0.14 * amt)
-        for i in 0..<count {
-            let l = left[i], r = right[i]
-            let sl = l * (1 + drive) / (1 + drive * abs(l))
-            let sr = r * (1 + drive) / (1 + drive * abs(r))
-            left[i] = (dry * l + wet * sl) * trim
-            right[i] = (dry * r + wet * sr) * trim
+        blend = cur < 1e-4 && target == 0 ? 0 : cur
+        if blend == 0 {
+            lowShelf.reset()
+            highShelf.reset()
         }
     }
 }

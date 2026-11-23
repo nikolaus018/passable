@@ -157,9 +157,9 @@ final class ChoreographyProbe: XCTestCase {
         let from = echo ? -Double(min(n, 8)) - 2 : -2.0
         let to = Double(n) + 6
         // Sample between grid lines; skip the intentional 18 ms low-end
-        // crossfade window right before a downbeat (`t` in `[b - lead - lowRamp, b - lead]`).
+        // crossfade window right before a beat boundary (`t` in `[b - lead - lowRamp, b - lead]`).
         func inLowCrossfade(_ time: Double) -> Bool {
-            let nextBeat = (time + lead + lowRamp).rounded(.down)
+            let nextBeat = ((time + lead + lowRamp) * 4).rounded(.down) / 4
             let lo = nextBeat - lead - lowRamp - 0.002
             let hi = nextBeat - lead + 0.002
             return time >= lo && time <= hi
@@ -210,7 +210,8 @@ final class ChoreographyProbe: XCTestCase {
             // lows for 1 bar, and fakeoutDrop holds a 1.5-bar tension drop).
             let maxLowGap: Double = switch buildStyle {
             case .fakeoutDrop: 1.6
-            case .acappellaBreak, .loopHalve, .stutterGate, .polyRoll, .vocalChop, .beatJuggle: 1.1
+            case .acappellaBreak, .loopHalve, .stutterGate, .polyRoll, .vocalChop, .beatJuggle, .echoFreeze: 1.1
+            case .filterSlam: 0.6
             default: 0.5
             }
             let maxDrumsGap: Double = switch buildStyle {

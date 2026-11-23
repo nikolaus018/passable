@@ -175,9 +175,17 @@ struct TransitionBuilder {
         /// word/syllable (A's last word or B's upcoming hook) at 1/4 → 1/8 →
         /// 1/16 → 1/32 through a rising HPF + ping-pong delay into B's drop.
         case vocalChop
-        /// Back-and-forth beat juggle: trades bars/beats between A and B over
-        /// the final 2 bars into a snare acceleration and B's full drop slam.
+        /// Back-and-forth beat juggle: trades full-bass bars/beats between A
+        /// and B over the final 2 bars into a snare acceleration and B's drop.
         case beatJuggle
+        /// Pioneer RMX-1000 spiral echo freeze: floods A into ping-pong delay
+        /// and cathedral reverb then cuts dry A half a bar early so only the
+        /// spiraling stereo tail hangs in the air before B's drop slams in.
+        case echoFreeze
+        /// Underwater submarine low-pass slam: dives the mix down into a
+        /// resonant ~330 Hz low-pass for 1.5 bars, breathes for half a beat,
+        /// then snaps wide open on beat 1 of B's drop.
+        case filterSlam
     }
 
     /// Style of build-up for `dropMoment` (default `.snareRoll`).
@@ -367,7 +375,7 @@ struct TransitionBuilder {
         guard preset == .stemSwap else { return sw }
         let n = Double(bars), q = n / 4
         if mashup { return min(sw, max(q, n - 2)) }
-        if carry { return max(0, q - 1) }
+        if carry { return q }
         if bars < 8 { return min(sw, max(q, n - 2)) }
         return min(max(sw, q + 2), max(q + 2, 2 * q))
     }
@@ -402,20 +410,20 @@ struct TransitionBuilder {
                           anchor: start + tease.from * barSeconds,
                           length: dur * barSeconds))
         automate(.b, .vocals, .volume, [
-            (tease.at, 0, .sCurve), (tease.at + 0.03, 0.85, .linear),
-            (tease.at + dur - 0.04, 0.85, .sCurve), (tease.at + dur, 0, .linear),
+            (tease.at, 0, .sCurve), (tease.at + 0.03, 0.90, .linear),
+            (tease.at + dur - 0.04, 0.90, .sCurve), (tease.at + dur, 0, .linear),
         ])
         automate(.b, .vocals, .filter, [
-            (tease.at - 0.05, 0.74, .linear), (tease.at + dur + 0.05, 0.74, .sCurve),
+            (tease.at - 0.05, 0.72, .linear), (tease.at + dur + 0.05, 0.72, .sCurve),
             (tease.at + dur + 0.25, 0.5, .linear),
         ])
         automate(.b, .vocals, .delay, [
-            (tease.at, 0, .sCurve), (tease.at + 0.04, 0.72, .linear),
-            (tease.at + dur, 0.72, .sCurve), (tease.at + dur + 0.5, 0, .linear),
+            (tease.at, 0, .sCurve), (tease.at + 0.04, 0.80, .linear),
+            (tease.at + dur, 0.80, .sCurve), (tease.at + dur + 0.5, 0, .linear),
         ])
         automate(.b, .vocals, .reverb, [
-            (tease.at, 0, .sCurve), (tease.at + 0.04, 0.48, .linear),
-            (tease.at + dur, 0.48, .sCurve), (tease.at + dur + 0.5, 0, .linear),
+            (tease.at, 0, .sCurve), (tease.at + 0.04, 0.52, .linear),
+            (tease.at + dur, 0.52, .sCurve), (tease.at + dur + 0.5, 0, .linear),
         ])
     }
 
@@ -868,15 +876,17 @@ struct TransitionBuilder {
             silences.append((.b, .bass, s - 0.125, s + 1))
 
         case .stutterGate:
-            // James Hype style rhythmic fader-chop build: syncopated 1/8th and
-            // 1/16th rhythmic gates across the final bar with a resonant HPF
-            // sweep and delay throw into B's full drop on `s`.
-            automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.86, .hold), (s, 0.5, .linear)])
-            automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.84, .hold), (s, 0.5, .linear)])
-            automate(.a, .drums, .delay, [(s - 1, 0, .sCurve), (s - 0.375, 0.52, .linear), (s - 0.125, 0, .linear)])
+            // James Hype style accelerating rhythmic fader-chop / trance-gate:
+            // syncopated 1/8th → 1/16th rhythmic gates across the final 1.25
+            // bars with a resonant HPF sweep and wide stereo ping-pong delay
+            // catching every chopped transient before B's full drop on `s`.
+            automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.87, .hold), (s, 0.5, .linear)])
+            automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.85, .hold), (s, 0.5, .linear)])
+            automate(.a, .drums, .delay, [(s - 1.25, 0, .sCurve), (s - 0.75, 0.58, .linear),
+                                          (s - 0.25, 0.62, .linear), (s - 0.125, 0, .linear)])
             silences.append((.a, .bass, s - 1, s))
             silences.append((.b, .drums, s - 1, s))
-            for (f, t) in [(s - 0.875, s - 0.75), (s - 0.625, s - 0.5),
+            for (f, t) in [(s - 1.125, s - 1.0), (s - 0.875, s - 0.75), (s - 0.625, s - 0.5),
                            (s - 0.375, s - 0.3125), (s - 0.25, s - 0.1875), (s - 0.125, s)] {
                 silences.append((.a, .drums, f, t))
                 // On clashing keys, A's melody is already low-passing and fading
@@ -944,35 +954,35 @@ struct TransitionBuilder {
             let useB = vocalChop?.side == .b && (vocalExit ?? s) <= s - 1.0 && (vocalEntry ?? s) >= s - 0.125
             let side: DeckSide = useB ? .b : .a
             let anchor = useB ? (vocalChop?.anchor ?? s) : (vocalChop?.anchor ?? (s - 1))
-            automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.87, .hold), (s, 0.5, .linear)])
-            automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.85, .hold), (s, 0.5, .linear)])
-            for (from, to, length) in [(s - 1, s - 0.5, 0.25), (s - 0.5, s - 0.25, 0.125),
-                                       (s - 0.25, s - 0.125, 0.0625)] {
+            automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.88, .hold), (s, 0.5, .linear)])
+            automate(.a, .other, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.86, .hold), (s, 0.5, .linear)])
+            for (from, to, length) in [(s - 1.0, s - 0.5, 0.25), (s - 0.5, s - 0.375, 0.125),
+                                       (s - 0.375, s - 0.25, 0.0625), (s - 0.25, s - 0.125, 0.03125)] {
                 rolls.append(Roll(side: side, stem: .vocals,
                                   start: start + from * barSeconds, end: start + to * barSeconds,
                                   anchor: start + anchor * barSeconds, length: length * barSeconds))
             }
             if useB {
                 automate(.b, .vocals, .volume, [
-                    (s - 1.0, 0, .sCurve), (s - 0.96, 0.92, .linear),
-                    (s - 0.145, 0.92, .sCurve), (s - 0.125, 0, .linear),
+                    (s - 1.0, 0, .sCurve), (s - 0.96, 0.98, .linear),
+                    (s - 0.145, 0.98, .sCurve), (s - 0.125, 0, .linear),
                 ])
                 automate(.b, .vocals, .filter, [
-                    (s - 1.02, 0.62, .exponential), (s - 0.125, 0.82, .hold), (s - 0.06, 0.5, .linear),
+                    (s - 1.02, 0.56, .exponential), (s - 0.125, 0.80, .hold), (s - 0.06, 0.5, .linear),
                 ])
                 automate(.b, .vocals, .delay, [
-                    (s - 1.0, 0, .sCurve), (s - 0.5, 0.70, .linear),
-                    (s - 0.125, 0.70, .sCurve), (s - 0.04, 0, .linear),
+                    (s - 1.0, 0, .sCurve), (s - 0.5, 0.78, .linear),
+                    (s - 0.125, 0.78, .sCurve), (s - 0.04, 0, .linear),
                 ])
                 automate(.b, .vocals, .reverb, [
-                    (s - 1.0, 0, .sCurve), (s - 0.25, 0.52, .linear), (s - 0.06, 0, .linear),
+                    (s - 1.0, 0, .sCurve), (s - 0.25, 0.56, .linear), (s - 0.06, 0, .linear),
                 ])
             } else {
                 automate(.a, .vocals, .filter, [
-                    (s - 1.0, 0.5, .exponential), (s - 0.125, 0.80, .hold), (s, 0.5, .linear),
+                    (s - 1.0, 0.5, .exponential), (s - 0.125, 0.82, .hold), (s, 0.5, .linear),
                 ])
                 automate(.a, .vocals, .delay, [
-                    (s - 1.0, 0, .sCurve), (s - 0.5, 0.72, .linear), (s - 0.125, 0, .linear),
+                    (s - 1.0, 0, .sCurve), (s - 0.5, 0.78, .linear), (s - 0.125, 0, .linear),
                 ])
             }
             silences.append((.a, .bass, s - 1, s))
@@ -981,37 +991,108 @@ struct TransitionBuilder {
             for stem in [StemKind.drums, .bass, .other] { silences.append((.b, stem, s - 0.125, s)) }
 
         case .beatJuggle:
-            // High-adrenaline 2-bar back-and-forth clash: trades 2-beat and
-            // 1-beat hits between A and B before accelerating into a 1/8 → 1/16
-            // snare burst and half a beat of dead air straight into B's slam.
-            automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.85, .hold), (s, 0.5, .linear)])
-            automate(.a, .drums, .delay, [(s - 0.5, 0, .sCurve), (s - 0.25, 0.52, .linear), (s - 0.125, 0, .linear)])
+            // High-adrenaline 2-bar full-bass call-and-response clash: trades
+            // 2-beat and 1-beat full-bass slams between A and B before
+            // accelerating into a 1/8 → 1/16 snare burst + half-beat dead air
+            // straight into B's drop slam.
             var backbeat = s - 1 + 0.25 * Double(rollBeat ?? 1)
             if loop > 0, backbeat >= 0 { backbeat = Double(-loopBack) + backbeat.truncatingRemainder(dividingBy: Double(loop)) }
             for (from, to, length) in [(s - 0.5, s - 0.25, 0.125), (s - 0.25, s - 0.125, 0.0625)] {
                 rolls.append(Roll(side: .a, stem: .drums, start: start + from * barSeconds, end: start + to * barSeconds,
                                   anchor: start + backbeat * barSeconds, length: length * barSeconds))
             }
-            if drumsLayer {
+            if drumsLayer && !keysClash && s >= 4 {
+                // Keep both decks unfiltered and punchy during the 2-beat & 1-beat
+                // full-bass trade, then sweep A's snare burst up into B's drop.
+                automate(.a, .drums, .filter, [(s - 0.5, 0.5, .exponential), (s - 0.125, 0.86, .hold), (s, 0.5, .linear)])
+                automate(.a, .drums, .delay, [(s - 0.5, 0, .sCurve), (s - 0.25, 0.56, .linear), (s - 0.125, 0, .linear)])
+                // Open B's drums filter cleanly before B's first juggle slam.
+                if let di = lanes.firstIndex(where: { $0.side == .b && $0.stem == .drums }) {
+                    lanes[di][.filter].clear((start + (s - 1.55) * barSeconds)...(start + (s + 0.05) * barSeconds))
+                    automate(.b, .drums, .filter, [(s - 1.55, 0.5, .linear), (s, 0.5, .linear)])
+                    lanes[di][.low].clear((start + (s - 1.55) * barSeconds)...(start + (s + 0.05) * barSeconds))
+                }
+                if let bi = lanes.firstIndex(where: { $0.side == .b && $0.stem == .bass }) {
+                    lanes[bi][.volume].clear((start + (s - 1.55) * barSeconds)...(start + (s + 0.05) * barSeconds))
+                }
+                // Punch B's full bass & kick low-end OPEN on B's exact juggle turns
+                // (`s-1.5..s-1.0` and `s-0.75..s-0.5`) while A is silenced!
+                automate(.b, .bass, .volume, [
+                    (s - 1.5, 0, .hold), (s - 1.499, 1, .hold), (s - 1.0, 1, .hold), (s - 0.999, 0, .hold),
+                    (s - 0.75, 0, .hold), (s - 0.749, 1, .hold), (s - 0.5, 1, .hold), (s - 0.499, 0, .hold),
+                    (s, 0, .hold), (s + 0.001, 1, .linear),
+                ])
+                automate(.b, .drums, .low, [
+                    (s - 1.5, 0, .hold), (s - 1.499, 0.5, .hold), (s - 1.0, 0.5, .hold), (s - 0.999, 0, .hold),
+                    (s - 0.75, 0, .hold), (s - 0.749, 0.5, .hold), (s - 0.5, 0.5, .hold), (s - 0.499, 0, .hold),
+                    (s, 0, .hold), (s + 0.001, 0.5, .linear),
+                ])
                 // Trade hits: A (s-2..s-1.5) → B (s-1.5..s-1.0) → A (s-1.0..s-0.75) → B (s-0.75..s-0.5) → A roll!
                 for (f, t) in [(s - 2.0, s - 1.5), (s - 1.0, s - 0.75), (s - 0.5, s)] {
                     silences.append((.b, .drums, f, t))
-                    if !keysClash { silences.append((.b, .other, f, t)) }
+                    silences.append((.b, .other, f, t))
                 }
                 for (f, t) in [(s - 1.5, s - 1.0), (s - 0.75, s - 0.5)] {
                     silences.append((.a, .drums, f, t))
                     silences.append((.a, .bass, f, t))
-                    if !keysClash { silences.append((.a, .other, f, t)) }
+                    silences.append((.a, .other, f, t))
                 }
             } else {
-                // When B's drums wait for `s`, chop A's own beat rhythmically into the roll.
+                // When B's drums wait for `s` or keys clash, chop A's own beat rhythmically into the roll.
+                automate(.a, .drums, .filter, [(s - 2, 0.5, .exponential), (s - 0.125, 0.85, .hold), (s, 0.5, .linear)])
+                automate(.a, .drums, .delay, [(s - 0.5, 0, .sCurve), (s - 0.25, 0.52, .linear), (s - 0.125, 0, .linear)])
                 silences.append((.b, .drums, s - 1, s))
                 for (f, t) in [(s - 1.5, s - 1.25), (s - 0.75, s - 0.625)] {
                     silences.append((.a, .drums, f, t))
                 }
             }
             silences.append((.a, .bass, s - 0.5, s))
-            for stem in [StemKind.drums, .other] { silences.append((.a, stem, s - 0.125, s)) }
+            silences.append((.a, .drums, s - 0.125, s))
+            // Keep A's melody out past the drop dissolve so it never snaps back open on B's drop.
+            silences.append((.a, .other, s - 0.125, min(Double(bars) + 2, s + 2.5)))
+            for stem in [StemKind.drums, .bass, .other] { silences.append((.b, stem, s - 0.125, s)) }
+
+        case .echoFreeze:
+            // Pioneer RMX-1000 spiral echo freeze: sweeps A's tops up into a
+            // lush stereo ping-pong delay + cathedral reverb bloom, then cuts
+            // dry A half a bar early so ONLY the spiraling echo hangs in space
+            // before B's full drop slams in on `s`.
+            automate(.a, .drums, .filter, [(s - 1.75, 0.5, .exponential), (s - 0.5, 0.87, .hold), (s, 0.5, .linear)])
+            automate(.a, .other, .filter, [(s - 1.75, 0.5, .exponential), (s - 0.5, 0.85, .hold), (s, 0.5, .linear)])
+            automate(.a, .drums, .delay, [(s - 1.5, 0, .sCurve), (s - 0.875, 0.82, .linear),
+                                          (s - 0.5, 0.82, .linear), (s - 0.45, 0, .linear)])
+            automate(.a, .other, .reverb, [(s - 1.5, 0, .sCurve), (s - 0.75, 0.86, .linear),
+                                           (s - 0.5, 0.86, .linear), (s - 0.45, 0, .linear)])
+            silences.append((.a, .bass, s - 1.0, s))
+            silences.append((.a, .drums, s - 0.5, s))
+            silences.append((.a, .other, s - 0.5, min(Double(bars) + 2, s + 2.5)))
+            for stem in [StemKind.drums, .bass, .other] { silences.append((.b, stem, s - 0.5, s)) }
+
+        case .filterSlam:
+            // Club underwater submarine low-pass slam: dives A's beat & melody
+            // (and B's incoming tops) down into a resonant ~330 Hz underwater
+            // low-pass with a warm reverb bloom, pulls bass for 2 beats into a
+            // half-beat breath, then snaps B wide open at full brightness on `s`.
+            automate(.a, .drums, .filter, [(s - 1.75, 0.5, .sCurve), (s - 0.125, 0.18, .hold), (s, 0.5, .linear)])
+            automate(.a, .other, .filter, [(s - 1.75, 0.5, .sCurve), (s - 0.125, 0.16, .hold), (s, 0.5, .linear)])
+            automate(.a, .other, .reverb, [(s - 1.5, 0, .sCurve), (s - 0.375, 0.76, .linear),
+                                           (s - 0.125, 0.76, .linear), (s + 0.04, 0, .linear)])
+            if drumsLayer {
+                if let di = lanes.firstIndex(where: { $0.side == .b && $0.stem == .drums }) {
+                    lanes[di][.filter].clear((start + (s - 1.75) * barSeconds)...(start + (s + 0.05) * barSeconds))
+                }
+                automate(.b, .drums, .filter, [(s - 1.75, 0.5, .sCurve), (s - 0.125, 0.18, .hold), (s, 0.5, .linear)])
+            }
+            if !keysClash && !mashup {
+                if let oi = lanes.firstIndex(where: { $0.side == .b && $0.stem == .other }) {
+                    lanes[oi][.filter].clear((start + (s - 1.75) * barSeconds)...(start + (s + 0.05) * barSeconds))
+                }
+                automate(.b, .other, .filter, [(s - 1.75, 0.5, .sCurve), (s - 0.125, 0.18, .hold), (s, 0.5, .linear)])
+            }
+            silences.append((.a, .bass, s - 0.5, s))
+            silences.append((.b, .drums, s - 0.125, s))
+            silences.append((.a, .drums, s - 0.125, s))
+            silences.append((.a, .other, s - 0.125, min(Double(bars) + 2, s + 2.5)))
             for stem in [StemKind.drums, .bass, .other] { silences.append((.b, stem, s - 0.125, s)) }
         }
     }
@@ -1128,17 +1209,19 @@ struct TransitionBuilder {
                 // then dissolves (low-pass sweep into a reverb wash), so
                 // there's never more than one song's harmony for long.
                 let lift = min(out, underUntil ?? out)
+                let bMelFilter = carry ? 0.72 : 0.82
+                let bMelOpen = carry ? q + 1.0 : q + max(1, q / 2)
                 if under > 0.25, lift > q + 0.01 {
                     // Under A's voice for as long as it sings (volume + gentle
                     // mid vocal pocket), then up to full on the beat it leaves
                     // on: a step, not a fade.
                     let held = pow(10, -min(under, 12) / 20)
-                    bringIn(.other, at: q, filter: 0.82, open: q + max(1, q / 2), level: held)
+                    bringIn(.other, at: q, filter: bMelFilter, open: bMelOpen, level: held)
                     automate(.b, .other, .volume, [(lift, held, .hold), (lift + 0.001, 1, .linear)])
                     let midCut = 0.5 - min(under, 4) / 80
                     automate(.b, .other, .mid, [(q, midCut, .linear), (max(q + 0.01, lift - 0.125), midCut, .sCurve), (lift, 0.5, .linear)])
                 } else {
-                    bringIn(.other, at: q, filter: 0.82, open: q + max(1, q / 2))
+                    bringIn(.other, at: q, filter: bMelFilter, open: bMelOpen)
                     // Reverse mashup: if A's voice carries on past the swap over
                     // B's new beat, carve a gentle mid pocket in B's melody so
                     // A's singer stays crystal clear until exiting.

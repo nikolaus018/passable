@@ -2002,9 +2002,10 @@ enum AutoPlacement {
                 let r = (c + k)..<(c + k + 4)
                 return hasLow(sb, lowGoingB, bars: r, threshold: 0.5) && sb.meanActivity(.drums, bars: r) > 0.5
             } ?? n
-            let aLeaves = (min(2, ready)..<ready).first { k in
-                let a = (e + k)..<(e + k + 2), b = (c + k)..<(c + k + 2)
-                return !hasLow(sa, lowGoingA, bars: a, threshold: 0.3) && sa.meanActivity(.drums, bars: a) < 0.3
+            let earliestEarly = max(2, n / 4)
+            let aLeaves = (min(earliestEarly, ready)..<ready).first { k in
+                let a = (e + k)..<(e + k + 3), b = (c + k)..<(c + k + 2)
+                return !hasLow(sa, lowGoingA, bars: a, threshold: 0.25) && sa.meanActivity(.drums, bars: a) < 0.25
                     && hasLow(sb, lowGoingB, bars: b, threshold: 0.5) && sb.meanActivity(.drums, bars: b) > 0.5
             }
             return aLeaves ?? ready
@@ -2014,23 +2015,21 @@ enum AutoPlacement {
         func switchBar(_ sw: Int?) -> Int { Int(TransitionBuilder.switchBar(preset, bars: n, lowSwap: sw)) }
 
         /// Worth building into (roll, silence, drop) at bar `switchAt`: B's
-        /// hook or a real lift of B there, with A's beat there to roll, and
-        /// only if B really lands, its first two bars at full level (not a
-        /// pickup or a break before the section proper: a roll and a
-        /// silence into two quiet bars is an anticlimax). Decided with the
-        /// spot, since A is gone at such a switch rather than lingering.
+        /// hook or a real lift/impact surge of B there, with A's beat there to
+        /// drive the build, and only if B really lands at full level.
         func dropMoment(_ sa: TrackStructure, e: Int, c: Int, switchAt: Int) -> Bool {
-            // A Stem Swap builds into one from `dropMinBars` (16 in Chill/Club,
-            // 8 in Hype/Rush so quick-mix peak-time blends get full drop builds).
             guard !echo, switchAt >= 4, preset == .dropSwap || n >= dropMinBars,
-                  sa.meanActivity(.drums, bars: (e + switchAt - 2)..<(e + switchAt)) > 0.5,
+                  sa.meanActivity(.drums, bars: (e + switchAt - 2)..<(e + switchAt)) > 0.48,
                   min(sb.meanLoudness(bars: (c + switchAt)..<(c + switchAt + 1)),
-                      sb.meanLoudness(bars: (c + switchAt + 1)..<(c + switchAt + 2))) >= sb.referenceLoudness - 3
+                      sb.meanLoudness(bars: (c + switchAt + 1)..<(c + switchAt + 2))) >= sb.referenceLoudness - 3.2
             else { return false }
             let rise = sb.meanLoudness(bars: (c + switchAt)..<(c + switchAt + 8))
                 - sb.meanLoudness(bars: (c + switchAt - 4)..<(c + switchAt))
-            return preset == .dropSwap || sb.hook(from: c + switchAt) >= 0.4
-                || (bound(boundB, c + switchAt) >= 0.5 && rise >= 3)
+            let preLow = sb.meanActivity(.bass, bars: max(0, c + switchAt - 4)..<(c + switchAt))
+            let postLow = sb.meanActivity(.bass, bars: (c + switchAt)..<(c + switchAt + 4))
+            let impactSurge = preLow < 0.35 && postLow > 0.65
+            return preset == .dropSwap || sb.hook(from: c + switchAt) >= 0.35
+                || (bound(boundB, c + switchAt) >= 0.45 && (rise >= 2.2 || impactSurge))
         }
         let wholePower = AutoPlacement.powers(whole, trim: trimA), powerB = AutoPlacement.powers(sb, trim: trimB)
         // Above-150-Hz reference level (80th percentile) for each song so
@@ -2191,37 +2190,46 @@ enum AutoPlacement {
                 if preset == .mashup {
                     // A real club mashup needs B actively singing across the
                     // first half over A's beat, ideally building into B's drop
-                    // or hook at `switchAt`. When placed automatically, require
-                    // verified vocal-on-harmony fit, an instrumental/looped bed
-                    // from A, a real low end from B at the drop, and a hook.
+                    // or hook at `switchAt`. Supports both harmonic club mashups
+                    // (verified vocal-on-harmony fit) and Drum-Bed Mashups (on
+                    // clashing keys with locking grooves, where A strips to its
+                    // iconic beat so B's vocal soars clash-free into B's drop).
                     let h = max(1, n / 2)
                     let vBFirst = sb.meanActivity(.vocals, bars: c..<(c + h))
                     let aBeat = sa.meanActivity(.drums, bars: e..<(e + h))
                     let aVocals = loop > 0 ? 0 : sa.meanActivity(.vocals, bars: e..<(e + h))
                     let hookPayoff = max(sb.hook(from: c), sb.hook(from: c + switchAt))
                     if spot == nil {
-                        guard !clashHere, vBFirst >= 0.45, aBeat >= 0.55, aVocals < 0.35,
-                              hookPayoff >= 0.35, lowShort(at: c + switchAt) <= 4,
-                              let vChroma = sb.vocalChroma, let hChroma = sa.harmonyChroma
-                        else { continue }
-                        var vb = [Float](repeating: 0, count: 12), ha = vb
-                        for k in 0..<h {
-                            if c + k < vChroma.count {
-                                let row = bShift == 0 ? vChroma[c + k] : Harmony.transposed(vChroma[c + k], by: bShift)
-                                for p in 0..<12 { vb[p] += row[p] }
+                        if clashHere {
+                            // Drum-Bed Mashup: requires locking grooves, strong
+                            // beat bed from A, and an unmistakable vocal hook from B.
+                            guard drumsLock, vBFirst >= 0.48, aBeat >= 0.62, aVocals < 0.25,
+                                  hookPayoff >= 0.40, lowShort(at: c + switchAt) <= 4
+                            else { continue }
+                        } else {
+                            guard vBFirst >= 0.38, aBeat >= 0.50, aVocals < 0.35,
+                                  hookPayoff >= 0.30, lowShort(at: c + switchAt) <= 4,
+                                  let vChroma = sb.vocalChroma, let hChroma = sa.harmonyChroma
+                            else { continue }
+                            var vb = [Float](repeating: 0, count: 12), ha = vb
+                            for k in 0..<h {
+                                if c + k < vChroma.count {
+                                    let row = bShift == 0 ? vChroma[c + k] : Harmony.transposed(vChroma[c + k], by: bShift)
+                                    for p in 0..<12 { vb[p] += row[p] }
+                                }
+                                if e + k < hChroma.count {
+                                    let row = aShift == 0 ? hChroma[e + k] : Harmony.transposed(hChroma[e + k], by: aShift)
+                                    for p in 0..<12 { ha[p] += row[p] }
+                                }
                             }
-                            if e + k < hChroma.count {
-                                let row = aShift == 0 ? hChroma[e + k] : Harmony.transposed(hChroma[e + k], by: aShift)
-                                for p in 0..<12 { ha[p] += row[p] }
-                            }
+                            guard vb.contains(where: { $0 > 0 }), ha.contains(where: { $0 > 0 }),
+                                  Harmony.clash(ha, vb) <= Harmony.clashTolerance,
+                                  Harmony.roughness(ha, vb) <= Harmony.roughTolerance
+                            else { continue }
                         }
-                        guard vb.contains(where: { $0 > 0 }), ha.contains(where: { $0 > 0 }),
-                              Harmony.clash(ha, vb) <= Harmony.clashTolerance,
-                              Harmony.roughness(ha, vb) <= Harmony.roughTolerance
-                        else { continue }
                     }
-                    score += 0.45 * min(1, vBFirst) + 0.35 * min(1, aBeat)
-                    score += 0.60 * hookPayoff
+                    score += 0.65 * min(1, vBFirst) + 0.45 * min(1, aBeat)
+                    score += 0.85 * hookPayoff
                     score -= 1.2 * aVocals
                 }
                 if preset == .longBlend {

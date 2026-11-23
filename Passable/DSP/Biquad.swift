@@ -230,8 +230,8 @@ struct DJFilter {
     }
 
     /// Musical resonance curve: flat Butterworth (0.707) near bypass and at
-    /// sub/air extremes, rising gently to ~0.92 per stage in the sweet spot
-    /// (200 Hz–4 kHz) like an analog DJ mixer filter.
+    /// sub/air extremes, rising to ~0.98 per stage in the sweet spot
+    /// (200 Hz–4 kHz) for a Pioneer DJM-style liquid analog sweep bite.
     static func resonance(for frequency: Double, mode: SVF.Mode) -> Double {
         let logF = log2(max(20, min(20_000, frequency)))
         // Peak resonance around 300 Hz–3 kHz (log2 ≈ 8.2–11.5), tapering smoothly
@@ -241,7 +241,7 @@ struct DJFilter {
         guard logF > lowEdge, logF < highEdge else { return 0.7071 }
         let u = (logF - lowEdge) / (highEdge - lowEdge)
         let bell = sin(Double.pi * u)
-        return 0.7071 + 0.213 * bell * bell
+        return 0.7071 + 0.273 * bell * bell
     }
 
     mutating func set(_ mode: SVF.Mode, frequency: Double, sampleRate: Double) {

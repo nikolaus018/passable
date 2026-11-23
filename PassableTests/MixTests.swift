@@ -1016,7 +1016,7 @@ final class SetShapeTests: XCTestCase {
         }
     }
 
-    func testClubExciterBypassedAtZeroAndPunchesInRushMode() {
+    func testClubExciterBypassedAtZeroAndPunchesOnDrops() {
         let sr = AudioIO.sampleRate
         let n = 4096
         let orig = (0..<n).map { i -> Float in
@@ -1032,37 +1032,54 @@ final class SetShapeTests: XCTestCase {
         }
         XCTAssertEqual(bypassL, orig, "ClubExciter must be bit-exact bypassed at amount == 0")
 
-        var rushL = orig, rushR = orig
-        rushL.withUnsafeMutableBufferPointer { l in
-            rushR.withUnsafeMutableBufferPointer { r in
-                exciter.process(l.baseAddress!, r.baseAddress!, count: n, amount: SetPacing.rush.energyPunch)
+        var clubL = orig, clubR = orig
+        clubL.withUnsafeMutableBufferPointer { l in
+            clubR.withUnsafeMutableBufferPointer { r in
+                exciter.process(l.baseAddress!, r.baseAddress!, count: n, amount: 0.90)
             }
         }
-        XCTAssertFalse(rushL.contains { $0.isNaN || $0.isInfinite })
+        XCTAssertFalse(clubL.contains { $0.isNaN || $0.isInfinite })
         let origRMS = sqrt(orig.reduce(0) { $0 + $1 * $1 } / Float(n))
-        let rushRMS = sqrt(rushL.reduce(0) { $0 + $1 * $1 } / Float(n))
-        XCTAssertGreaterThan(rushRMS, origRMS * 1.05, "Rush exciter should add noticeable club PA energy")
-        XCTAssertLessThan(rushL.map(abs).max()!, 1.2)
+        let clubRMS = sqrt(clubL.reduce(0) { $0 + $1 * $1 } / Float(n))
+        XCTAssertGreaterThan(clubRMS, origRMS * 1.03, "Active ClubExciter should add noticeable club PA energy")
+        XCTAssertLessThan(clubL.map(abs).max()!, 1.2)
     }
 
-    func testRushModeAndVocalChopBeatJuggleBuildsAreClean() {
-        XCTAssertEqual(SetPacing.rush.soloSeconds(energy: 0.5), 16.0)
-        XCTAssertEqual(SetPacing.rush.dropSpacing, 0)
-        XCTAssertEqual(SetPacing.rush.dropMinBars, 8)
-        XCTAssertEqual(SetPacing.rush.sweepIntensity, 2.0)
-        // B-hook vocal chop: A exited by bar 6, B's hook word stutters across bar 7..7.875 into bar 8 drop.
+    func testUnifiedClubBrainAndAllPeakWeaponsAreClean() {
+        XCTAssertGreaterThanOrEqual(SetBuilder.clubSoloSeconds(energy: 0.2), 28.0)
+        XCTAssertLessThanOrEqual(SetBuilder.clubSoloSeconds(energy: 0.9), 22.0)
+        XCTAssertEqual(SetBuilder.dropMomentBars, 8)
+        // B-hook vocal chop: 4 accelerating stages (1/4 → 1/8 → 1/16 → 1/32) into bar 8 drop.
         let bChop = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16,
                                            vocalBar: 8, lowSwap: 8, vocalIn: 8, vocalOut: 6, dropMoment: true,
                                            buildStyle: .vocalChop, vocalChop: (side: .b, anchor: 8))
-        XCTAssertEqual(bChop.rolls.filter { $0.side == .b && $0.stem == .vocals }.count, 3)
+        XCTAssertEqual(bChop.rolls.filter { $0.side == .b && $0.stem == .vocals }.count, 4)
         let bVoc = bChop.lanes.first { $0.side == .b && $0.stem == .vocals }!
-        XCTAssertGreaterThan(bVoc.value(.volume, at: 2 * 7.25), 0.8)
+        XCTAssertGreaterThan(bVoc.value(.volume, at: 2 * 7.25), 0.9)
         XCTAssertLessThan(bVoc.value(.volume, at: 2 * 7.89), 0.05)
         XCTAssertEqual(bVoc.value(.filter, at: 2 * 7.95), 0.5, accuracy: 0.01)
-        // Beat juggle writes A↔B alternating silences + snare acceleration rolls cleanly.
+        // Full-bass beat juggle opens B's bass on B's turn (`s-1.5..s-1.0`) while silencing A.
         let juggle = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16,
                                             vocalBar: 8, lowSwap: 8, drumsLayer: true, vocalIn: 8, vocalOut: 6,
                                             dropMoment: true, buildStyle: .beatJuggle)
         XCTAssertGreaterThanOrEqual(juggle.rolls.filter { $0.side == .a && $0.stem == .drums }.count, 2)
+        let bBass = juggle.lanes.first { $0.side == .b && $0.stem == .bass }!
+        let aBass = juggle.lanes.first { $0.side == .a && $0.stem == .bass }!
+        XCTAssertGreaterThan(bBass.value(.volume, at: 2 * 6.75), 0.95, "B bass slams open on B's juggle turn")
+        XCTAssertLessThan(aBass.value(.volume, at: 2 * 6.75), 0.05, "A bass silenced during B's juggle turn")
+        // Echo freeze sends A into heavy stereo delay + reverb then cuts dry A half a bar early.
+        let freeze = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16,
+                                            vocalBar: 8, lowSwap: 8, drumsLayer: true, vocalIn: 8, vocalOut: 6,
+                                            dropMoment: true, buildStyle: .echoFreeze)
+        let aDrumsF = freeze.lanes.first { $0.side == .a && $0.stem == .drums }!
+        XCTAssertGreaterThan(aDrumsF.value(.delay, at: 2 * 7.25), 0.75)
+        XCTAssertLessThan(aDrumsF.value(.volume, at: 2 * 7.75), 0.05)
+        // Underwater filter slam dives below 0.25 low-pass then snaps neutral on B's drop.
+        let slam = TransitionBuilder.make(.stemSwap, lanes: Lane.allLanes(), start: 0, barSeconds: 2, bars: 16,
+                                          vocalBar: 8, lowSwap: 8, drumsLayer: true, vocalIn: 8, vocalOut: 6,
+                                          dropMoment: true, buildStyle: .filterSlam)
+        let bDrumsS = slam.lanes.first { $0.side == .b && $0.stem == .drums }!
+        XCTAssertLessThan(bDrumsS.value(.filter, at: 2 * 7.5), 0.30)
+        XCTAssertEqual(bDrumsS.value(.filter, at: 2 * 8.1), 0.5, accuracy: 0.01)
     }
 }

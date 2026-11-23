@@ -29,14 +29,6 @@ final class SetSession: ObservableObject {
     private let persists: Bool
     private static let storageKey = "setTracks"
     private static let editsKey = "setEdits"
-    private static let pacingKey = "setPacing"
-    @Published var pacing: SetPacing = .club {
-        didSet {
-            guard oldValue != pacing else { return }
-            if persists { UserDefaults.standard.set(pacing.rawValue, forKey: Self.pacingKey) }
-            if !items.isEmpty { invalidate() }
-        }
-    }
     private static let movesKey = "setAutoMoves"
     /// The showier moves the planner may use (see the set's Moves menu).
     @Published var moves: AutoMoves = .all {
@@ -94,10 +86,6 @@ final class SetSession: ObservableObject {
         self.persists = persists
         editor.host = self
         if persists {
-            if let saved = UserDefaults.standard.string(forKey: Self.pacingKey),
-               let parsed = SetPacing(rawValue: saved) {
-                pacing = parsed
-            }
             if UserDefaults.standard.object(forKey: Self.movesKey) != nil {
                 moves = AutoMoves(rawValue: UserDefaults.standard.integer(forKey: Self.movesKey))
             }
@@ -405,11 +393,10 @@ final class SetSession: ObservableObject {
         // set, so not on the main thread.
         buildTask?.cancel()
         buildStatus = "Ordering songs…"
-        let pace = pacing
         orderTask = Task { [weak self] in
             let order = await Task.detached(priority: .userInitiated) {
                 let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: songs), remembered: true,
-                                                   urls: urls, pacing: pace)
+                                                   urls: urls)
                 let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
                 return fitIn ? SetOrdering.insert(added, into: placed, costs, washOuts: washOuts, energies: energies)
                     : SetOrdering.order(costs, washOuts: washOuts, energies: energies)
@@ -493,13 +480,13 @@ final class SetSession: ObservableObject {
         let previous = mix ?? lastBuilt
         if mix == nil { buildStatus = "Planning transitions…" }
         let processor = self.processor
-        let pacing = self.pacing, moves = self.moves
+        let moves = self.moves
         buildTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
             do {
                 let mix = try await SetBuilder.build(tracks, edits: edits, reuse: reuse, previous: previous,
-                                                     pacing: pacing, moves: moves, processor: processor) { text in
+                                                     moves: moves, processor: processor) { text in
                     Task { @MainActor in if self?.mix == nil { self?.buildStatus = text } }
                 }
                 guard !Task.isCancelled, let self else { return }
