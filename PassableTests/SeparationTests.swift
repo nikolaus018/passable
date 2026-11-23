@@ -112,7 +112,11 @@ final class VocalSeparatorTests: XCTestCase {
     /// hop 512: 1,151 frames).
     func testRoformerSTFTReconstructsAtTheStemModelsHop() {
         let n = 588_800
-        let x = (0..<n).map { Float(sin(Double($0) * 0.011) * 0.4 + sin(Double($0) * 0.29) * 0.2) }
+        let x = (0..<n).map { (i: Int) -> Float in
+            let t = Double(i)
+            let low: Double = sin(t * 0.011) * 0.4, high: Double = sin(t * 0.29) * 0.2
+            return Float(low + high)
+        }
         let stft = RoformerSTFT(chunk: n, hop: 512)
         XCTAssertEqual(stft.frames, 1151)
         let rows = 2 * RoformerSTFT.bins
@@ -124,9 +128,10 @@ final class VocalSeparatorTests: XCTestCase {
             stft.forward(x, channel: 0, into: s.baseAddress!)
             stft.inverse(spec: s.baseAddress!, mask: mask, channel: 0, into: &y)
         }
-        let residual = zip(x, y).map { ($0 - $1) * ($0 - $1) }.reduce(0, +)
-        let power = x.map { $0 * $0 }.reduce(0, +)
-        XCTAssertLessThan(10 * log10(residual / power), -100)
+        let residual: Float = zip(x, y).map { (a: Float, b: Float) -> Float in (a - b) * (a - b) }.reduce(0, +)
+        let power: Float = x.map { (a: Float) -> Float in a * a }.reduce(0, +)
+        let error: Float = residual / power
+        XCTAssertLessThan(10 * log10(error), -100)
     }
 
     /// A DC-free sine's spectrum as torch.stft has it: unnormalised, so a
