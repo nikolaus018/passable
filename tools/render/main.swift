@@ -20,7 +20,7 @@ while !args.isEmpty {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
     case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--upgrade-vox", "--upgrade-bass", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts": break
-    case "--dump-vocals", "--models", "--vocal-step", "--breaths-at", "--phone-mix", "--title": _ = args.removeFirst()
+    case "--dump-vocals", "--models", "--vocal-step", "--breaths-at", "--phone-mix", "--title", "--bitrate": _ = args.removeFirst()
     case "--order": ordered = true
     case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale", "--switch-lead": _ = args.removeFirst()
     case "--list":
@@ -1567,7 +1567,9 @@ let rendered = Date()
 if let k = CommandLine.arguments.firstIndex(of: "--phone-mix") {
     let destination = URL(fileURLWithPath: CommandLine.arguments[k + 1])
     let title = CommandLine.arguments.firstIndex(of: "--title").map { CommandLine.arguments[$0 + 1] } ?? PhoneMix.suggestedTitle()
-    let manifest = PhoneMix.manifest(for: mix, titles: tracks.map { SongTitle.of($0.url) }, title: title)
+    if let b = CommandLine.arguments.firstIndex(of: "--bitrate") { AudioWriter.aacBitRate = Int(CommandLine.arguments[b + 1])! }
+    var manifest = PhoneMix.manifest(for: mix, titles: tracks.map { SongTitle.of($0.url) }, title: title)
+    manifest.audio.bitRate = AudioWriter.aacBitRate
     let temp = FileManager.default.temporaryDirectory.appendingPathComponent("phonemix-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: temp) }

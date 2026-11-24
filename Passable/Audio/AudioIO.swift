@@ -195,6 +195,9 @@ enum AudioIO {
 /// ten times the size and no better to the ear; it stays available for
 /// editing in other software.
 final class AudioWriter {
+    /// Bits a second of an AAC file (passable-render --bitrate: a set
+    /// that has to fit a size).
+    nonisolated(unsafe) static var aacBitRate = 256_000
     private let file: AVAudioFile
     private let buffer: AVAudioPCMBuffer
 
@@ -206,7 +209,7 @@ final class AudioWriter {
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVSampleRateKey: AudioIO.sampleRate,
                 AVNumberOfChannelsKey: 2,
-                AVEncoderBitRateKey: 256_000,
+                AVEncoderBitRateKey: AudioWriter.aacBitRate,
             ]
         } else {
             settings = [
