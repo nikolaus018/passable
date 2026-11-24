@@ -1542,7 +1542,7 @@ enum AutoPlacement {
         guard sung > -40 else { return 0 }
         // Cap at 5 dB so B's melody stays audibly blended under A's singer
         // instead of getting buried 12+ dB down and then jumping on the switch.
-        return Double(min(5, max(0, (played - (sung - 5)).rounded())))
+        return Double(min(Float(underCap), max(0, (played - (sung - 5)).rounded())))
     }
 
     /// What looping A's beat costs a spot. A loop makes a blend where the
@@ -1570,15 +1570,14 @@ enum AutoPlacement {
     /// finds a spot where B's part starts as A's ends.)
     /// - Parameter alone: A's voice is gone already (a loop, clashing swap, or
     ///   A silent at `aim`): nobody sings while B's waits, so cap the wait at
-    ///   1.25 bars so it never opens a multi-bar vocal hole while still
-    ///   finding a clean entry.
+    ///   `aloneWait` bars, enough to find a clean entry without a long hole.
     /// Never later than a quarter bar past the blend's end (and never before
     /// `aim`), so B's voice isn't held muted while B already plays solo.
     static func entryLatest(_ s: TrackStructure?, aim: Double, bars: Int, alone: Bool = false) -> Double {
         // Never hold B's vocal muted bars past the end of the blend while B
         // plays solo (which opened 8–12 beat vocal holes uncounted by placement).
         let blendCap = max(aim, Double(bars) + 0.25)
-        if alone { return min(blendCap, aim + 1.25) }
+        if alone { return min(blendCap, aim + aloneWait) }
         let cap = min(blendCap, aim + vocalWait)
         return s?.midPart(at: 0) != nil ? min(blendCap, max(cap, Double(bars))) : cap
     }
@@ -1587,7 +1586,19 @@ enum AutoPlacement {
     /// instead, at the end of a sentence (or a comma's clause): capped at
     /// 1.25 bars so early A-exits and late B-entries don't stack into multi-bar
     /// vocal holes.
-    static let exitBack = 1.25
+    nonisolated(unsafe) static var exitBack = 1.25
+
+    /// Bars B's voice may wait to come in past where it's due where A's has
+    /// already gone (see `entryLatest`): nobody sings while it waits.
+    /// (1.25 left B's voice fewer clean entries: over 28 transitions of
+    /// two song lists, 2 bars cut 2 fewer of its words in two and opened no
+    /// more gaps; tools/score/score.py with `--alone-wait`.)
+    nonisolated(unsafe) static var aloneWait = 2.0
+
+    /// The most dB B's melody is held under A's singing voice (see
+    /// `under`): further down it was buried, then jumped on the
+    /// switch.
+    nonisolated(unsafe) static var underCap = 5.0
 
     /// What it costs a spot that B's voice comes in in the middle of a
     /// part of it (see `TrackStructure.midPart`), on top of the part's edge

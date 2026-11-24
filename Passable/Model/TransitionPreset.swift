@@ -1253,7 +1253,7 @@ struct TransitionBuilder {
                     // Under A's voice for as long as it sings (gentle volume +
                     // mid vocal pocket), then smoothly riding up to full over
                     // two beats as A's singer finishes.
-                    let held = pow(10, -min(under, 5) / 20)
+                    let held = pow(10, -min(under, AutoPlacement.underCap) / 20)
                     bringIn(.other, at: q, filter: bMelFilter, open: bMelOpen, level: held)
                     let liftStart = max(q + 0.01, lift - 0.25)
                     let liftEnd = min(Double(bars), lift + 0.25)
@@ -1326,7 +1326,7 @@ struct TransitionBuilder {
                 // (pocketed under A's vocal when `under` is active).
                 let lift = min(out, underUntil ?? out)
                 if under > 0.25, lift > h / 2 + 0.01 {
-                    let held = pow(10, -min(under, 5) / 20)
+                    let held = pow(10, -min(under, AutoPlacement.underCap) / 20)
                     let liftStart = max(h / 2 + 0.01, lift - 0.25)
                     let liftEnd = min(Double(bars), lift + 0.25)
                     automate(.b, .other, .volume, [(h / 2, 0, .hold), (h / 2 + 0.001, held, .linear),
@@ -1407,7 +1407,7 @@ struct TransitionBuilder {
             } else {
                 let lift = min(out, underUntil ?? out)
                 if under > 0.25, lift > q + 0.01 {
-                    let held = pow(10, -min(under, 5) / 20)
+                    let held = pow(10, -min(under, AutoPlacement.underCap) / 20)
                     bringIn(.other, at: q, filter: 0.72, open: min(2 * q, q + max(2, q / 2)), level: held)
                     let liftStart = max(q + 0.01, lift - 0.25)
                     let liftEnd = min(Double(bars), lift + 0.25)

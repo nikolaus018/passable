@@ -47,6 +47,11 @@ final class StemSeparator {
     private let inverseSTFT: DemucsSTFT
     private static let overlap = 0.25
 
+    /// Whether the app has the model.
+    static var isAvailable: Bool {
+        Bundle.main.url(forResource: "HTDemucs", withExtension: "mlmodelc") != nil || ModelLocation.fallback(named: "HTDemucs") != nil
+    }
+
     init(model modelURL: URL? = nil) throws {
         guard let url = modelURL ?? Bundle.main.url(forResource: "HTDemucs", withExtension: "mlmodelc")
                 ?? ModelLocation.fallback(named: "HTDemucs") else {

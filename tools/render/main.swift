@@ -19,10 +19,10 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts": break
     case "--dump-vocals", "--models", "--vocal-step", "--breaths-at": _ = args.removeFirst()
     case "--order": ordered = true
-    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot": _ = args.removeFirst()
+    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap": _ = args.removeFirst()
     case "--list":
         let text = try String(contentsOfFile: args.removeFirst(), encoding: .utf8)
         songs += text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -74,6 +74,9 @@ if let k = CommandLine.arguments.firstIndex(of: "--rot") { SetOrdering.rotations
 if let k = CommandLine.arguments.firstIndex(of: "--kick") { SetOrdering.kickSpan = Int(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--arc") { SetOrdering.arcPenalty = Double(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--vocal-step") { VocalSeparator.step = Int(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--exit-back") { AutoPlacement.exitBack = Double(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--alone-wait") { AutoPlacement.aloneWait = Double(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--under-cap") { AutoPlacement.underCap = Double(CommandLine.arguments[k + 1])! }
 
 // Songs not separated yet need the models: the installed app's.
 ModelLocation.directory = URL(fileURLWithPath: CommandLine.arguments.firstIndex(of: "--models").map { CommandLine.arguments[$0 + 1] }
@@ -618,6 +621,96 @@ if CommandLine.arguments.contains("--renditions") {
         bytes += directoryBytes(at: dir, key: .totalFileAllocatedSizeKey)
     }
     print("renditions: \(same) stems identical, \(differ) differ; \(shared) songs share the song's file; on disk \(bytes / 1_000_000) MB of \(full / 1_000_000) MB written whole")
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--parts") {
+    // Would separate guitar and piano let clashing melodies layer? For each
+    // transition whose melodies clash: the stem model's guitar and piano of
+    // each song (made once, kept under PASSABLE_PARTS), and the planner's
+    // own test (`Harmony.clash`, `roughness`, `tolerance`) of A's melody
+    // against B's with one part of either left out.
+    let partsRoot = URL(fileURLWithPath: ProcessInfo.processInfo.environment["PASSABLE_PARTS"] ?? "render-out/parts")
+    let model = try StemRoformer()
+    func memory(_ x: StereoBuffer) -> StemAudio {
+        StemAudio(left: MappedChannel(samples: x.left), right: MappedChannel(samples: x.right))
+    }
+    func parts(_ k: Int) throws -> [String: StemAudio] {
+        let t = mix.tracks[k]
+        let dir = partsRoot.appendingPathComponent(t.loaded.directory.lastPathComponent)
+        if !StemAudio.exists(directory: dir, name: "guitar") {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let song = try AudioIO.loadStereo(url: t.url)
+            let named = try model.separateNamed(song, progress: { _ in })
+            for name in ["guitar", "piano"] { try StemAudio.save(named[name]!, directory: dir, name: name) }
+        }
+        return ["guitar": try StemAudio.load(directory: dir, name: "guitar"),
+                "piano": try StemAudio.load(directory: dir, name: "piano")]
+    }
+    /// `other` less a part, in memory.
+    func without(_ other: StemAudio, _ part: StemAudio) -> StemAudio {
+        let n = min(other.count, part.count)
+        var x = StereoBuffer(count: n)
+        vDSP_vsub(part.left.pointer, 1, other.left.pointer, 1, &x.left, 1, vDSP_Length(n))
+        vDSP_vsub(part.right.pointer, 1, other.right.pointer, 1, &x.right, 1, vDSP_Length(n))
+        return memory(x)
+    }
+    func rotated(_ c: [Float], _ semitones: Int) -> [Float] {
+        (0..<12).map { c[((($0 - semitones) % 12) + 12) % 12] }
+    }
+    var clashing = 0, keysApart = 0, helped = 0, partHeard: [String: Int] = [:]
+    for (i, t) in mix.transitions.enumerated() where t.melodiesClash && t.edit.preset != .echoOut {
+        clashing += 1
+        let ta = mix.tracks[t.from], tb = mix.tracks[t.to]
+        let keyA = ta.loaded.analysis.key, keyB = tb.loaded.analysis.key.transposed(by: t.edit.semitones)
+        let tolerance = Harmony.tolerance(keyA, keyB)
+        let title = "\(SongTitle.of(ta.url)) → \(SongTitle.of(tb.url))"
+        guard tolerance > -.infinity else {
+            keysApart += 1
+            print(String(format: "%02d keys %@ / %@ too far apart (any notes clash)  %@", i + 1, "\(keyA)", "\(keyB)", title))
+            continue
+        }
+        let pa = try parts(t.from), pb = try parts(t.to)
+        guard let otherA = ta.loaded.stems[.other], let otherB = tb.loaded.stems[.other] else { continue }
+        let overlap = AutoPlacement.melodyOverlap(t.edit.preset, bars: t.edit.bars, lowSwap: t.plan.placement.lowSwap)
+        // Source seconds of each song over master bars `bars` of the blend.
+        func window(_ track: SetMix.Track, _ bars: Range<Int>) -> (Double, Double) {
+            let from = t.start + Double(bars.lowerBound) * t.barSeconds, to = t.start + Double(bars.upperBound) * t.barSeconds
+            let s = { (m: Double) in track.map.source((m - track.offset) * sr) / sr }
+            return (s(from), s(to))
+        }
+        func fits(_ a: [StemAudio], _ b: [StemAudio]) -> (clash: Float, rough: Float)? {
+            var worst: (Float, Float) = (0, 0)
+            var any = false
+            for (bars, withBassA) in [(overlap.before, true), (overlap.after, false)] where !bars.isEmpty {
+                let (a0, a1) = window(ta, bars), (b0, b1) = window(tb, bars)
+                let sa = a + (withBassA ? [ta.loaded.stems[.bass]].compactMap { $0 } : [])
+                let sb = b + (withBassA ? [] : [tb.loaded.stems[.bass]].compactMap { $0 })
+                guard let ca = Harmony.chroma(sa, offset: 0, from: a0, to: a1),
+                      let cb = Harmony.chroma(sb, offset: 0, from: b0, to: b1) else { continue }
+                let rb = rotated(cb, t.edit.semitones)
+                worst = (max(worst.0, Harmony.clash(ca, rb)), max(worst.1, Harmony.roughness(ca, rb)))
+                any = true
+            }
+            return any ? worst : nil
+        }
+        func ok(_ r: (clash: Float, rough: Float)?) -> Bool {
+            r.map { $0.clash <= tolerance && $0.rough <= Harmony.roughTolerance + 0.02 } ?? true
+        }
+        let full = fits([otherA], [otherB])
+        var fixes: [String] = []
+        for (name, a, b) in [("A without guitar", [without(otherA, pa["guitar"]!)], [otherB]),
+                             ("A without piano", [without(otherA, pa["piano"]!)], [otherB]),
+                             ("B without guitar", [otherA], [without(otherB, pb["guitar"]!)]),
+                             ("B without piano", [otherA], [without(otherB, pb["piano"]!)])] {
+            if ok(fits(a, b)) { fixes.append(name) }
+        }
+        if !fixes.isEmpty { helped += 1; for f in fixes { partHeard[f, default: 0] += 1 } }
+        print(String(format: "%02d clash %.3f rough %.3f (tolerance %.3f)%@  %@", i + 1, full?.clash ?? -1, full?.rough ?? -1,
+                     tolerance, fixes.isEmpty ? "  no single part fixes it" : "  FITS: " + fixes.joined(separator: ", "), title))
+    }
+    print("PARTS \(mix.transitions.count) transitions, melodies clash in \(clashing): keys too far apart \(keysApart), "
+          + "one part left out makes them fit \(helped) (" + partHeard.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", ") + ")")
     exit(0)
 }
 

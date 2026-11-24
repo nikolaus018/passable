@@ -117,6 +117,16 @@ enum StemCache {
         FileManager.default.fileExists(atPath: directory.appendingPathComponent("stems.bsroformer.1").path)
     }
 
+    /// Whether the stem model's bass has HTDemucs' blended in (see
+    /// `TrackProcessor.htBassShare`).
+    static func hasBlendedBass(_ directory: URL) -> Bool {
+        FileManager.default.fileExists(atPath: directory.appendingPathComponent("bass.blend.1").path)
+    }
+
+    static func markBlendedBass(_ directory: URL) {
+        FileManager.default.createFile(atPath: directory.appendingPathComponent("bass.blend.1").path, contents: Data())
+    }
+
     static func markRoformerStems(_ directory: URL) {
         FileManager.default.createFile(atPath: directory.appendingPathComponent("stems.bsroformer.1").path, contents: Data())
     }

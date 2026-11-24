@@ -94,7 +94,36 @@ final class TrackProcessor: @unchecked Sendable {
             }
             StemCache.markExact(directory)
             if modelVocals { StemCache.markModelVocals(directory) }
-            if StemRoformer.isAvailable { StemCache.markRoformerStems(directory) }
+            if StemRoformer.isAvailable {
+                StemCache.markRoformerStems(directory)
+                StemCache.markBlendedBass(directory)
+            }
+        } else if StemRoformer.isAvailable, StemCache.hasRoformerStems(directory), !StemCache.hasBlendedBass(directory) {
+            // Separated by the stem model before its bass was blended with
+            // HTDemucs': the bass line once more, the stems made to add up
+            // again, what was derived from the old ones dropped, and the
+            // parts measured again (grid, key, edits and words kept).
+            progress(.decoding)
+            let mix = try AudioIO.loadStereo(url: url)
+            var stems = try StemCache.loadStems(from: directory).mapValues { $0.copyStereo() }
+            if let bass = stems[.bass], let vocals = stems[.vocals] {
+                stems[.bass] = try Self.blendedBass(mix, bass, isCancelled: { ticket.isCancelled })
+                var rest = mix
+                vDSP_vsub(vocals.left, 1, mix.left, 1, &rest.left, 1, vDSP_Length(mix.count))
+                vDSP_vsub(vocals.right, 1, mix.right, 1, &rest.right, 1, vDSP_Length(mix.count))
+                var others = stems.filter { $0.key != .vocals }
+                StemResidual.redistribute(mix: rest, stems: &others)
+                for (kind, buffer) in others {
+                    try StemAudio.save(buffer, directory: directory, name: kind.rawValue)
+                }
+                StemCache.forgetDerivedAudio(in: directory)
+                if var analysis = StemCache.loadAnalysis(from: directory) {
+                    // (Measured again on the new stems, the words kept.)
+                    analysis.structure?.stemLevel = nil
+                    StemCache.saveAnalysis(analysis, to: directory)
+                }
+            }
+            StemCache.markBlendedBass(directory)
         } else if StemRoformer.isAvailable, !StemCache.hasRoformerStems(directory) {
             // Separated by HTDemucs: drums, bass and melody from the stem
             // model once. The voice is kept (it's the vocal model's, or
@@ -137,6 +166,7 @@ final class TrackProcessor: @unchecked Sendable {
             StemCache.markExact(directory)
             if modelVocals { StemCache.markModelVocals(directory) }
             StemCache.markRoformerStems(directory)
+            StemCache.markBlendedBass(directory)
         } else if VocalSeparator.isAvailable, !StemCache.hasModelVocals(directory) {
             // Separated before the vocal model: its voice from the model
             // once (the other stems kept, and made to add up again), what
@@ -355,14 +385,48 @@ final class TrackProcessor: @unchecked Sendable {
         return try separator!.separate(mix, progress: { progress(.separating($0 * share)) }, isCancelled: isCancelled)
     }
 
-    /// The stem model's four stems (see `StemRoformer`).
+    /// The stem model's four stems (see `StemRoformer`), its bass line
+    /// blended with HTDemucs' (`blendedBass`).
     private static func separateBand(_ mix: StereoBuffer, progress: @escaping (Double) -> Void,
                                      isCancelled: @escaping () -> Bool) throws -> [StemKind: StereoBuffer] {
+        var stems: [StemKind: StereoBuffer]
+        do {
+            gpu.wait()
+            defer { gpu.signal() }
+            if isCancelled() { throw CancellationError() }
+            if stemRoformer == nil { stemRoformer = try StemRoformer() }
+            stems = try stemRoformer!.separate(mix, progress: progress, isCancelled: isCancelled)
+        }
+        if let bass = stems[.bass] { stems[.bass] = try blendedBass(mix, bass, isCancelled: isCancelled) }
+        return stems
+    }
+
+    /// Share of HTDemucs' bass line in the bass stem. The stem model's
+    /// bass and HTDemucs' are wrong in different places: together they're
+    /// closer to the true bass than the stem model's alone (median SDR on
+    /// the MUSDB18 test excerpts 9.92 against 9.65 dB, better on 33 of 50;
+    /// for drums and melody a share of HTDemucs only made them worse).
+    static let htBassShare: Float = 0.3
+
+    /// `bass` (the stem model's) with HTDemucs' bass line of `mix` mixed
+    /// in; as it was without the HTDemucs model.
+    private static func blendedBass(_ mix: StereoBuffer, _ bass: StereoBuffer,
+                                    isCancelled: @escaping () -> Bool) throws -> StereoBuffer {
+        guard StemSeparator.isAvailable else { return bass }
         gpu.wait()
         defer { gpu.signal() }
         if isCancelled() { throw CancellationError() }
-        if stemRoformer == nil { stemRoformer = try StemRoformer() }
-        return try stemRoformer!.separate(mix, progress: progress, isCancelled: isCancelled)
+        if separator == nil { separator = try StemSeparator() }
+        guard let ht = try separator!.separate(mix, progress: { _ in }, isCancelled: isCancelled)[.bass],
+              ht.count == bass.count else { return bass }
+        var out = bass
+        var keep = 1 - htBassShare, share = htBassShare
+        let n = vDSP_Length(bass.count)
+        vDSP_vsmul(bass.left, 1, &keep, &out.left, 1, n)
+        vDSP_vsma(ht.left, 1, &share, out.left, 1, &out.left, 1, n)
+        vDSP_vsmul(bass.right, 1, &keep, &out.right, 1, n)
+        vDSP_vsma(ht.right, 1, &share, out.right, 1, &out.right, 1, n)
+        return out
     }
 
     /// One load of a song at a time, for any processor: two (the editor and

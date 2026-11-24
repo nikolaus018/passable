@@ -3,7 +3,10 @@
 and weighted by how bad it is, so two versions of the planner can be
 compared on the same songs instead of by ear.
 
-    tools/score/score.py run  [--bin PATH] [--out DIR] [--fixed] [--models DIR] LIST   measure a set
+    tools/score/score.py run  [--bin PATH] [--out DIR] [--fixed] [--models DIR] [--args "..."] LIST
+                                                                measure a set (--args: more
+                                                                passable-render options, e.g.
+                                                                "--exit-back 2" to try a value)
     tools/score/score.py show DIR                               its score again
     tools/score/score.py diff DIR_A DIR_B                       what changed
 
@@ -125,7 +128,7 @@ def show(folder):
 
 
 def run(args):
-    binary, out, fixed, models = ".build/release/passable-render", None, False, []
+    binary, out, fixed, models, extra = ".build/release/passable-render", None, False, [], []
     while args and args[0].startswith("--"):
         flag = args.pop(0)
         if flag == "--bin":
@@ -136,6 +139,8 @@ def run(args):
             fixed = True
         elif flag == "--models":
             models = ["--models", args.pop(0)]
+        elif flag == "--args":
+            extra = args.pop(0).split()
         else:
             sys.exit(f"unknown option {flag}")
     if len(args) != 1:
@@ -147,7 +152,7 @@ def run(args):
         started = time.time()
         with open(os.path.join(out, mode + ".txt"), "w") as f:
             order = [] if fixed else ["--order"]
-            code = subprocess.call([binary, *order, *models, "--list", songs, "--" + mode], stdout=f, stderr=subprocess.STDOUT)
+            code = subprocess.call([binary, *order, *models, *extra, "--list", songs, "--" + mode], stdout=f, stderr=subprocess.STDOUT)
         print(f"  {mode}: {time.time() - started:.0f} s" + ("" if code == 0 else f" (exit {code})"), flush=True)
     show(out)
 
