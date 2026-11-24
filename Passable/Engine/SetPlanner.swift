@@ -4370,7 +4370,95 @@ enum SetBuilder {
         }
         let learned = SetMix.Learned(unlocked: unlocked, clashed: clashed, locked: locked)
         SetMix.Learned.remember(learned)
+        // (Again until nothing moves: an opening moved ahead of one attack
+        // can find another just before it.)
+        for k in planned.indices {
+            var rounds = 0
+            while rounds < 3, snapOpenings(&planned[k]) { rounds += 1 }
+        }
         return SetMix(tracks: planned, transitions: transitions, length: end + 1, learned: learned)
+    }
+
+    /// Every hard opening of a part, as the song finally plays it (its way
+    /// in and out, loops and bridges all written), moved just ahead of the
+    /// attack it opens on, found in the part's own audio: the first 5 ms
+    /// window back from the loudest one that's under a quarter of it, as
+    /// `passable-render --steps` judges a switch. Each transition is
+    /// snapped as it's built (`snapHardSwitches`), but what's written after
+    /// moved some back onto hits (11 openings of 42 transitions chopped),
+    /// and that skips the voice, whose first consonant a late opening cut.
+    /// Only openings: a part closing is never cut short for it.
+    @discardableResult
+    static func snapOpenings(_ track: inout SetMix.Track) -> Bool {
+        var changed = false
+        let sr = AudioIO.sampleRate, ms = Int(sr / 1000)
+        let volume = LaneParameter.volume.rawValue
+        for stem in StemKind.allCases {
+            guard var envelopes = track.envelopes[stem], envelopes.indices.contains(volume),
+                  let audio = track.stems[stem], audio.count > 10 * ms else { continue }
+            var pts = envelopes[volume].points
+            guard pts.count >= 2 else { continue }
+            func rms(_ from: Int, _ to: Int) -> Double {
+                let lo = max(0, from), hi = min(audio.count, to)
+                guard hi > lo else { return 0 }
+                var sum = 0.0
+                for f in lo..<hi {
+                    let v = Double(audio.left.pointer[f] + audio.right.pointer[f]) * 0.5
+                    sum += v * v
+                }
+                return sqrt(sum / Double(hi - lo))
+            }
+            var moves: [(at: Double, by: Double)] = []
+            for j in pts.indices.dropFirst() {
+                let a = pts[j - 1], b = pts[j]
+                guard b.time - a.time < 0.02, b.value - a.value > 0.5 else { continue }
+                let frame = Int(((b.time - track.stemOffset(at: b.time)) * sr).rounded())
+                var best = -30, bestE = -1.0
+                for d in -30...30 {
+                    let e = rms(frame + d * ms, frame + (d + 5) * ms)
+                    if e > bestE { bestE = e; best = d }
+                }
+                guard bestE > 1e-4 else { continue }
+                var onset = best
+                while onset > -40 && rms(frame + (onset - 1) * ms, frame + (onset + 4) * ms) > bestE * 0.25 { onset -= 1 }
+                // (Sounding all through: inside a held note, not an attack.)
+                guard onset > -40, onset < 0, best >= -2 else { continue }
+                // (5 ms clear of it: the attack found is where it's a
+                // quarter of its peak, and its first milliseconds before.)
+                let by = max(-0.045, min(-0.002, Double(onset - 5) / 1000))
+                let floor = j >= 2 ? pts[j - 2].time + 0.002 : -Double.infinity
+                guard a.time + by > floor else { continue }
+                moves.append((b.time, by))
+                pts[j - 1].time += by
+                pts[j].time += by
+            }
+            guard !moves.isEmpty else { continue }
+            changed = true
+            var moved = Envelope()
+            for p in pts { moved.insert(p) }
+            envelopes[volume] = moved
+            // A filter or an EQ band switched as the part opened goes with it.
+            for param in [LaneParameter.filter, .low, .mid, .high] where envelopes.indices.contains(param.rawValue) {
+                var ep = envelopes[param.rawValue].points
+                var any = false
+                for k in ep.indices.dropFirst() {
+                    guard ep[k].time - ep[k - 1].time <= 0.02, abs(ep[k].value - ep[k - 1].value) > 0.05,
+                          let m = moves.first(where: { abs(ep[k].time - $0.at) < 0.004 }) else { continue }
+                    let floor = k >= 2 ? ep[k - 2].time + 0.001 : -Double.infinity
+                    guard ep[k - 1].time + m.by > floor else { continue }
+                    ep[k - 1].time += m.by
+                    ep[k].time += m.by
+                    any = true
+                }
+                if any {
+                    var e = Envelope()
+                    for p in ep { e.insert(p) }
+                    envelopes[param.rawValue] = e
+                }
+            }
+            track.envelopes[stem] = envelopes
+        }
+        return changed
     }
 
     /// Snaps hard volume switches on drums, bass, and melody cleanly ahead of

@@ -19,10 +19,10 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts": break
-    case "--dump-vocals", "--models", "--vocal-step", "--breaths-at": _ = args.removeFirst()
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--upgrade-vox", "--upgrade-bass", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts": break
+    case "--dump-vocals", "--models", "--vocal-step", "--breaths-at", "--phone-mix", "--title": _ = args.removeFirst()
     case "--order": ordered = true
-    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale": _ = args.removeFirst()
+    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale", "--switch-lead": _ = args.removeFirst()
     case "--list":
         let text = try String(contentsOfFile: args.removeFirst(), encoding: .utf8)
         songs += text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -80,6 +80,7 @@ if let k = CommandLine.arguments.firstIndex(of: "--under-cap") { AutoPlacement.u
 if let k = CommandLine.arguments.firstIndex(of: "--cut-scale") { AutoPlacement.cutScale = Float(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--hole-scale") { AutoPlacement.holeScale = Float(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--busy-scale") { AutoPlacement.busyScale = Float(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--switch-lead") { TransitionBuilder.switchLead = Double(CommandLine.arguments[k + 1])! }
 
 // Songs not separated yet need the models: the installed app's.
 ModelLocation.directory = URL(fileURLWithPath: CommandLine.arguments.firstIndex(of: "--models").map { CommandLine.arguments[$0 + 1] }
@@ -112,6 +113,64 @@ for url in songs {
     if Date().timeIntervalSince(clock) > 5 { print("  \(tracks.count)/\(songs.count) \(SongTitle.of(url)) (\(seconds(clock)))") }
 }
 print("loaded \(tracks.count) songs in \(seconds(clock))")
+
+// Copies of songs (PASSABLE_CACHE) given a cleaner voice or bass, to measure
+// the planner against them: --upgrade-vox mixes ViperX's BS-RoFormer voice
+// (VoxRoformer in --models) half into the voice, --upgrade-bass htdemucs_ft's
+// bass (HTDemucsBass) 30 % into the bass; the stems are made to add up again
+// and measured again on the next load. Never the app's own cache.
+if CommandLine.arguments.contains("--upgrade-vox") || CommandLine.arguments.contains("--upgrade-bass") {
+    guard ProcessInfo.processInfo.environment["PASSABLE_CACHE"] != nil else {
+        print("--upgrade-vox/--upgrade-bass work on copies only: set PASSABLE_CACHE"); exit(1)
+    }
+    let vox = CommandLine.arguments.contains("--upgrade-vox")
+    let roformer = vox ? try StemRoformer(name: "VoxRoformer") : nil
+    let ft = vox ? nil : try StemSeparator(model: ModelLocation.fallback(named: "HTDemucsBass"))
+    for t in tracks {
+        let dir = try StemCache.directory(for: t.url)
+        let marker = dir.appendingPathComponent(vox ? "vocals.vox.1" : "bass.ft.1")
+        if FileManager.default.fileExists(atPath: marker.path) { continue }
+        let mix = try AudioIO.loadStereo(url: t.url)
+        var stems = try StemCache.loadStems(from: dir).mapValues { $0.copyStereo() }
+        guard var voice = stems[.vocals], var bass = stems[.bass] else { continue }
+        func blend(_ a: inout StereoBuffer, _ b: StereoBuffer, share: Float) {
+            guard a.count == b.count else { return }
+            var keep = 1 - share, s = share
+            let n = vDSP_Length(a.count)
+            vDSP_vsmul(a.left, 1, &keep, &a.left, 1, n); vDSP_vsma(b.left, 1, &s, a.left, 1, &a.left, 1, n)
+            vDSP_vsmul(a.right, 1, &keep, &a.right, 1, n); vDSP_vsma(b.right, 1, &s, a.right, 1, &a.right, 1, n)
+        }
+        if let roformer, let other = try roformer.separateNamed(mix, progress: { _ in }).first(where: { $0.key.lowercased() == "vocals" })?.value {
+            blend(&voice, other, share: 0.5)
+            stems[.vocals] = voice
+        }
+        if let ft, let other = try ft.separate(mix, progress: { _ in })[.bass] {
+            blend(&bass, other, share: 0.3)
+            stems[.bass] = bass
+        }
+        var rest = mix
+        vDSP_vsub(voice.left, 1, mix.left, 1, &rest.left, 1, vDSP_Length(mix.count))
+        vDSP_vsub(voice.right, 1, mix.right, 1, &rest.right, 1, vDSP_Length(mix.count))
+        var others = stems.filter { $0.key != .vocals }
+        StemResidual.redistribute(mix: rest, stems: &others)
+        others[.vocals] = voice
+        FileManager.default.createFile(atPath: marker.path, contents: Data())
+        for (kind, buffer) in others { try StemAudio.save(buffer, directory: dir, name: kind.rawValue) }
+        StemCache.forgetDerivedAudio(in: dir)
+        for steady in [dir.appendingPathComponent(Steadying.folderName)] { try? FileManager.default.removeItem(at: steady) }
+        // (Audio derived from the old stems: a mashup's guest voice.)
+        for f in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] where f.hasPrefix("guest-") {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(f))
+        }
+        if var analysis = StemCache.loadAnalysis(from: dir) {
+            analysis.structure?.stemLevel = nil
+            if vox { analysis.structure?.vocalBreaths = nil }
+            StemCache.saveAnalysis(analysis, to: dir)
+        }
+        print("upgraded \(SongTitle.of(t.url))")
+    }
+    exit(0)
+}
 if let k = CommandLine.arguments.firstIndex(of: "--dump-vocals") {
     // Each song's vocal stem as Passable separates it, raw 32-bit floats
     // per channel, in a folder named after the song's own folder: what
@@ -1502,6 +1561,22 @@ if CommandLine.arguments.contains("--fidelity") {
     exit(0)
 }
 let rendered = Date()
+// The set as the iPhone app plays it (.passablemix), as the Mac app's
+// "Save as File" writes it: its songs and handovers, and the whole mix at
+// the app's own volume, 256 kbit/s AAC.
+if let k = CommandLine.arguments.firstIndex(of: "--phone-mix") {
+    let destination = URL(fileURLWithPath: CommandLine.arguments[k + 1])
+    let title = CommandLine.arguments.firstIndex(of: "--title").map { CommandLine.arguments[$0 + 1] } ?? PhoneMix.suggestedTitle()
+    let manifest = PhoneMix.manifest(for: mix, titles: tracks.map { SongTitle.of($0.url) }, title: title)
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent("phonemix-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: temp) }
+    let audio = temp.appendingPathComponent("mix.m4a")
+    try Exporter.render(snapshot: mix.snapshot(masterGain: 0.85), range: 0..<Int(mix.length * sr), tail: 3, to: audio) { _ in }
+    try PassableMix.write(manifest, audio: audio, to: destination)
+    print("wrote \(destination.path): \(manifest.songs.count) songs, \(Int(mix.length / 60)) min")
+    exit(0)
+}
 if whole {
     let url = outDir.appendingPathComponent("set.wav")
     try Exporter.render(snapshot: snapshot, range: 0..<Int(mix.length * sr), tail: 2, to: url) { _ in }

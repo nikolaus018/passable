@@ -1157,3 +1157,46 @@ final class PercentileTests: XCTestCase {
         }
     }
 }
+
+final class SnapOpeningsTests: XCTestCase {
+    /// A part opened just after its hit has begun is opened ahead of it;
+    /// one opened in a gap, or over a note held all through, is left.
+    func testOpeningsMoveAheadOfTheAttack() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let sr = AudioIO.sampleRate, n = Int(4 * sr)
+        // Drums: silence, then a hit starting at 0.980 s (loudest at 1.000).
+        var drums = [Float](repeating: 0, count: n)
+        for f in Int(0.980 * sr)..<Int(1.2 * sr) { drums[f] = 0.8 * Float(sin(Double(f) * 0.3)) * Float(min(1, Double(f - Int(0.980 * sr)) / (0.02 * sr))) }
+        // Melody: a tone held all through.
+        let melody = (0..<n).map { 0.5 * Float(sin(Double($0) * 0.05)) }
+        let silent = [Float](repeating: 0, count: n)
+        for (name, x) in [("drums", drums), ("other", melody), ("bass", silent), ("vocals", silent)] {
+            try StemAudio.save(StereoBuffer(left: x, right: x), directory: dir, name: name)
+        }
+        var stems: [StemKind: StemAudio] = [:]
+        for kind in StemKind.allCases { stems[kind] = try StemAudio.load(directory: dir, name: kind.rawValue) }
+        let analysis = TrackAnalysis(grid: BeatGrid(bpm: 120, firstDownbeat: 0), key: MusicalKey(tonicPitchClass: 0, isMajor: true),
+                                     duration: 4, structure: nil, version: TrackAnalysis.currentVersion)
+        let loaded = TrackProcessor.Loaded(directory: dir, stems: stems, analysis: analysis, peaks: [:])
+        // Both open with an 8 ms ramp done at 1.000 s, on the hit.
+        func opening() -> [Envelope] {
+            var volume = Envelope()
+            volume.insert(AutomationPoint(time: 0.5, value: 0))
+            volume.insert(AutomationPoint(time: 0.992, value: 0))
+            volume.insert(AutomationPoint(time: 1.000, value: 1))
+            return LaneParameter.allCases.map { $0 == .volume ? volume : Envelope() }
+        }
+        var track = SetMix.Track(url: dir.appendingPathComponent("song.wav"), loaded: loaded, map: .constant(1), matched: nil,
+                                 offset: 0, envelopes: [.drums: opening(), .other: opening()])
+        XCTAssertTrue(SetBuilder.snapOpenings(&track))
+        let drumsOpen = track.envelopes[.drums]![LaneParameter.volume.rawValue].points[2].time
+        XCTAssertLessThan(drumsOpen, 0.981, "opened ahead of the hit's start")
+        XCTAssertGreaterThan(drumsOpen, 0.95, "by no more than it takes")
+        XCTAssertEqual(track.envelopes[.other]![LaneParameter.volume.rawValue].points[2].time, 1.000, accuracy: 1e-9,
+                       "a held note has no attack to open ahead of")
+        // Again: nothing more to move.
+        XCTAssertFalse(SetBuilder.snapOpenings(&track))
+    }
+}

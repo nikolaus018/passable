@@ -511,8 +511,9 @@ struct TransitionBuilder {
     /// next one opens after it.
     static let clashSweep = 2.0
 
-    /// Seconds ahead of the beat that a part is switched on or off.
-    static let switchLead = 0.025
+    /// Seconds ahead of the beat that a part is switched on or off
+    /// (passable-render --switch-lead, to measure).
+    nonisolated(unsafe) static var switchLead = 0.025
     /// Seconds a switch takes: a part cut in or out, a filter or an EQ band
     /// snapped open or shut. In one step (a millisecond or two), whatever
     /// the part was sounding is chopped mid-wave, which puts a tick on the
