@@ -59,7 +59,7 @@ struct SetView: View {
             Button { showRequest = true } label: {
                 Label("Request…", systemImage: "music.note.list")
             }
-            .disabled(set.mix == nil)
+            .disabled(set.mix == nil || set.isPartial)
             .help("Mix a song into the set as soon as it fits, without stopping the music")
             Button { OpenPanel.chooseMany { set.add($0) } } label: {
                 Label("Add Files…", systemImage: "folder")
@@ -105,6 +105,7 @@ struct SetView: View {
 
     private static func progress(_ status: Deck.Status) -> String {
         switch status {
+        case .queued: return "waiting…"
         case .decoding: return "getting it…"
         case .separating(let p): return "separating stems \(Int(p * 100))%"
         case .analyzing: return "finding beat and key…"
@@ -116,7 +117,7 @@ struct SetView: View {
         let n = set.items.count
         guard n > 0 else { return "Add songs; Passable orders them and mixes them into one set." }
         var text = "\(n) song\(n == 1 ? "" : "s")"
-        if set.length > 0 { text += " · \(Theme.time(set.length))" }
+        if set.length > 0, !set.isPartial { text += " · \(Theme.time(set.length))" }
         if let note = set.requestNote { text += " · \(note)" } else if n > 1 { text += " · drag songs to reorder" }
         return text
     }
@@ -142,7 +143,8 @@ struct SetView: View {
                         .contentShape(Rectangle())
                         .onTapGesture(count: 2) { set.play(song: index) }
                         .contextMenu {
-                            Button("Play from Here") { set.play(song: index) }.disabled(set.mix == nil)
+                            Button("Play from Here") { set.play(song: index) }
+                                .disabled(set.mix.map { index >= $0.tracks.count } ?? true)
                             Button("Remove from Set", role: .destructive) { set.remove(item.id) }
                         }
                         .help("Double-click to play the set from this song")
@@ -191,18 +193,21 @@ private struct TrackRow: View {
             }
             Spacer()
             if let a = item.analysis {
-                Stat(label: "BPM", value: String(format: "%.1f", a.grid.bpm))
-                Stat(label: "Key", value: a.key.camelotCode)
+                // Fixed widths, so the columns line up from row to row.
+                Stat(label: "BPM", value: String(format: "%.1f", a.grid.bpm)).frame(width: 52, alignment: .leading)
+                Stat(label: "Key", value: a.key.camelotCode).frame(width: 34, alignment: .leading)
                 EnergyMeter(value: SetOrdering.energy(a))
             }
             Button(action: onRemove) { Image(systemName: "xmark") }
                 .buttonStyle(.borderless)
+                .accessibilityLabel("Remove \(item.title)")
                 .help("Remove from the set")
         }
     }
 
     @ViewBuilder private var status: some View {
         switch item.status {
+        case .queued: Text("Waiting to load…").font(.caption).foregroundStyle(.tertiary)
         case .decoding: Text("Decoding…").font(.caption).foregroundStyle(.secondary)
         case .separating(let p): Text("Separating stems \(Int(p * 100))%").font(.caption).foregroundStyle(.secondary)
         case .analyzing: Text("Finding beat grid, key & structure…").font(.caption).foregroundStyle(.secondary)
@@ -281,6 +286,7 @@ struct SetTransportBar: View {
             }
             .keyboardShortcut(.leftArrow, modifiers: [.command])
             .disabled(set.mix == nil)
+            .accessibilityLabel("Back to this transition")
             .help("Back to the start of this song's transition; twice for the one before (⌘← or ⏮)")
 
             Button { set.togglePlay() } label: {
@@ -288,6 +294,7 @@ struct SetTransportBar: View {
             }
             .keyboardShortcut(.space, modifiers: [])
             .disabled(set.mix == nil)
+            .accessibilityLabel(transport.isPlaying ? "Pause" : "Play")
             .help("Play / Pause (Space)")
 
             Button { set.skipForward() } label: {
@@ -295,6 +302,7 @@ struct SetTransportBar: View {
             }
             .keyboardShortcut(.rightArrow, modifiers: [.command])
             .disabled(set.mix == nil || !set.canSkipForward)
+            .accessibilityLabel("Next transition")
             .help("Jump to just before the next transition (⌘→ or ⏭)")
 
             Text("\(Theme.time(transport.seconds)) / \(Theme.time(set.length))")
@@ -312,6 +320,8 @@ struct SetTransportBar: View {
             Slider(value: Binding(get: { transport.seconds }, set: { set.seek(to: $0) }),
                    in: 0...max(1, set.length))
                 .disabled(set.mix == nil)
+                .accessibilityLabel("Position in the set")
+                .accessibilityValue("\(Theme.time(transport.seconds)) of \(Theme.time(set.length))")
 
             if let i = set.currentIndex, set.items.indices.contains(i) {
                 Text(set.items[i].title)
@@ -319,10 +329,9 @@ struct SetTransportBar: View {
                     .frame(maxWidth: 220, alignment: .leading)
             }
 
-            LampButton()
-
             Image(systemName: "speaker.wave.2").foregroundStyle(.secondary)
             Slider(value: $set.masterVolume, in: 0...1).frame(width: 90)
+                .accessibilityLabel("Volume")
 
             if let p = set.exportProgress {
                 ProgressView(value: p).frame(width: 110)
@@ -347,7 +356,7 @@ struct SetTransportBar: View {
                 }
                 .menuStyle(.borderedButton)
                 .fixedSize()
-                .disabled(set.mix == nil)
+                .disabled(set.mix == nil || set.isPartial)
                 PhoneButton()
             }
         }

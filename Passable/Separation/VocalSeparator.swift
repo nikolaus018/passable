@@ -262,6 +262,15 @@ final class RoformerSTFT {
     /// `channel` of the spectrum in `spec` times `mask` (same layout),
     /// back to a chunk of samples.
     func inverse(spec: UnsafePointer<Float>, mask: [Float], channel: Int, into out: inout [Float]) {
+        mask.withUnsafeBufferPointer { m in
+            out.withUnsafeMutableBufferPointer { o in
+                inverse(spec: spec, mask: m.baseAddress!, channel: channel, into: o.baseAddress!)
+            }
+        }
+    }
+
+    /// The same, on raw memory (one instance per thread: it has scratch).
+    func inverse(spec: UnsafePointer<Float>, mask: UnsafePointer<Float>, channel: Int, into out: UnsafeMutablePointer<Float>) {
         let n = Self.nfft, half = n / 2, pad = n / 2
         for i in padded.indices { padded[i] = 0 }
         for t in 0..<frames {

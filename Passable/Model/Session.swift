@@ -4,6 +4,8 @@ import Foundation
 struct Deck {
     enum Status: Equatable {
         case empty
+        /// Waiting for a free slot: three songs load at a time.
+        case queued
         case decoding
         case separating(Double)
         case analyzing
@@ -12,7 +14,7 @@ struct Deck {
 
         var isBusy: Bool {
             switch self {
-            case .decoding, .separating, .analyzing: return true
+            case .queued, .decoding, .separating, .analyzing: return true
             default: return false
             }
         }

@@ -165,8 +165,12 @@ struct LaneHeader: View {
             HStack(spacing: 3) {
                     toggle("M", on: lane.isMuted, tint: .orange) { session.updateLane(lane.id, undoable: false) { $0.isMuted.toggle() } }
                         .help("Mute")
+                        .accessibilityLabel("Mute \(lane.title)")
+                        .accessibilityAddTraits(lane.isMuted ? .isSelected : [])
                     toggle("S", on: lane.isSoloed, tint: .yellow) { session.updateLane(lane.id, undoable: false) { $0.isSoloed.toggle() } }
                         .help("Solo")
+                        .accessibilityLabel("Solo \(lane.title)")
+                        .accessibilityAddTraits(lane.isSoloed ? .isSelected : [])
                     Menu {
                         ForEach(LaneParameter.allCases) { p in
                             Button {
@@ -313,6 +317,24 @@ struct LaneCanvas: View {
         .background(Theme.color(lane.side).opacity(lane.isMuted ? 0.01 : 0.035))
         .overlay(alignment: .bottom) { Divider() }
         .contextMenu { menu }
+        // Drawn, so VoiceOver reads a summary of the lane instead.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(lane.title), \(parameter.displayName) automation")
+        .accessibilityValue(accessibilitySummary)
+        .accessibilityAction(named: "Clear \(parameter.displayName) Automation") {
+            session.updateLane(lane.id) { $0[parameter].removeAll() }
+        }
+    }
+
+    /// The lane's automation in words: how many points, and where it
+    /// starts and ends.
+    private var accessibilitySummary: String {
+        let points = envelope.points
+        guard let first = points.first, let last = points.last else { return "No automation" }
+        let span = points.count == 1 ? "at \(Theme.time(first.time))"
+            : "from \(Theme.time(first.time)) to \(Theme.time(last.time))"
+        return "\(points.count) point\(points.count == 1 ? "" : "s") \(span), \(parameter.format(first.value)) to \(parameter.format(last.value))"
+            + (lane.isMuted ? ", muted" : "") + (lane.isSoloed ? ", soloed" : "")
     }
 
     // MARK: Geometry

@@ -94,6 +94,8 @@ struct TransitionPanel: View {
                         .font(.system(.body, design: .monospaced))
                 }
                 .help("Shift B's key (for the whole song)")
+                .accessibilityLabel("Shift B's key")
+                .accessibilityValue("\(session.semitones) semitones")
             }
         }
         .font(.callout)
@@ -110,9 +112,13 @@ struct TransitionPanel: View {
             Text("B's bar").foregroundStyle(.secondary)
             Stepper("\(session.cueBar + 1)", value: $session.cueBar, in: 0...max(0, session.barCountB - 1))
                 .font(.system(.body, design: .monospaced))
+                .accessibilityLabel("B's bar")
+                .accessibilityValue("\(session.cueBar + 1)")
             Text("on A's bar").foregroundStyle(.secondary)
             Stepper("\(session.entryBar + 1)", value: $session.entryBar, in: entryRange, step: 1)
                 .font(.system(.body, design: .monospaced))
+                .accessibilityLabel("On A's bar")
+                .accessibilityValue("\(session.entryBar + 1)")
             Spacer()
             ForEach([-4, 4], id: \.self) { d in
                 Button(d > 0 ? "+\(d)" : "\(d)") {
@@ -127,13 +133,13 @@ struct TransitionPanel: View {
 
     private var presetControls: some View {
         HStack(spacing: 8) {
-            Picker("", selection: Binding(get: { session.preset }, set: { session.choosePreset($0) })) {
+            Picker("Preset", selection: Binding(get: { session.preset }, set: { session.choosePreset($0) })) {
                 ForEach(TransitionPreset.allCases) { Text($0.displayName).tag($0) }
             }
             .labelsHidden()
             .frame(width: 120)
             .help(session.preset.summary)
-            Picker("", selection: Binding(get: { session.transitionBars }, set: { session.chooseBars($0) })) {
+            Picker("Length", selection: Binding(get: { session.transitionBars }, set: { session.chooseBars($0) })) {
                 ForEach([1, 2, 4, 8, 16, 24, 32, 64], id: \.self) { Text("\($0) bars").tag($0) }
             }
             .labelsHidden()

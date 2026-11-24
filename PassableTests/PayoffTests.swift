@@ -304,7 +304,7 @@ final class PayoffTests: XCTestCase {
     func testShapeHearsTheRoom() {
         let flat = TransitionShape(.stemSwap, bars: 16, vocalBar: 16, keysClash: false, lowSwap: 8)
         let cut = TransitionShape(.stemSwap, bars: 16, vocalBar: 16, keysClash: false, lowSwap: 8, room: 5)
-        let a = flat.gains[.a]![.other]![5].high, b = cut.gains[.a]![.other]![5].high
+        let a = flat.gain(.a, .other, 5)!.high, b = cut.gain(.a, .other, 5)!.high
         XCTAssertEqual(10 * log10(b / a), -2.75, accuracy: 0.3)
     }
 

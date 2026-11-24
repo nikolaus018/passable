@@ -74,7 +74,15 @@ final class TrackProcessor: @unchecked Sendable {
         }
     }
 
+    /// Where a first load's time goes, with PASSABLE_TIMING set (stderr).
+    static let timing = ProcessInfo.processInfo.environment["PASSABLE_TIMING"] != nil
+    static func mark(_ what: String, since start: Date) {
+        guard timing else { return }
+        FileHandle.standardError.write(String(format: "[timing] %6.1f s  %@\n", Date().timeIntervalSince(start), what).data(using: .utf8)!)
+    }
+
     private func loadNow(_ url: URL, ticket: Ticket, progress: @escaping @Sendable (Progress) -> Void) throws -> Loaded {
+        let began = Date()
         let directory = try StemCache.directory(for: url)
         let song = Self.songLock(directory)
         song.lock()
@@ -83,11 +91,14 @@ final class TrackProcessor: @unchecked Sendable {
         if !StemCache.hasStems(in: directory) {
             progress(.decoding)
             let mix = try AudioIO.loadStereo(url: url)
+            Self.mark("decoded", since: began)
             if ticket.isCancelled { throw CancellationError() }
             var stems = try Self.separate(mix, progress: progress, isCancelled: { ticket.isCancelled })
+            Self.mark("stems (stem model + bass blend)", since: began)
             let bandVoice = StemRoformer.isAvailable ? stems[.vocals] : nil
             let modelVocals = try Self.replaceVocals(mix: mix, stems: &stems, blending: bandVoice, progress: progress,
                                                      isCancelled: { ticket.isCancelled })
+            Self.mark("voice (vocal model)", since: began)
             if !modelVocals { StemResidual.redistribute(mix: mix, stems: &stems) }
             for (kind, buffer) in stems {
                 try StemAudio.save(buffer, directory: directory, name: kind.rawValue)
@@ -266,7 +277,9 @@ final class TrackProcessor: @unchecked Sendable {
             analysis = cached
         } else {
             progress(.analyzing)
+            Self.mark("saved stems", since: began)
             analysis = TrackAnalyzer.analyze(stems: stems)
+            Self.mark("beat, key, structure", since: began)
             StemCache.saveAnalysis(analysis, to: directory)
         }
         if analysis.tempoCheck != TrackAnalysis.tempoCheck {
@@ -279,6 +292,7 @@ final class TrackProcessor: @unchecked Sendable {
         }
         // (Sections from the neural structure model, once, where the app
         // has it, on the final grid: new songs, and songs measured without it.)
+        Self.mark("tempo check", since: began)
         if let analyzer = StructureAnalyzer.shared, analysis.structure != nil, analysis.structure?.sections == nil {
             let bars = analysis.grid.barCount(duration: analysis.duration)
             if let found = try? analyzer.analyze(stems: stems, grid: analysis.grid, barCount: bars) {
@@ -288,9 +302,11 @@ final class TrackProcessor: @unchecked Sendable {
                 StemCache.saveAnalysis(analysis, to: directory)
             }
         }
+        Self.mark("sections (structure model)", since: began)
         if !languages.isEmpty, let vocals = stems[.vocals], let structure = analysis.structure, wantsWords(structure) {
             progress(.analyzing)
             listening.wait()
+            Self.mark("words heard", since: began)
             switch heard.outcome ?? Lyrics.listen(vocals: vocals) {
             case .heard(let heard):
                 analysis.structure?.setLines(heard.lines, tried: languages, grid: analysis.grid)

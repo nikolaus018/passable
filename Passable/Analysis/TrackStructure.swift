@@ -1,3 +1,4 @@
+import Foundation
 import Accelerate
 
 /// Bar-by-bar activity of each stem, which is most of what a DJ reads off a
@@ -7,7 +8,7 @@ struct TrackStructure: Codable, Equatable {
     /// Per stem, per bar: RMS relative to that stem's loud bars (≈0…1+).
     var activity: [String: [Float]]
     /// Level of the whole track per bar, in dB (RMS, full scale = 0).
-    var loudness: [Float] = []
+    var loudness: [Float] = [] { didSet { derived = DerivedValues() } }
     /// How loud the track sounds when it's going: `referenceLoudness`
     /// measured K-weighted (ITU-R BS.1770), as the ear weighs it. Plain RMS
     /// is ruled by the sub-bass, so an 808 track read loud and was turned
@@ -17,7 +18,7 @@ struct TrackStructure: Codable, Equatable {
     /// transition does to each stem (fades, filters, low kills) is judged
     /// from these before anything is rendered. Optional so structures
     /// measured before they existed still decode; the loader re-measures.
-    var stemLevel: [String: [Float]]?
+    var stemLevel: [String: [Float]]? { didSet { derived = DerivedValues() } }
     var stemLowLevel: [String: [Float]]?
     /// How "below the low split" was measured (see `measure`); structures
     /// measured another way are measured again on load.
@@ -30,6 +31,9 @@ struct TrackStructure: Codable, Equatable {
     static let activityCap: Float = 2
     var activityMeasure: Int?
     static let activityMeasure = 2
+    /// `referenceLoudness` and `vocalReference`, worked out once: the
+    /// planner asks for them thousands of times a set.
+    var derived = DerivedValues()
     /// The vocal's level per beat, in dB: where its lines start and stop,
     /// which bars are too coarse for. Optional like the above.
     var vocalBeatLevel: [Float]?
@@ -128,9 +132,11 @@ struct TrackStructure: Codable, Equatable {
     /// (80th percentile), which is what a DJ matches with the trim knob.
     /// Integrated loudness would be dragged down by intros and breakdowns.
     var referenceLoudness: Float {
-        let bars = loudness.filter { $0 > -60 }.sorted()
-        guard !bars.isEmpty else { return -14 }
-        return bars[min(bars.count - 1, Int(Double(bars.count) * 0.8))]
+        derived.referenceLoudness {
+            let bars = loudness.filter { $0 > -60 }.sorted()
+            guard !bars.isEmpty else { return -14 }
+            return bars[min(bars.count - 1, Int(Double(bars.count) * 0.8))]
+        }
     }
 
     func meanLoudness(bars: Range<Int>) -> Float {
@@ -673,10 +679,12 @@ extension TrackStructure {
     /// for an instrumental, whose vocal stem is only separation bleed: its
     /// "lines" would be noise.
     var vocalReference: Float? {
-        guard let levels = stemLevel?[StemKind.vocals.rawValue]?.filter({ $0 > -80 }).sorted(), !levels.isEmpty
-        else { return nil }
-        let reference = levels[min(levels.count - 1, levels.count * 9 / 10)]
-        return reference > -45 ? reference : nil
+        derived.vocalReference {
+            guard let levels = stemLevel?[StemKind.vocals.rawValue]?.filter({ $0 > -80 }).sorted(), !levels.isEmpty
+            else { return nil }
+            let reference = levels[min(levels.count - 1, levels.count * 9 / 10)]
+            return reference > -45 ? reference : nil
+        }
     }
 
     /// Per beat: no more of the vocal than breath and bleed. nil for
@@ -1098,7 +1106,27 @@ struct TransitionShape {
     /// Bars (from B's entry) the automation spans: before B's downbeat for
     /// a Wash Out, after it for the blends.
     let first: Int, last: Int
-    private(set) var gains: [DeckSide: [StemKind: [Gains]]] = [:]
+    /// Per lane (side and stem, see `slot`), per bar of the span: what
+    /// the automation lets through. An array, not a dictionary: placement
+    /// reads it in its innermost loops.
+    private var table: [[Gains]?] = Array(repeating: nil, count: 8)
+
+    private static func slot(_ side: DeckSide, _ stem: StemKind) -> Int {
+        let s: Int
+        switch stem {
+        case .drums: s = 0
+        case .bass: s = 1
+        case .other: s = 2
+        case .vocals: s = 3
+        }
+        return (side == .a ? 0 : 4) + s
+    }
+
+    /// Lane `side`·`stem` in bar `i` of the span (nil: no such lane).
+    @inline(__always)
+    func gain(_ side: DeckSide, _ stem: StemKind, _ i: Int) -> Gains? {
+        table[Self.slot(side, stem)]?[i]
+    }
 
     init(_ preset: TransitionPreset, bars n: Int, vocalBar: Int?, keysClash: Bool, lowSwap: Int?, mashup: Bool = false,
          drumsLayer: Bool = true, drumsLinger: Bool = true, room: Double = 0, dropMoment: Bool = false,
@@ -1164,7 +1192,7 @@ struct TransitionShape {
                 }
                 perBar.append((low, high))
             }
-            gains[lane.side, default: [:]][lane.stem] = perBar
+            table[Self.slot(lane.side, lane.stem)] = perBar
         }
     }
 
@@ -1209,7 +1237,7 @@ struct TransitionShape {
                 // Before it A plays on its own, past the end B does.
                 let g: Gains = k < first ? (side == .a ? (1, 1) : (0, 0))
                     : k >= last ? (side == .a ? (0, 0) : (1, 1))
-                    : gains[side]?[stem]?[k - first] ?? (1, 1)
+                    : gain(side, stem, k - first) ?? (1, 1)
                 power += g.low * levels[bar].low + g.high * levels[bar].high
             }
         }
@@ -1224,7 +1252,7 @@ struct TransitionShape {
             for (stem, levels) in p where bar >= 0 && bar < levels.count {
                 let g: Gains = k < first ? (side == .a ? (1, 1) : (0, 0))
                     : k >= last ? (side == .a ? (0, 0) : (1, 1))
-                    : gains[side]?[stem]?[k - first] ?? (1, 1)
+                    : gain(side, stem, k - first) ?? (1, 1)
                 power += g.high * levels[bar].high
             }
         }
@@ -1238,7 +1266,7 @@ struct TransitionShape {
             guard let levels = p[.drums], bar >= 0, bar < levels.count else { continue }
             let g: Gains = k < first ? (side == .a ? (1, 1) : (0, 0))
                 : k >= last ? (side == .a ? (0, 0) : (1, 1))
-                : gains[side]?[.drums]?[k - first] ?? (1, 1)
+                : gain(side, .drums, k - first) ?? (1, 1)
             power += g.low * levels[bar].low + g.high * levels[bar].high
         }
         return 10 * log10(max(power, 1e-9))
@@ -1258,7 +1286,7 @@ extension TransitionShape {
         var total: Float = 0, parts: [Float] = []
         for (s, p, bar) in [(DeckSide.a, a, e + k), (.b, b, c + k)] {
             for (stem, levels) in p where bar >= 0 && bar < levels.count {
-                let heard = (gains[s]?[stem]?[k - first].high ?? 1) * levels[bar].high
+                let heard = (gain(s, stem, k - first)?.high ?? 1) * levels[bar].high
                 total += heard
                 if stem == .other || stem == .vocals { parts.append(heard) }
             }
@@ -1275,7 +1303,7 @@ extension TransitionShape {
         var side: [Float] = [0, 0]
         for (i, (s, p, bar)) in [(DeckSide.a, a, e + k), (.b, b, c + k)].enumerated() {
             for (stem, levels) in p where bar >= 0 && bar < levels.count {
-                side[i] += (gains[s]?[stem]?[k - first].high ?? 1) * levels[bar].high
+                side[i] += (gain(s, stem, k - first)?.high ?? 1) * levels[bar].high
             }
         }
         // Within 6 dB of each other: a little inside the 8 dB of the two
@@ -1352,7 +1380,7 @@ enum AutoPlacement {
         for k in max(from, shape.first)..<min(to, shape.last) {
             for (side, p, at) in [(DeckSide.a, a, e + k), (.b, b, c + k)] {
                 for (stem, levels) in p where at >= 0 && at < levels.count {
-                    let heard = (shape.gains[side]?[stem]?[k - shape.first].high ?? 1) * levels[at].high
+                    let heard = (shape.gain(side, stem, k - shape.first)?.high ?? 1) * levels[at].high
                     if side == .b { pb += heard } else if stem == .drums || stem == .other { cuttable += heard } else { kept += heard }
                 }
             }
@@ -1413,8 +1441,17 @@ enum AutoPlacement {
             case nil: return none
             }
         }
-        return cost(entry, word: 0.3, none: 1.0) + cost(exit, word: 0.4, none: 1.2)
+        return cutScale * (cost(entry, word: 0.3, none: 1.0) + cost(exit, word: 0.4, none: 1.2))
     }
+
+    /// How much a poor vocal cut counts against a spot, against the rest
+    /// of what's weighed (passable-render --cut-scale, to measure).
+    nonisolated(unsafe) static var cutScale: Float = 1.0
+    /// How much a blend's level holes and its clutter (three or more
+    /// melodies and voices at once) count against a spot (passable-render
+    /// --hole-scale, --busy-scale, to measure).
+    nonisolated(unsafe) static var holeScale: Float = 1.0
+    nonisolated(unsafe) static var busyScale: Float = 1.0
 
     /// A song's phrases, bar by bar: `edge` (0…1) is how much of a part of
     /// the song ends and another begins on the bar's downbeat, which is
@@ -2596,7 +2633,7 @@ enum AutoPlacement {
                                     let level = shape.mixLevel(k, a: powerA, e: e, b: powerB, c: c)
                                     if k != meantBar {
                                         let hole = max(0, floor - level)
-                                        penalty += 0.16 * hole + 0.07 * hole * hole + 0.04 * max(0, level - ceiling)
+                                        penalty += AutoPlacement.holeScale * (0.16 * hole + 0.07 * hole * hole) + 0.04 * max(0, level - ceiling)
                                         if k < shape.last + 2 && !highWholeA.bars.isEmpty && !highTrackB.bars.isEmpty {
                                             let hLvl = shape.highLevel(k, a: powerA, e: e, b: powerB, c: c)
                                             let hHole = max(0, floorHigh - hLvl)
@@ -2613,7 +2650,7 @@ enum AutoPlacement {
                                 let busy = (shape.first..<shape.last).filter {
                                     shape.busy($0, a: powerA, e: e, b: powerB, c: c)
                                 }.count
-                                penalty += 0.45 * Float(busy) + 0.30 * Float(max(0, busy - 1))
+                                penalty += AutoPlacement.busyScale * (0.45 * Float(busy) + 0.30 * Float(max(0, busy - 1)))
                                 busiest = max(busiest, busy)
                                 // The beat gone for a bar while the blend runs:
                                 // nothing keeps time (A's own drum break, its
@@ -2800,4 +2837,44 @@ enum AutoPlacement {
                       carry: bestCarry, loopBars: loop, loopBack: loop > 0 ? loopBack(best.entry) : 0,
                       holdMelody: bestHoldMelody)
     }
+}
+
+/// Values a structure works out from what it stores, kept with it once
+/// worked out: never saved and never compared. A new one replaces it when
+/// what they come from changes (see `TrackStructure.loudness`).
+final class DerivedValues: Codable, Equatable, @unchecked Sendable {
+    private let lock = NSLock()
+    private var loudness: Float?
+    private var vocal: Float??
+
+    init() {}
+    required init(from decoder: Decoder) {}
+    func encode(to encoder: Encoder) {}
+    static func == (a: DerivedValues, b: DerivedValues) -> Bool { true }
+
+    func referenceLoudness(_ make: () -> Float) -> Float {
+        lock.lock(); defer { lock.unlock() }
+        if let loudness { return loudness }
+        let value = make()
+        loudness = value
+        return value
+    }
+
+    func vocalReference(_ make: () -> Float?) -> Float? {
+        lock.lock(); defer { lock.unlock() }
+        if let vocal { return vocal }
+        let value = make()
+        vocal = .some(value)
+        return value
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// Never in the file: a fresh one.
+    func decode(_ type: DerivedValues.Type, forKey key: Key) throws -> DerivedValues { DerivedValues() }
+}
+
+extension KeyedEncodingContainer {
+    /// Never written.
+    mutating func encode(_ value: DerivedValues, forKey key: Key) throws {}
 }

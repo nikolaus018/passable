@@ -23,9 +23,12 @@ final class StemRoformer {
     let instruments: [String]
     private let stft: RoformerSTFT
     let chunk: Int
-    private var halves: [Float] = []
+    /// One STFT per stem, for turning the stems back into sound at once.
+    private var inverses: [RoformerSTFT] = []
 
     static let name = "StemRoformer"
+    /// How far each chunk moves on, as a share of a chunk.
+    nonisolated(unsafe) static var stepShare = Double(ProcessInfo.processInfo.environment["PASSABLE_STEM_STEP"] ?? "") ?? 0.5
 
     init(name: String = StemRoformer.name, model modelURL: URL? = nil) throws {
         guard let url = modelURL ?? Bundle.main.url(forResource: name, withExtension: "mlmodelc")
@@ -75,7 +78,7 @@ final class StemRoformer {
     /// Every stem the model separates, by its name in the model.
     func separateNamed(_ mix: StereoBuffer, progress: (Double) -> Void,
                        isCancelled: () -> Bool = { false }) throws -> [String: StereoBuffer] {
-        let size = chunk, step = chunk / 2, fade = chunk / 10
+        let size = chunk, step = Int(Double(chunk) * Self.stepShare), fade = chunk / 10
         let length = mix.count
         let border = size - step
         let padded = length > 2 * border
@@ -88,17 +91,31 @@ final class StemRoformer {
             window[size - 1 - i] = Float(i) / Float(fade - 1)
         }
         let count = instruments.count
-        var out = [[[Float]]](repeating: [[Float]](repeating: [Float](repeating: 0, count: total), count: 2), count: count)
+        // Every stem's two channels in one block (written from several
+        // threads at once, each to its own stretch of it).
+        let out = UnsafeMutablePointer<Float>.allocate(capacity: count * 2 * total)
+        out.initialize(repeating: 0, count: count * 2 * total)
+        defer { out.deallocate() }
         var weight = [Float](repeating: 0, count: total)
 
         let frames = stft.frames, rows = 2 * RoformerSTFT.bins
         let specArray = try MLMultiArray(shape: [1, NSNumber(value: rows), NSNumber(value: frames), 2], dataType: .float32)
         let spec = specArray.dataPointer.assumingMemoryBound(to: Float.self)
         var part = [[Float]](repeating: [Float](repeating: 0, count: size), count: 2)
-        var mask = [Float](repeating: 0, count: rows * frames * 2)
-        var result = [Float](repeating: 0, count: size)
+        var raw: UnsafeMutablePointer<Float>?
+        var rawCount = 0
+        defer { raw?.deallocate() }
+        // Each stem turned back into sound on a core of its own: one STFT
+        // (its own scratch), mask and result per stem.
+        if inverses.count != count { inverses = (0..<count).map { _ in RoformerSTFT(chunk: chunk, hop: stft.hop) } }
+        let jobs = (0..<count).map { _ in InverseJob(maskCount: rows * frames * 2, size: size) }
+        let inverses = self.inverses
 
         let starts = Array(stride(from: 0, to: total, by: step))
+        // (With PASSABLE_TIMING: how much of it the model itself takes.)
+        var predicting = 0.0
+        let looping = Date()
+        defer { TrackProcessor.mark("  stem model: \(starts.count) chunks, \(String(format: "%.1f", predicting)) s in the network", since: looping) }
         for (n, start) in starts.enumerated() {
             if isCancelled() { throw CancellationError() }
             let length = min(size, total - start)
@@ -106,23 +123,41 @@ final class StemRoformer {
                 Self.fill(&part[c], from: source[c], start: start, count: length)
                 stft.forward(part[c], channel: c, into: spec)
             }
+            let asked = Date()
             let output = try model.prediction(from: MLDictionaryFeatureProvider(dictionary: [
                 "spec": MLFeatureValue(multiArray: specArray),
             ]))
+            predicting += Date().timeIntervalSince(asked)
             guard let masks = output.featureValue(for: "masks")?.multiArrayValue,
                   masks.dataType == .float32 || masks.dataType == .float16, masks.shape.count == 5 else {
                 throw PassableError.message("The stem model returned no masks.")
             }
+            // The masks as floats: half-precision ones converted once per
+            // chunk (not once per stem).
+            let maskCount = zip(masks.shape, masks.strides).reduce(1) { $0 + ($1.0.intValue - 1) * $1.1.intValue }
+            if maskCount != rawCount {
+                raw?.deallocate()
+                raw = .allocate(capacity: maskCount)
+                rawCount = maskCount
+            }
+            if masks.dataType == .float16 {
+                var src = vImage_Buffer(data: masks.dataPointer, height: 1, width: vImagePixelCount(maskCount), rowBytes: maskCount * 2)
+                var dst = vImage_Buffer(data: raw!, height: 1, width: vImagePixelCount(maskCount), rowBytes: maskCount * 4)
+                vImageConvert_Planar16FtoPlanarF(&src, &dst, 0)
+            } else {
+                raw!.update(from: masks.dataPointer.assumingMemoryBound(to: Float.self), count: maskCount)
+            }
+            let values = UnsafePointer(raw!), strides = masks.strides.map(\.intValue)
             var w = window
             if n == 0 { for i in 0..<fade { w[i] = 1 } }
             if start + size >= total { for i in 0..<fade { w[size - 1 - i] = 1 } }
-            for s in 0..<count {
-                stemMask(masks, stem: s, frames: frames, rows: rows, into: &mask)
+            DispatchQueue.concurrentPerform(iterations: count) { s in
+                let job = jobs[s]
+                Self.stemMask(values, strides: strides, stem: s, frames: frames, rows: rows, into: job.mask)
                 for c in 0..<2 {
-                    stft.inverse(spec: spec, mask: mask, channel: c, into: &result)
-                    out[s][c].withUnsafeMutableBufferPointer { o in
-                        vDSP_vma(result, 1, w, 1, o.baseAddress! + start, 1, o.baseAddress! + start, 1, vDSP_Length(length))
-                    }
+                    inverses[s].inverse(spec: spec, mask: job.mask, channel: c, into: job.result)
+                    let o = out + (s * 2 + c) * total + start
+                    vDSP_vma(job.result, 1, w, 1, o, 1, o, 1, vDSP_Length(length))
                 }
             }
             weight.withUnsafeMutableBufferPointer { o in
@@ -136,10 +171,9 @@ final class StemRoformer {
             var buffer = StereoBuffer(count: length)
             for c in 0..<2 {
                 var v = [Float](repeating: 0, count: length)
-                out[s][c].withUnsafeBufferPointer { o in
-                    weight.withUnsafeBufferPointer { wt in
-                        vDSP_vdiv(wt.baseAddress! + from, 1, o.baseAddress! + from, 1, &v, 1, vDSP_Length(length))
-                    }
+                let o = out + (s * 2 + c) * total
+                weight.withUnsafeBufferPointer { wt in
+                    vDSP_vdiv(wt.baseAddress! + from, 1, o + from, 1, &v, 1, vDSP_Length(length))
                 }
                 if c == 0 { buffer.left = v } else { buffer.right = v }
             }
@@ -150,38 +184,37 @@ final class StemRoformer {
         return named
     }
 
+    /// A stem's mask and its sound, for one core.
+    private final class InverseJob: @unchecked Sendable {
+        let mask: UnsafeMutablePointer<Float>, result: UnsafeMutablePointer<Float>
+        let maskCount: Int, size: Int
+        init(maskCount: Int, size: Int) {
+            self.maskCount = maskCount
+            self.size = size
+            mask = .allocate(capacity: maskCount)
+            mask.initialize(repeating: 0, count: maskCount)
+            result = .allocate(capacity: size)
+            result.initialize(repeating: 0, count: size)
+        }
+        deinit { mask.deallocate(); result.deallocate() }
+    }
+
     /// Stem `s` of the network's masks [1, stems, frames, rows, 2] as the
     /// STFT takes them: [row][frame][re, im], the DC bin zeroed.
-    private func stemMask(_ masks: MLMultiArray, stem s: Int, frames: Int, rows: Int, into mask: inout [Float]) {
-        let st = masks.strides.map(\.intValue)
-        func copy(_ m: UnsafeBufferPointer<Float>) {
-            mask.withUnsafeMutableBufferPointer { out in
-                for row in 0..<rows {
-                    let base = row * frames * 2
-                    if row < 2 {
-                        for t in 0..<(2 * frames) { out[base + t] = 0 }
-                        continue
-                    }
-                    var at = s * st[1] + row * st[3]
-                    for t in 0..<frames {
-                        out[base + 2 * t] = m[at]
-                        out[base + 2 * t + 1] = m[at + st[4]]
-                        at += st[2]
-                    }
-                }
+    private static func stemMask(_ m: UnsafePointer<Float>, strides st: [Int], stem s: Int, frames: Int, rows: Int,
+                                 into out: UnsafeMutablePointer<Float>) {
+        for row in 0..<rows {
+            let base = row * frames * 2
+            if row < 2 {
+                for t in 0..<(2 * frames) { out[base + t] = 0 }
+                continue
             }
-        }
-        if masks.dataType == .float16 {
-            let count = zip(masks.shape, masks.strides).reduce(1) { $0 + ($1.0.intValue - 1) * $1.1.intValue }
-            if halves.count != count { halves = [Float](repeating: 0, count: count) }
-            halves.withUnsafeMutableBufferPointer { f in
-                var src = vImage_Buffer(data: masks.dataPointer, height: 1, width: vImagePixelCount(count), rowBytes: count * 2)
-                var dst = vImage_Buffer(data: f.baseAddress!, height: 1, width: vImagePixelCount(count), rowBytes: count * 4)
-                vImageConvert_Planar16FtoPlanarF(&src, &dst, 0)
+            var at = s * st[1] + row * st[3]
+            for t in 0..<frames {
+                out[base + 2 * t] = m[at]
+                out[base + 2 * t + 1] = m[at + st[4]]
+                at += st[2]
             }
-            halves.withUnsafeBufferPointer { copy($0) }
-        } else {
-            masks.withUnsafeBufferPointer(ofType: Float.self) { copy($0) }
         }
     }
 

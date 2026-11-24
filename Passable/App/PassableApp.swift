@@ -32,11 +32,12 @@ struct PassableApp: App {
                 .keyboardShortcut("e", modifiers: [.command, .shift])
                 .disabled(set.items.isEmpty || set.exportProgress != nil)
             }
-            // Undo covers edits in the transition editor.
+            // Undo covers edits in the transition editor, except while
+            // typing: then it's the text field's own.
             CommandGroup(replacing: .undoRedo) {
-                Button("Undo") { set.editor.undo() }
+                Button("Undo") { if !TextUndo.send("undo:") { set.editor.undo() } }
                     .keyboardShortcut("z")
-                Button("Redo") { set.editor.redo() }
+                Button("Redo") { if !TextUndo.send("redo:") { set.editor.redo() } }
                     .keyboardShortcut("z", modifiers: [.command, .shift])
             }
             CommandMenu("Transport") {
@@ -48,6 +49,15 @@ struct PassableApp: App {
                 Button("Back to Song Start") { set.skipBack() }
             }
         }
+    }
+}
+
+/// Routes Undo and Redo to the text field being typed in, if any.
+enum TextUndo {
+    @MainActor
+    static func send(_ action: String) -> Bool {
+        guard NSApp.keyWindow?.firstResponder is NSTextView else { return false }
+        return NSApp.sendAction(Selector(action), to: nil, from: nil)
     }
 }
 

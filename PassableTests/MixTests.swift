@@ -1141,3 +1141,19 @@ final class SetShapeTests: XCTestCase {
         XCTAssertEqual(bDrumsS.value(.filter, at: 2 * 8.1), 0.5, accuracy: 0.01)
     }
 }
+
+final class PercentileTests: XCTestCase {
+    /// Selection finds what sorting would, ties and all.
+    func testSelectMatchesSorting() {
+        var generator = SystemRandomNumberGenerator()
+        for n in [1, 2, 3, 7, 64, 129] {
+            for _ in 0..<50 {
+                let values = (0..<n).map { _ in Float(Int.random(in: -8...8, using: &generator)) / 2 }
+                for rank in Set([0, n - 1, (n - 1) * 9 / 10, n / 2]) {
+                    var copy = values
+                    XCTAssertEqual(Percentile.select(&copy, rank: rank), values.sorted()[rank])
+                }
+            }
+        }
+    }
+}

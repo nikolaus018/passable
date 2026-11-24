@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// How a segment travels from one automation point to the next.
 enum CurveShape: String, Codable, CaseIterable, Identifiable {
@@ -36,8 +37,30 @@ enum CurveShape: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// Ids for automation points: a random half drawn once per launch and a
+/// count. As unique as `UUID()` among the points of a run and those saved
+/// from others, without a call into the system's random generator for
+/// each of the hundreds of thousands of points placement writes and
+/// throws away while it tries spots.
+enum PointID {
+    private static let state = OSAllocatedUnfairLock(initialState: (high: UInt64.random(in: .min ... .max), count: UInt64(0)))
+
+    static func next() -> UUID {
+        let (high, count) = state.withLock { s -> (UInt64, UInt64) in
+            s.count &+= 1
+            return (s.high, s.count)
+        }
+        // (Marked as a version 4, variant 1 UUID, like a random one.)
+        let h = (high & 0xFFFF_FFFF_FFFF_0FFF) | 0x0000_0000_0000_4000
+        let l = (count & 0x3FFF_FFFF_FFFF_FFFF) | 0x8000_0000_0000_0000
+        return withUnsafeBytes(of: (h.bigEndian, l.bigEndian)) { raw in
+            UUID(uuid: raw.load(as: uuid_t.self))
+        }
+    }
+}
+
 struct AutomationPoint: Codable, Identifiable, Equatable {
-    var id = UUID()
+    var id = PointID.next()
     /// Seconds on the master timeline.
     var time: Double
     /// Normalised 0…1; see `LaneParameter` for the mapping to real units.

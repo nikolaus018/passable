@@ -9,7 +9,7 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $set.tab) {
+            Picker("View", selection: $set.tab) {
                 ForEach(SetSession.Tab.allCases) { tab in
                     if tab == .transition, let title = set.editor.transitionTitle {
                         Text("Transition \(title)").tag(tab)

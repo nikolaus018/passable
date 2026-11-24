@@ -30,3 +30,4 @@ tools/convert-roformer/sub/
 Passable/Resources/Structure.mlpackage/
 tools/convert-structure/.venv/
 tools/convert-structure/upstream/
+tools/convert-roformer/vox/

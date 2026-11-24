@@ -11,7 +11,7 @@ struct PhoneButton: View {
         Button { open = true } label: {
             Label("iPhone", systemImage: "iphone.and.arrow.forward")
         }
-        .disabled(set.mix == nil)
+        .disabled(set.mix == nil || set.isPartial)
         .help("Send this set to the Passable app on your iPhone")
         .popover(isPresented: $open, arrowEdge: .bottom) {
             PhonePanel(link: set.phoneLink, close: { open = false })
@@ -39,6 +39,7 @@ private struct PhonePanel: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Name on the phone").font(.caption).foregroundStyle(.secondary)
                 TextField("Set", text: $title).textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Name on the phone")
             }
 
             Divider()

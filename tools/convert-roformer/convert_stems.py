@@ -89,7 +89,7 @@ def load(ckpt, config_path):
     with open(os.path.join(HERE, config_path)) as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
     model = BSRoformer(**config["model"])
-    state = torch.load(os.path.join(HERE, ckpt), map_location="cpu", weights_only=False)
+    state = torch.load(os.path.join(HERE, ckpt), map_location="cpu", weights_only=True)
     model.load_state_dict(state.get("state_dict", state))
     training = config["training"]
     # (A one-stem model separates its target instrument.)

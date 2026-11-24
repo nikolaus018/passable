@@ -19,10 +19,10 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts": break
     case "--dump-vocals", "--models", "--vocal-step", "--breaths-at": _ = args.removeFirst()
     case "--order": ordered = true
-    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap": _ = args.removeFirst()
+    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale": _ = args.removeFirst()
     case "--list":
         let text = try String(contentsOfFile: args.removeFirst(), encoding: .utf8)
         songs += text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -77,6 +77,9 @@ if let k = CommandLine.arguments.firstIndex(of: "--vocal-step") { VocalSeparator
 if let k = CommandLine.arguments.firstIndex(of: "--exit-back") { AutoPlacement.exitBack = Double(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--alone-wait") { AutoPlacement.aloneWait = Double(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--under-cap") { AutoPlacement.underCap = Double(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--cut-scale") { AutoPlacement.cutScale = Float(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--hole-scale") { AutoPlacement.holeScale = Float(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--busy-scale") { AutoPlacement.busyScale = Float(CommandLine.arguments[k + 1])! }
 
 // Songs not separated yet need the models: the installed app's.
 ModelLocation.directory = URL(fileURLWithPath: CommandLine.arguments.firstIndex(of: "--models").map { CommandLine.arguments[$0 + 1] }
@@ -596,6 +599,28 @@ if CommandLine.arguments.contains("--aac-peaks") {
         if p > 1 { over += 1 }
     }
     print(String(format: "AAC of %.0f s: peak %.2f dBFS, %d samples over full scale", seconds, 20 * log10(Double(top)), over))
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--stretch-time") {
+    // What each tempo-matched copy costs to make, stem by stem as the app
+    // makes it (all four at once), and why: key shift or not.
+    var total = 0.0
+    for t in mix.tracks where !t.map.isIdentity || (t.matched?.plan.semitones ?? 0) != 0 {
+        guard let m = t.matched else { continue }
+        let start = Date()
+        let kinds = StemKind.allCases
+        DispatchQueue.concurrentPerform(iterations: kinds.count) { i in
+            let kind = kinds[i]
+            _ = TimeStretcher.process(t.loaded.stems[kind]!.copyStereo(), map: m.plan.map,
+                                      semitones: kind == .drums ? 0 : m.plan.semitones, percussive: kind == .drums,
+                                      vocal: kind == .vocals, harmonicPercussive: kind == .other)
+        }
+        let s = Date().timeIntervalSince(start)
+        total += s
+        print(String(format: "%6.2f s  %+d st  exit %@  %@", s, m.plan.semitones, m.plan.map.hasExit ? "y" : "n", SongTitle.of(t.url)))
+    }
+    print(String(format: "stretching: %.1f s in all", total))
     exit(0)
 }
 

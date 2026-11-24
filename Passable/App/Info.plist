@@ -44,7 +44,7 @@
 		<string>_passablemix._udp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Passable flashes your smart plug or lamp on the beat, and sends sets to Passable on your iPhone.</string>
+	<string>Passable sends sets to Passable on your iPhone over your Wi-Fi.</string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>

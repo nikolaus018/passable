@@ -26,7 +26,7 @@ targets:
     info:
       path: Passable/App/Info.plist
       properties:
-        NSLocalNetworkUsageDescription: Passable flashes your smart plug or lamp on the beat, and sends sets to Passable on your iPhone.
+        NSLocalNetworkUsageDescription: Passable sends sets to Passable on your iPhone over your Wi-Fi.
         NSBonjourServices: [_passablemix._tcp, _passablemix._udp]
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true

@@ -9,7 +9,7 @@ final class SetSession: ObservableObject {
     struct Item: Identifiable, Equatable {
         let id = UUID()
         let url: URL
-        var status: Deck.Status = .decoding
+        var status: Deck.Status = .queued
         var loaded: TrackProcessor.Loaded?
         /// Asked for while the set was playing, and mixed in (see `request`).
         var requested = false
@@ -38,9 +38,7 @@ final class SetSession: ObservableObject {
             if !items.isEmpty { invalidate() }
         }
     }
-    @Published private(set) var mix: SetMix? {
-        didSet { lamp.setBeats(from: mix) }
-    }
+    @Published private(set) var mix: SetMix?
     @Published private(set) var buildStatus: String?
     @Published private(set) var exportProgress: Double?
     /// What the export or open in progress is doing, for its progress bar.
@@ -61,8 +59,6 @@ final class SetSession: ObservableObject {
     let transport = Transport()
     /// (Internal so a harness can watch the audio thread keep time.)
     let playback = PlaybackEngine()
-    /// A lamp or plug that flashes on the beat.
-    private(set) lazy var lamp = LampModel(playback: playback, persists: persists)
     private let processor = TrackProcessor()
     /// Hand-shaped transitions, by pair of songs.
     private var edits: [PairKey: TransitionEdit] = [:] {
@@ -86,6 +82,10 @@ final class SetSession: ObservableObject {
         self.persists = persists
         editor.host = self
         if persists {
+            // The beat lamp is gone: drop what it remembered.
+            for key in ["lampHost", "lampEvery", "lampOn", "lampMoments", "lampLeadMs"] {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
             if UserDefaults.standard.object(forKey: Self.movesKey) != nil {
                 moves = AutoMoves(rawValue: UserDefaults.standard.integer(forKey: Self.movesKey))
             }
@@ -162,7 +162,8 @@ final class SetSession: ObservableObject {
     /// - Returns: false if the song is in the set already (or asked for).
     @discardableResult
     func request(_ url: URL) -> Bool {
-        guard !isInSet(url), !isRequested(url) else { return false }
+        // (Not while the rest of the set is still being built.)
+        guard !isInSet(url), !isRequested(url), !isPartial else { return false }
         // No set playing yet: it's simply one more song of it.
         guard mix != nil, isReady else {
             add([url])
@@ -455,6 +456,7 @@ final class SetSession: ObservableObject {
     private func invalidate() {
         orderTask?.cancel()
         pause()
+        isPartial = false
         mix = nil
         updateNowPlaying()
         reopenFocus = true
@@ -481,13 +483,41 @@ final class SetSession: ObservableObject {
         if mix == nil { buildStatus = "Planning transitions…" }
         let processor = self.processor
         let moves = self.moves
+        // Nothing to play yet and a long set to build: its first songs
+        // first, so the music can start in a moment. Each transition is
+        // planned from those before it alone, so the whole set opens the
+        // same way and takes them over (see `SetBuilder.build(previous:)`).
+        let quickStart = mix == nil && tracks.count > Self.quickStartSongs
         buildTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
             do {
+                var previous = previous
+                if quickStart {
+                    let head = try await SetBuilder.build(Array(tracks.prefix(Self.quickStartSongs)), edits: edits,
+                                                          reuse: reuse, previous: previous, moves: moves,
+                                                          processor: processor) { _ in }
+                    guard !Task.isCancelled, let self else { return }
+                    if self.mix == nil {
+                        self.isPartial = true
+                        self.mix = head
+                        self.refreshSnapshot()
+                        // (The editor keeps a transition further on for
+                        // the whole set: these songs don't have it.)
+                        let shown = self.focusedKey.map { key in
+                            head.transitions.contains { head.tracks[$0.from].url == key.from && head.tracks[$0.to].url == key.to }
+                        } ?? true
+                        if shown { self.refreshFocus() }
+                    }
+                    // (The last whole build, where there is one, has more
+                    // to take over than these few songs.)
+                    previous = previous ?? head
+                }
                 let mix = try await SetBuilder.build(tracks, edits: edits, reuse: reuse, previous: previous,
                                                      moves: moves, processor: processor) { text in
-                    Task { @MainActor in if self?.mix == nil { self?.buildStatus = text } }
+                    Task { @MainActor in
+                        if self?.mix == nil || self?.isPartial == true { self?.buildStatus = text }
+                    }
                 }
                 guard !Task.isCancelled, let self else { return }
                 // Built around what's playing for a request: if the music
@@ -495,6 +525,7 @@ final class SetSession: ObservableObject {
                 if self.placing != nil, let old = self.mix, !self.continues(old, into: mix), self.moveRequestLater() { return }
                 self.placing = nil
                 self.lastBuilt = mix
+                self.isPartial = false
                 self.mix = mix
                 self.buildStatus = nil
                 self.refreshSnapshot()
@@ -506,6 +537,13 @@ final class SetSession: ObservableObject {
             }
         }
     }
+
+    /// Songs a set too long to build at once plays first (see `rebuild`).
+    static let quickStartSongs = 3
+
+    /// The set playing is only its first songs, while the rest is built:
+    /// nothing that needs the whole of it (export, the iPhone, a request).
+    @Published private(set) var isPartial = false
 
     /// Held live DJ performance keys while the set plays:
     /// M = vocals out (crowd sing-along), S = vocals only (live a cappella),
@@ -773,7 +811,7 @@ final class SetSession: ObservableObject {
 
     /// Plays the set from where a song comes in (the start, for the first).
     func play(song i: Int) {
-        guard let mix else { return }
+        guard let mix, i < mix.tracks.count else { return }
         if let t = mix.transitions.first(where: { $0.to == i }) {
             jump(to: max(0, t.start))
         } else {
@@ -866,7 +904,7 @@ final class SetSession: ObservableObject {
     enum ExportRange { case set, focusedTransition }
 
     func export(_ range: ExportRange, to url: URL) {
-        guard exportTask == nil, let mix else { return }
+        guard exportTask == nil, !isPartial, let mix else { return }
         let sr = AudioIO.sampleRate
         let frames: Range<Int>
         switch range {
@@ -952,7 +990,7 @@ final class SetSession: ObservableObject {
     /// sits, into a `.passablemix` for the Passable app on the iPhone: saved
     /// to a file, or sent straight to a phone nearby.
     func exportPhoneMix(title: String, to destination: PhoneDestination) {
-        guard exportTask == nil, let mix, !items.isEmpty else { return }
+        guard exportTask == nil, !isPartial, let mix, !items.isEmpty else { return }
         let frames = 0..<Int(length * AudioIO.sampleRate)
         let snapshot = makeSnapshot()
         let manifest = PhoneMix.manifest(for: mix, titles: items.map(\.title), title: title)

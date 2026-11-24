@@ -43,6 +43,7 @@ struct SearchSheet: View {
                 TextField("Artist and song title", text: $query)
                     .textFieldStyle(.roundedBorder)
                     .focused($fieldFocused)
+                    .accessibilityLabel("Song to search for")
                     .onSubmit(search)
                 Button("Search", action: search)
                     .disabled(query.trimmingCharacters(in: .whitespaces).isEmpty || isSearching)

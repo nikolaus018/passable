@@ -2335,9 +2335,9 @@ enum VocalPhrasing {
     /// song's alone, a verse sung softly under a loud chorus read its quiet
     /// words as silence (cut through), and a dense chorus never breathed.
     static func local(_ reference: Float, from: Int, through: Int, level: (Int) -> Float) -> Float {
-        let sung = ((from - 2 * slots)...(through + 2 * slots)).map(level).filter { $0 > reference - 40 }.sorted()
+        var sung = ((from - 2 * slots)...(through + 2 * slots)).map(level).filter { $0 > reference - 40 }
         guard sung.count >= slots / 2 else { return reference }
-        return min(reference + 6, max(reference - 12, sung[(sung.count - 1) * 9 / 10]))
+        return min(reference + 6, max(reference - 12, Percentile.select(&sung, rank: (sung.count - 1) * 9 / 10)))
     }
 
     /// What a cut between two words of a line costs against one between
@@ -2904,6 +2904,7 @@ enum SetBuilder {
                       processor: TrackProcessor,
                       progress: @escaping @Sendable (String) -> Void) async throws -> SetMix {
         precondition(!tracks.isEmpty)
+        let began = Date()
         // (What earlier builds learnt still holds for the same pairs, in
         // this run or before it.)
         let kept = SetMix.Learned.load()
@@ -2955,7 +2956,7 @@ enum SetBuilder {
             var sinceMashup = mashupSpacing
             for k in 1..<tracks.count {
                 if Task.isCancelled { throw CancellationError() }
-                progress("Planning \(k)/\(tracks.count - 1)")
+                progress("Planning transitions (\(k) of \(tracks.count - 1))…")
                 let a = tracks[k - 1].loaded, b = tracks[k].loaded
                 let ga = a.analysis.grid, gb = b.analysis.grid
                 let key = PairKey(from: tracks[k - 1].url, to: tracks[k].url)
@@ -3072,8 +3073,10 @@ enum SetBuilder {
             if let r = renditions[url], r.plan.isSame(as: plans[i]) { return nil }
             return (url, tracks[i].loaded, plans[i])
         }
+        TrackProcessor.mark("set: planned every transition", since: began)
         if !jobs.isEmpty {
-            progress("Matching tempos")
+            progress("Matching tempos (0 of \(jobs.count))…")
+            var done = 0
             let width = max(1, min(3, ProcessInfo.processInfo.activeProcessorCount / 4))
             try await withThrowingTaskGroup(of: (URL, TrackProcessor.Matched).self) { group in
                 var next = 0
@@ -3085,6 +3088,8 @@ enum SetBuilder {
                 while next < min(width, jobs.count) { start() }
                 for try await (url, matched) in group {
                     renditions[url] = matched
+                    done += 1
+                    progress("Matching tempos (\(done) of \(jobs.count))…")
                     if next < jobs.count { start() }
                 }
             }
@@ -3096,6 +3101,7 @@ enum SetBuilder {
             if let cached = renditions[tracks[i].url], cached.plan.isSame(as: plans[i]) { return cached }
             return try await match(tracks[i].loaded, plan: plans[i], processor: processor)
         }
+        TrackProcessor.mark("set: renditions ready", since: began)
         let opener = try await rendition(0)
         var planned = [SetMix.Track(url: tracks[0].url, loaded: first, map: plans[0].map,
                                     matched: plans[0].map.isIdentity ? nil : opener,
@@ -3118,6 +3124,7 @@ enum SetBuilder {
 
         for k in 1..<tracks.count {
             if Task.isCancelled { throw CancellationError() }
+            progress("Building transitions (\(k) of \(tracks.count - 1))…")
             var a = planned[k - 1]
             let b = tracks[k].loaded
             let ga = a.loaded.analysis.grid, gb = b.analysis.grid
@@ -4536,5 +4543,26 @@ enum SetBuilder {
         } onCancel: {
             ticket.cancel()
         }
+    }
+}
+
+enum Percentile {
+    /// The value at `rank` of `values` sorted (what `values.sorted()[rank]`
+    /// is), found without sorting them all: placement asks for it on every
+    /// spot it tries. Reorders `values`.
+    static func select(_ values: inout [Float], rank: Int) -> Float {
+        precondition(values.indices.contains(rank))
+        var lo = 0, hi = values.count - 1
+        while lo < hi {
+            let pivot = values[(lo + hi) / 2]
+            var i = lo, j = hi
+            while i <= j {
+                while values[i] < pivot { i += 1 }
+                while values[j] > pivot { j -= 1 }
+                if i <= j { values.swapAt(i, j); i += 1; j -= 1 }
+            }
+            if rank <= j { hi = j } else if rank >= i { lo = i } else { break }
+        }
+        return values[rank]
     }
 }

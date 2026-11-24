@@ -34,6 +34,9 @@ def sdr(true, est):
 
 
 def device():
+    # (EVAL_CPU=1: the CPU, when the Mac's GPU memory is taken.)
+    if os.environ.get("EVAL_CPU"):
+        return torch.device("cpu")
     return torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
 
@@ -48,7 +51,7 @@ class HTDemucs:
         ref = x.mean(0)
         x = (x - ref.mean()) / ref.std()
         with torch.no_grad():
-            out = apply_model(self.model, x[None], split=True, overlap=0.25, device="cpu")[0]
+            out = apply_model(self.model, x[None], split=True, overlap=0.25, device=device())[0].cpu()
         out = out * ref.std() + ref.mean()
         return {name: out[i].numpy() for i, name in enumerate(self.model.sources)}
 
@@ -65,11 +68,11 @@ class SW:
         if "state_dict" in state:
             state = state["state_dict"]
         self.model.load_state_dict(state)
-        self.model.eval()
+        self.model.eval().to(device())
 
     def __call__(self, mix):
         with torch.no_grad():
-            out = self.model(torch.from_numpy(mix).float()[None])[0].numpy()
+            out = self.model(torch.from_numpy(mix).float()[None].to(device()))[0].cpu().numpy()
         stems = {name: out[i] for i, name in enumerate(self.instruments)}
         stems["other"] = stems["other"] + stems.get("guitar", 0) + stems.get("piano", 0)
         return stems
@@ -94,16 +97,88 @@ class Kim:
         return {"vocals": v, "drums": nan, "bass": nan, "other": nan}
 
 
+class HTDemucsFTBass:
+    """HTDemucs' fine-tuned bass model (htdemucs_ft's bass member): bass only."""
+
+    def __init__(self):
+        from demucs.states import load_model
+        pkg = torch.load(os.path.join(HERE, "vox", "htdemucs_ft_bass.th"), map_location="cpu", weights_only=False)
+        self.model = load_model(pkg).eval()
+
+    def __call__(self, mix):
+        from demucs.apply import apply_model
+        x = torch.from_numpy(mix).float()
+        ref = x.mean(0)
+        x = (x - ref.mean()) / ref.std()
+        with torch.no_grad():
+            out = apply_model(self.model, x[None], split=True, overlap=0.25, device=device())[0].cpu()
+        out = out * ref.std() + ref.mean()
+        stems = {name: out[i].numpy() for i, name in enumerate(self.model.sources)}
+        nan = np.full_like(mix, np.nan)
+        return {"bass": stems["bass"], "drums": nan, "other": nan, "vocals": nan}
+
+
+class SCNet:
+    """SCNet XL IHF (ZFTurbo, trained on MUSDB18HQ's training songs), with the
+    framework's own chunked inference."""
+
+    def __init__(self):
+        sys.path.insert(0, os.path.join(HERE, "msst"))
+        from utils.settings import get_model_from_config
+        self.model, self.config = get_model_from_config("scnet", os.environ.get("SCNET_CONFIG") or os.path.join(HERE, "vox", "scnet_xl_ihf.yaml"))
+        state = torch.load(os.path.join(HERE, "vox", "scnet_xl_ihf.ckpt"), map_location="cpu", weights_only=True)
+        self.model.load_state_dict(state.get("state_dict", state))
+        self.model.eval().to(device())
+
+    def __call__(self, mix):
+        from utils.model_utils import demix
+        out = demix(self.config, self.model, torch.from_numpy(mix), device(), model_type="scnet", pbar=False)
+        return {k: out[k] for k in ["drums", "bass", "other", "vocals"]}
+
+
+class VocalModel:
+    """A one-stem vocal model from vox/ (weights only: nothing in the file runs)."""
+
+    def __init__(self, ckpt, config, mel):
+        sys.path.insert(0, os.path.join(HERE, "msst"))
+        if mel:
+            from models.bs_roformer.mel_band_roformer import MelBandRoformer as Model
+        else:
+            from models.bs_roformer.bs_roformer import BSRoformer as Model
+        with open(os.path.join(HERE, "vox", config)) as f:
+            cfg = yaml.load(f, Loader=yaml.FullLoader)
+        self.model = Model(**cfg["model"])
+        state = torch.load(os.path.join(HERE, "vox", ckpt), map_location="cpu", weights_only=True)
+        if "state_dict" in state:
+            state = state["state_dict"]
+        self.model.load_state_dict(state)
+        # (Metal has no complex scatter, which the Mel models use.)
+        self.device = torch.device("cpu") if mel else device()
+        self.model.eval().to(self.device)
+
+    def __call__(self, mix):
+        with torch.no_grad():
+            v = self.model(torch.from_numpy(mix).float()[None].to(self.device))[0].cpu().numpy()
+        if v.ndim == 3:
+            v = v[0]
+        nan = np.full_like(mix, np.nan)
+        return {"vocals": v, "drums": nan, "bass": nan, "other": nan}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=os.path.expanduser("~/MUSDB18-7"))
     parser.add_argument("--models", default="htdemucs,sw")
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--dump", default="", help="save each model's vocals per excerpt here (for blends)")
     args = parser.parse_args()
     import musdb
     db = musdb.DB(root=args.root, subsets="test")
     tracks = list(db)[: args.limit or None]
-    makers = {"htdemucs": HTDemucs, "sw": SW, "kim": Kim}
+    makers = {"htdemucs": HTDemucs, "sw": SW, "kim": Kim,
+              "viperx": lambda: VocalModel("viperx.ckpt", "viperx.yaml", mel=False),
+              "bigbeta": lambda: VocalModel("bigbeta.ckpt", "bigbeta.yaml", mel=True),
+              "scnet": SCNet, "htft_bass": HTDemucsFTBass}
     names = args.models.split(",")
     scores = {m: {s: [] for s in STEMS} for m in names}
     for m in names:
@@ -111,6 +186,14 @@ def main():
         for k, track in enumerate(tracks):
             mix = track.audio.T.astype(np.float32)
             est = model(mix)
+            if args.dump:
+                os.makedirs(args.dump, exist_ok=True)
+                np.save(os.path.join(args.dump, f"{m}-{k}.npy"), est["vocals"].astype(np.float32))
+                np.save(os.path.join(args.dump, f"true-{k}.npy"), track.targets["vocals"].audio.T.astype(np.float32))
+                for st in ["drums", "bass", "other"]:
+                    if not np.isnan(est[st]).any():
+                        np.save(os.path.join(args.dump, f"{m}.{st}-{k}.npy"), est[st].astype(np.float32))
+                        np.save(os.path.join(args.dump, f"true.{st}-{k}.npy"), track.targets[st].audio.T.astype(np.float32))
             for s in STEMS:
                 true = track.targets[s].audio.T.astype(np.float32)
                 ok = np.sqrt(np.mean(true ** 2)) > 1e-3 and not np.isnan(est[s]).any()

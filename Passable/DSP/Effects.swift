@@ -286,10 +286,15 @@ struct Limiter {
     private var delayL: [Float], delayR: [Float]
     /// Gain each input frame needs; the least over each window of them;
     /// those averaged (see `process`).
-    private var needed: [Float], least: [Float]
+    private var least: [Float]
     private var index = 0
-    /// Frames in the window that need the gain down.
-    private var pending = 0
+    /// Frames that may yet be the window's least need, oldest first: their
+    /// needs (rising) and frame numbers, in rings of `window + 2` (the
+    /// window and the frame coming in).
+    private var queueValue: [Float], queueFrame: [Int]
+    private var queueHead = 0, queueSize = 0
+    /// Frames judged so far.
+    private var frame = 0
     private var leastSum: Float
     private var gain: Float = 1
     /// Smoothed gain reduction (0…1) to distinguish isolated transient
@@ -312,8 +317,9 @@ struct Limiter {
         let n = Self.window + 1
         delayL = [Float](repeating: 0, count: n)
         delayR = delayL
-        needed = [Float](repeating: 1, count: n)
-        least = needed
+        least = [Float](repeating: 1, count: n)
+        queueValue = [Float](repeating: 1, count: n + 1)
+        queueFrame = [Int](repeating: 0, count: n + 1)
         leastSum = Float(n)
         historyL = [Float](repeating: 0, count: 2 * Self.taps)
         historyR = historyL
@@ -336,26 +342,28 @@ struct Limiter {
 
     mutating func reset() {
         let n = Self.window + 1
-        for k in 0..<n { delayL[k] = 0; delayR[k] = 0; needed[k] = 1; least[k] = 1 }
+        for k in 0..<n { delayL[k] = 0; delayR[k] = 0; least[k] = 1 }
         for k in 0..<(2 * Self.taps) { historyL[k] = 0; historyR[k] = 0 }
         historyWrite = 0
         leastSum = Float(n)
         gain = 1
         sustained = 0
         index = 0
-        pending = 0
+        frame = 0
+        queueHead = 0
+        queueSize = 0
     }
 
     /// The largest magnitude of the waveform over the judged frame and the
     /// stretch to the next one, from `x` (the last `taps` frames, oldest
     /// first; the judged one at `taps / 2 - 1`).
     @inline(__always)
-    private func truePeak(_ x: UnsafePointer<Float>, _ c: UnsafePointer<Float>) -> Float {
-        var top = abs(x[Self.taps / 2 - 1])
+    private static func truePeak(_ x: UnsafePointer<Float>, _ c: UnsafePointer<Float>) -> Float {
+        var top = abs(x[taps / 2 - 1])
         for p in 0..<3 {
             var v: Float = 0
-            let row = c + p * Self.taps
-            for k in 0..<Self.taps { v += row[k] * x[k] }
+            let row = c + p * taps
+            for k in 0..<taps { v += row[k] * x[k] }
             top = max(top, abs(v))
         }
         return top
@@ -366,31 +374,46 @@ struct Limiter {
     /// of the least gain each frame of the window needed over the window
     /// after it: every term covers the frame itself, so the peak is never
     /// over the ceiling, and the gain glides into it.
+    ///
+    /// The least gain over the window comes from a queue of the frames
+    /// that could still be it (each needing less than all after it), so
+    /// it costs the same however many frames in the window are over.
     mutating func process(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>, count: Int) {
-        let n = Self.window + 1
+        let n = Self.window + 1, slots = n + 1
         let taps = Self.taps
+        let ceiling = self.ceiling, holdAlpha = self.holdAlpha
+        let fastRelease = self.fastRelease, slowRelease = self.slowRelease
+        var index = self.index, historyWrite = self.historyWrite
+        var leastSum = self.leastSum, gain = self.gain, sustained = self.sustained
+        var frame = self.frame, head = self.queueHead, size = self.queueSize
+        let hl = historyL.withUnsafeMutableBufferPointer { $0.baseAddress! }
+        let hr = historyR.withUnsafeMutableBufferPointer { $0.baseAddress! }
+        let dl = delayL.withUnsafeMutableBufferPointer { $0.baseAddress! }
+        let dr = delayR.withUnsafeMutableBufferPointer { $0.baseAddress! }
+        let least = self.least.withUnsafeMutableBufferPointer { $0.baseAddress! }
+        let qv = queueValue.withUnsafeMutableBufferPointer { $0.baseAddress! }
+        let qf = queueFrame.withUnsafeMutableBufferPointer { $0.baseAddress! }
+        let c = phases.withUnsafeBufferPointer { $0.baseAddress! }
         for i in 0..<count {
             // The new frame into the interpolator's history; the frame
             // `tpDelay` back is the one judged and passed on.
-            historyL[historyWrite] = left[i]; historyL[historyWrite + taps] = left[i]
-            historyR[historyWrite] = right[i]; historyR[historyWrite + taps] = right[i]
+            hl[historyWrite] = left[i]; hl[historyWrite + taps] = left[i]
+            hr[historyWrite] = right[i]; hr[historyWrite + taps] = right[i]
             historyWrite = historyWrite + 1 == taps ? 0 : historyWrite + 1
-            let from = historyWrite
-            let (inL, inR, peak): (Float, Float, Float) = historyL.withUnsafeBufferPointer { hl in
-                historyR.withUnsafeBufferPointer { hr in
-                    phases.withUnsafeBufferPointer { c in
-                        let xl = hl.baseAddress! + from, xr = hr.baseAddress! + from
-                        return (xl[taps / 2 - 1], xr[taps / 2 - 1],
-                                max(truePeak(xl, c.baseAddress!), truePeak(xr, c.baseAddress!)))
-                    }
-                }
-            }
-            if needed[index] < 1 { pending -= 1 }
-            needed[index] = peak > ceiling ? ceiling / peak : 1
-            if needed[index] < 1 { pending += 1 }
-            // (Nearly always nothing in the window is over: no search.)
-            var m: Float = 1
-            if pending > 0 { for k in 0..<n where needed[k] < m { m = needed[k] } }
+            let xl = UnsafePointer(hl + historyWrite), xr = UnsafePointer(hr + historyWrite)
+            let inL = xl[taps / 2 - 1], inR = xr[taps / 2 - 1]
+            let peak = max(Self.truePeak(xl, c), Self.truePeak(xr, c))
+            let need: Float = peak > ceiling ? ceiling / peak : 1
+            // The least need over the last `n` frames: frames that need
+            // no less than this one can never be it again, and the oldest
+            // leaves once it's `n` frames back. (None queued: all 1.)
+            while size > 0 && qv[(head + size - 1) % slots] >= need { size -= 1 }
+            qv[(head + size) % slots] = need
+            qf[(head + size) % slots] = frame
+            size += 1
+            while qf[head] <= frame - n { head = (head + 1) % slots; size -= 1 }
+            frame += 1
+            let m: Float = min(1, qv[head])
             leastSum += m - least[index]
             least[index] = m
             let smooth = min(1, leastSum / Float(n))
@@ -403,14 +426,22 @@ struct Limiter {
             gain = min(smooth, gain * rel + (1 - rel))
             // Out: the oldest frame in the delay (the one about to be
             // overwritten).
-            let next = (index + 1) % n
-            let outL = delayL[next], outR = delayR[next]
-            delayL[index] = inL
-            delayR[index] = inR
+            let next = index + 1 == n ? 0 : index + 1
+            let outL = dl[next], outR = dr[next]
+            dl[index] = inL
+            dr[index] = inR
             left[i] = outL * gain
             right[i] = outR * gain
             index = next
         }
+        self.index = index
+        self.historyWrite = historyWrite
+        self.leastSum = leastSum
+        self.gain = gain
+        self.sustained = sustained
+        self.frame = frame
+        self.queueHead = head
+        self.queueSize = size
     }
 }
 

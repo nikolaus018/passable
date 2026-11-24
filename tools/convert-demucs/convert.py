@@ -163,14 +163,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fp32", action="store_true")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "..", "..", "Passable", "Resources"))
+    # Another HTDemucs of the same shape, from its weights file: htdemucs_ft's
+    # bass member (d12395a8-e57c48e6.th) is Passable's second bass model.
+    ap.add_argument("--weights", default=None)
+    ap.add_argument("--name", default="HTDemucs")
     args = ap.parse_args()
 
     freeze_positional_embeddings()
     patch_coremltools_cast()
     # The fused attention kernel has no Core ML mapping; the plain path does.
     torch.backends.mha.set_fastpath_enabled(False)
-    bag = get_model("htdemucs")
-    m = bag.models[0].eval()
+    if args.weights:
+        from demucs.states import load_model
+        m = load_model(torch.load(args.weights, map_location="cpu", weights_only=False)).eval()
+    else:
+        m = get_model("htdemucs").models[0].eval()
     assert list(m.sources) == SOURCES, m.sources
     segment = int(m.segment * m.samplerate)
     frames = int(math.ceil(segment / m.hop_length))
@@ -213,7 +220,7 @@ def main():
           "spec err:", np.abs(out["spec_out"] - spec.numpy()).max())
 
     os.makedirs(args.out, exist_ok=True)
-    path = os.path.join(args.out, "HTDemucs.mlpackage")
+    path = os.path.join(args.out, f"{args.name}.mlpackage")
     ml.save(path)
     print("saved", os.path.abspath(path))
 
