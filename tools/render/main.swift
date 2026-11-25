@@ -22,7 +22,7 @@ while !args.isEmpty {
     case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--upgrade-vox", "--upgrade-bass", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--club", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts", "--hooks", "--hook-first", "--lock-log": break
     case "--dump-vocals", "--models", "--vocal-step", "--breaths-at", "--phone-mix", "--title", "--bitrate", "--dump-costs": _ = args.removeFirst()
     case "--order": ordered = true
-    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale", "--switch-lead", "--drop-penalty", "--opener-weight", "--warm-up", "--relearn", "--clear-margin": _ = args.removeFirst()
+    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale", "--switch-lead", "--drop-penalty", "--opener-weight", "--warm-up", "--relearn", "--clear-margin", "--learn-from": _ = args.removeFirst()
     case "--list":
         let text = try String(contentsOfFile: args.removeFirst(), encoding: .utf8)
         songs += text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -315,17 +315,44 @@ if CommandLine.arguments.contains("--tempos") {
     }
     exit(0)
 }
+// --learn-from FILE: each line a list of songs (of those loaded); each built
+// in its order first, so what its blends teach is known before ordering
+// (kept in memory, as the app would keep it).
+if let k = CommandLine.arguments.firstIndex(of: "--learn-from") {
+    let byURL = Dictionary(tracks.map { ($0.url.standardizedFileURL, $0) }, uniquingKeysWith: { a, _ in a })
+    for listPath in try String(contentsOfFile: CommandLine.arguments[k + 1], encoding: .utf8).split(separator: "\n").map(String.init) where !listPath.isEmpty {
+        let list = try String(contentsOfFile: listPath, encoding: .utf8).split(separator: "\n").map { URL(fileURLWithPath: String($0)).standardizedFileURL }
+        let some = list.compactMap { byURL[$0] }
+        _ = try await SetBuilder.build(some, moves: .all, processor: processor) { _ in }
+        print("learnt from \(listPath): \(SetMix.Learned.load().count) pairs known")
+    }
+}
 if ordered {
     // As the app's Auto-Order does it.
     let analyses = tracks.map(\.loaded.analysis)
     let t0 = Date()
     let hits = BeatAlign.attacks(of: tracks.map(\.loaded))
     let t1 = Date()
-    let costs = SetOrdering.costMatrix(analyses, drums: hits, remembered: true, urls: tracks.map(\.url))
+    final class Notes: @unchecked Sendable { let lock = NSLock(); var lines: [String] = [] }
+    let notes = Notes()
+    if CommandLine.arguments.contains("--dump-costs") {
+        SetOrdering.planNotes = { i, j, plan in
+            let p = plan.placement
+            let line = String(format: "%d\t%d\t%.4f\t%d\t%@\t%d\t%.3f\t%d\t%d", i, j, p.score, p.together ?? -1, plan.preset.displayName, plan.bars,
+                              plan.stretchPercent, plan.keysClash ? 1 : 0, plan.drumsLock ? 1 : 0)
+            notes.lock.lock(); notes.lines.append(line); notes.lock.unlock()
+        }
+    }
+    let costs = SetOrdering.costMatrix(analyses, drums: hits, remembered: !CommandLine.arguments.contains("--dump-costs"), urls: tracks.map(\.url))
+    if let k = CommandLine.arguments.firstIndex(of: "--dump-costs") {
+        try? notes.lines.sorted().joined(separator: "\n").write(toFile: CommandLine.arguments[k + 1] + ".plans", atomically: true, encoding: .utf8)
+    }
     let t2 = Date()
     if let k = CommandLine.arguments.firstIndex(of: "--dump-costs") {
         try? costs.map { $0.map { String($0.bitPattern) }.joined(separator: " ") }.joined(separator: "\n")
             .write(toFile: CommandLine.arguments[k + 1], atomically: true, encoding: .utf8)
+        try? tracks.map { SongTitle.of($0.url) }.joined(separator: "\n")
+            .write(toFile: CommandLine.arguments[k + 1] + ".titles", atomically: true, encoding: .utf8)
     }
     let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
     let shakes = CommandLine.arguments.firstIndex(of: "--shakes").map { Int(CommandLine.arguments[$0 + 1])! }

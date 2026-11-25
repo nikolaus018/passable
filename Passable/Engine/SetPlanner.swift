@@ -583,6 +583,10 @@ enum SetOrdering {
     /// - Parameter urls: when provided, incorporates pairs already verified on
     ///   rendered audio (`SetMix.Learned`) so Auto-Order avoids pairs known to
     ///   flam or clash.
+    /// Called with every pair planned to price it (passable-render
+    /// --dump-costs), from any core.
+    nonisolated(unsafe) static var planNotes: ((Int, Int, PairPlan) -> Void)?
+
     static func costMatrix(_ analyses: [TrackAnalysis], drums: [[Float]?]? = nil, remembered: Bool = false,
                            urls: [URL]? = nil) -> [[Double]] {
         let n = analyses.count
@@ -611,12 +615,14 @@ enum SetOrdering {
                 // better, and is decided when the set is built: twice as
                 // quick, for a long set half a minute less of ordering.)
                 let solo = SetBuilder.clubSoloSeconds(energy: energy(a))
-                out[k] = PairPlan.make(a: a, b: analyses[j],
+                let plan = PairPlan.make(a: a, b: analyses[j],
                                        entryRange: (soloFrom + SetBuilder.minimumSoloBars(a.grid, seconds: solo))...Int.max,
                                        soloFrom: soloFrom, drums: hits, clashing: isClashed, locking: isLocked,
                                        loops: false, targetSoloSeconds: solo,
                                        hookBoost: SetBuilder.clubHookBoost,
-                                       dropMinBars: SetBuilder.dropMomentBars).cost(a: a, b: analyses[j])
+                                       dropMinBars: SetBuilder.dropMomentBars)
+                out[k] = plan.cost(a: a, b: analyses[j])
+                if let note = planNotes { note(i, j, plan) }
             }
         }
         if remembered {
