@@ -19,10 +19,10 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--upgrade-vox", "--upgrade-bass", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--upgrade-vox", "--upgrade-bass", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--club", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts": break
     case "--dump-vocals", "--models", "--vocal-step", "--breaths-at", "--phone-mix", "--title", "--bitrate": _ = args.removeFirst()
     case "--order": ordered = true
-    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale", "--switch-lead": _ = args.removeFirst()
+    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale", "--switch-lead", "--drop-penalty", "--opener-weight", "--warm-up": _ = args.removeFirst()
     case "--list":
         let text = try String(contentsOfFile: args.removeFirst(), encoding: .utf8)
         songs += text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -81,6 +81,9 @@ if let k = CommandLine.arguments.firstIndex(of: "--cut-scale") { AutoPlacement.c
 if let k = CommandLine.arguments.firstIndex(of: "--hole-scale") { AutoPlacement.holeScale = Float(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--busy-scale") { AutoPlacement.busyScale = Float(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--switch-lead") { TransitionBuilder.switchLead = Double(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--drop-penalty") { SetOrdering.dropPenalty = Double(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--opener-weight") { SetOrdering.openerWeight = Double(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--warm-up") { SetOrdering.warmUpShare = Double(CommandLine.arguments[k + 1])! }
 
 // Songs not separated yet need the models: the installed app's.
 ModelLocation.directory = URL(fileURLWithPath: CommandLine.arguments.firstIndex(of: "--models").map { CommandLine.arguments[$0 + 1] }
@@ -338,6 +341,22 @@ if ordered {
         }
     }
     tracks = order.map { tracks[$0] }
+    do {
+        // The order as a dance floor gets it (see --club; no audio needed):
+        // energy drops over 0.2, tempo jumps over 6 % and over 10 %, the
+        // opener's rank among the set's energies, and the distance from
+        // the arc.
+        let e = tracks.map { SetOrdering.energy($0.loaded.analysis) }
+        let bpm = tracks.map { $0.loaded.analysis.grid.bpm }
+        let drops = (1..<e.count).filter { e[$0 - 1] - e[$0] > 0.2 }.count
+        let st = (1..<bpm.count).map { MixMath.stretch(MixMath.rate(a: bpm[$0 - 1], b: bpm[$0])) }
+        let rank = Double(e.sorted().firstIndex(of: e[0]) ?? 0) / Double(max(1, e.count - 1))
+        let arc = SetOrdering.EnergyArc(e)
+        let off = (e.indices.map { arc.cost($0, place: $0, count: e.count) / (arc.weight * SetOrdering.warmUp(place: $0, count: e.count)) }
+            .reduce(0, +) / Double(e.count)).squareRoot()
+        print(String(format: "ORDER-CLUB drops %d, jumps >6%% %d, >10%% %d, opener energy %.2f (rank %.0f %%), off the arc %.3f",
+                     drops, st.filter { $0 > 0.06 }.count, st.filter { $0 > 0.10 }.count, e[0], rank * 100, off))
+    }
     if CommandLine.arguments.contains("--order-only") { exit(0) }
     try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
     try? tracks.map(\.url.path).joined(separator: "\n").write(to: outDir.appendingPathComponent("order.txt"), atomically: true, encoding: .utf8)
@@ -520,10 +539,11 @@ func barLevels(from: Double, bars: Int, barSeconds: Double, including: @escaping
 
 /// The same of a snapshot of any mix (another mix's, or one with its
 /// automation cleared).
-func barLevels(from: Double, bars: Int, barSeconds: Double, of snapshot: MixSnapshot) -> [Double] {
+func barLevels(from: Double, bars: Int, barSeconds: Double, of snapshot: MixSnapshot,
+               band: (low: Double, high: Double) = (150, 16_000)) -> [Double] {
     let n = 4096, fft = RealFFT(size: n)
     let window = (0..<n).map { Float(0.5 - 0.5 * cos(2 * Double.pi * Double($0) / Double(n))) }
-    let lo = Int(150 / sr * Double(n)), hi = Int(16_000 / sr * Double(n))
+    let lo = max(1, Int(band.low / sr * Double(n))), hi = Int(band.high / sr * Double(n))
     let renderer = MixRenderer(snapshot: snapshot)
     renderer.setPositionImmediately(Int(from * sr))
     var out: [Double] = []
@@ -1118,6 +1138,61 @@ if CommandLine.arguments.contains("--vocals") {
                  absSteps.reduce(0, +) / Double(max(1, absSteps.count)), absSteps.isEmpty ? 0 : absSteps[absSteps.count / 2],
                  absSteps.last ?? 0, absSteps.filter { $0 > 4 }.count))
     print("VOCALS \(both) handovers: overlap \(overlapSum) beats, longest gap \(gapWorst) beats, gaps over a bar \(gaps4), A cut mid-sentence \(aMid), B in mid-part \(bMid), words cut in two: A \(chopsOut), B \(chopsIn) (at full: A \(hardOut), B \(hardIn))")
+    exit(0)
+}
+if CommandLine.arguments.contains("--club") {
+    // The set as a dance floor gets it, start to end, by what a club DJ
+    // keeps to: no song pulling the energy far down from the one before;
+    // not opening on a peak and falling off it; tempos moving in small
+    // steps; no stretch of the set falling well under its own level, nor
+    // its kick and bass; songs not outstaying their welcome.
+    let analyses = tracks.map(\.loaded.analysis)
+    let energies = analyses.map(SetOrdering.energy)
+    let drops = (1..<energies.count).filter { energies[$0 - 1] - energies[$0] > 0.2 }
+    let rank = Double(energies.sorted().firstIndex(of: energies[0]) ?? 0) / Double(max(1, energies.count - 1))
+    let openerHigh = rank > 0.5
+    var jumps: [String] = []
+    for t in mix.transitions {
+        let a = analyses[t.from].grid.bpm, b = analyses[t.to].grid.bpm
+        let st = MixMath.stretch(MixMath.rate(a: a, b: b))
+        if st > 0.06 { jumps.append(String(format: "%d→%d %.0f→%.0f BPM (%.0f %%)", t.from + 1, t.to + 1, a, b, st * 100)) }
+    }
+    let window = 30.0, count = Int(mix.length / window)
+    let snap = mix.snapshot(masterGain: 1)
+    let level = barLevels(from: 0, bars: count, barSeconds: window, of: snap)
+    let low = barLevels(from: 0, bars: count, barSeconds: window, of: snap, band: (30, 150))
+    func median(_ x: [Double]) -> Double { let s = x.sorted(); return s.isEmpty ? 0 : s[s.count / 2] }
+    // (The first two minutes are the set's own start.)
+    let holes = level.indices.filter { $0 >= 4 && level[$0] < median(level) - 6 }
+    let lowHoles = low.indices.filter { $0 >= 4 && low[$0] < median(low) - 8 }
+    var alone: [Double] = []
+    for k in mix.tracks.indices {
+        let from = k == 0 ? 0 : mix.transitions[k - 1].end
+        let to = k < mix.transitions.count ? mix.transitions[k].begins : mix.length
+        alone.append(max(0, to - from))
+    }
+    let arc = SetOrdering.EnergyArc(energies)
+    let offArc = energies.indices.map { arc.cost($0, place: $0, count: energies.count) / (arc.weight * SetOrdering.warmUp(place: $0, count: energies.count)) }
+    let arcRMS = (offArc.reduce(0, +) / Double(max(1, offArc.count))).squareRoot()
+    if CommandLine.arguments.contains("-v") {
+        for k in drops { print(String(format: "DROP %2d→%2d energy %.2f → %.2f  %@ → %@", k, k + 1, energies[k - 1], energies[k], SongTitle.of(tracks[k - 1].url), SongTitle.of(tracks[k].url))) }
+        for j in jumps { print("JUMP \(j)") }
+        for h in holes { print(String(format: "HOLE at %@: %.1f dB under the set", String(format: "%d:%02d", Int(Double(h) * window) / 60, Int(Double(h) * window) % 60), median(level) - level[h])) }
+        // (Whose: the song playing there, and whether a transition is.)
+        func at(_ time: Double) -> String {
+            let k = mix.transitions.filter { $0.end <= time }.count
+            let blending = mix.transitions.contains { $0.begins <= time + window && $0.end >= time }
+            return SongTitle.of(tracks[min(k, tracks.count - 1)].url) + (blending ? " (in a transition)" : " (on its own)")
+        }
+        for h in lowHoles { print(String(format: "LOW HOLE at %@: kick and bass %.1f dB under the set, %@", String(format: "%d:%02d", Int(Double(h) * window) / 60, Int(Double(h) * window) % 60), median(low) - low[h], at(Double(h) * window))) }
+    }
+    // (A song's own breakdown before its drop is its moment, not a hole:
+    // only holes a transition makes count.)
+    let made = lowHoles.filter { h in mix.transitions.contains { $0.begins <= Double(h) * window + window && $0.end >= Double(h) * window } }
+    let club = 2.0 * Double(drops.count) + 2.0 * Double(jumps.count) + Double(holes.count) + Double(made.count) + (openerHigh ? 3 : 0) + 20 * arcRMS
+    print(String(format: "CLUB %d songs: energy drops %d, tempo jumps %d, holes %d, low-end holes %d, opener %@ (energy %.2f, rank %.0f %%), off the arc %.3f, songs alone median %.0f s (90th %.0f s) | club score %.1f",
+                 energies.count, drops.count, jumps.count, holes.count, lowHoles.count, openerHigh ? "HIGH" : "ok", energies[0], rank * 100,
+                 arcRMS, median(alone), alone.sorted()[alone.count * 9 / 10], club))
     exit(0)
 }
 if CommandLine.arguments.contains("--report") {

@@ -656,6 +656,32 @@ enum SetOrdering {
     /// ten songs were its ten gentlest, energy 0.22–0.55 after a 0.90
     /// peak, and its worst blends with them.)
     nonisolated(unsafe) static var arcPenalty = 4.0
+    /// What a song costs for the energy it gives up against the one before
+    /// it, beyond `dropGrace` (squared; passable-render --drop-penalty). At
+    /// 40 a real set's drops over 0.2 went 6 -> 4, its blends' defects
+    /// 288 -> 300 (scattered, partly the other pairs met): left at 0.
+    nonisolated(unsafe) static var dropPenalty = 0.0
+    nonisolated(unsafe) static var dropGrace = 0.15
+    /// How much more the opener's distance from the arc counts than any
+    /// other place's (passable-render --opener-weight). At 1 the set
+    /// opened on its second-hardest song (Blinding Lights, 0.92) and fell
+    /// to 0.4 for twenty songs; at 10 it opens at 0.44 (the gentlest 6 %),
+    /// and over three sets the order's blends came out cheaper too (a
+    /// real set's defects 304.8 -> 288.0, its drops over 0.2 9 -> 6).
+    nonisolated(unsafe) static var openerWeight = 10.0
+    /// The share of the set, from its start, the arc counts more over: the
+    /// opener `openerWeight` times, fading to once at `warmUpShare` (0: the
+    /// opener alone; passable-render --warm-up).
+    nonisolated(unsafe) static var warmUpShare = 0.0
+
+    /// How much more a place's distance from the arc counts (see
+    /// `openerWeight`, `warmUpShare`).
+    @inline(__always) static func warmUp(place: Int, count: Int) -> Double {
+        guard place > 0 else { return openerWeight }
+        guard warmUpShare > 0, count > 1 else { return 1 }
+        let x = Double(place) / Double(count - 1)
+        return 1 + (openerWeight - 1) * max(0, 1 - x / warmUpShare)
+    }
 
     /// What each place in a set's order asks for: the energy of the set's
     /// own song at that rank (so any set has an arc it can follow,
@@ -690,7 +716,7 @@ enum SetOrdering {
             let q = Self.shape(Double(place) / Double(count - 1)) * Double(sorted.count - 1)
             let lo = Int(q), hi = min(lo + 1, sorted.count - 1), f = q - Double(lo)
             let off = energies[song] - (sorted[lo] * (1 - f) + sorted[hi] * f)
-            return weight * off * off
+            return weight * SetOrdering.warmUp(place: place, count: count) * off * off
         }
     }
 
@@ -705,6 +731,15 @@ enum SetOrdering {
         // Two songs have an order too: whichever leads into the other best.
         guard n > 1 else { return Array(0..<n) }
         let arc = energies.map(EnergyArc.init)
+        // A song pulling the energy down far from the one before costs on
+        // top of its blend (see `dropPenalty`).
+        var costs = costs
+        if let e = energies, dropPenalty > 0 {
+            for i in 0..<n { for j in 0..<n where i != j {
+                let drop = max(0, e[i] - e[j] - dropGrace)
+                costs[i][j] += dropPenalty * drop * drop
+            } }
+        }
         if n <= 12 { return exact(costs, washOuts, arc) }
         return search(costs, washOuts, arc, shakes: shakes)
     }
