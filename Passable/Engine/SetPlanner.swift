@@ -174,6 +174,10 @@ struct PairPlan: Equatable {
     /// songs' own drum hits), so it was placed for B's drums building in
     /// under A's rather than for the worst case of them not layering.
     var drumsLock = false
+    /// What the songs' hits said at the worst-case spot (lock and windows
+    /// before the swap, then after; empty without hits): for
+    /// passable-render to set against what the audio says.
+    var lockEvidence: [Double] = []
 
     var stretchPercent: Double { (rate - 1) * 100 }
     /// The rates A and B play at through the blend (see `MixMath.shared`).
@@ -384,6 +388,7 @@ struct PairPlan: Equatable {
         }
         /// Whether the two grooves clearly lock where `c` puts the blend,
         /// and whether A's drums can then play on under B's after the swap.
+        var evidence: [Double] = []
         func locks(_ c: Candidate) -> (before: Bool, after: Bool) {
             guard let drums, c.preset != .echoOut else { return (false, false) }
             let start = a.grid.downbeat(c.placement.entryBar)
@@ -395,6 +400,7 @@ struct PairPlan: Equatable {
                                            loop: c.placement.loopBars > 0
                                                ? (Double(c.placement.loopBack) * barSeconds, Double(c.placement.loopBars) * barSeconds)
                                                : nil)
+            if evidence.isEmpty { evidence = [lock.lockBefore, Double(lock.votesBefore), lock.lockAfter, Double(lock.votesAfter)] }
             return (lock.clearlyGrooves, lock.groovesAfter)
         }
         // Without knowing whether the grooves lock, every spot is judged by
@@ -426,7 +432,7 @@ struct PairPlan: Equatable {
         return PairPlan(preset: best.preset, bars: best.bars, rate: best.preset == .echoOut ? 1 : rate,
                         placement: best.placement,
                         keysClash: best.preset != .echoOut && (best.placement.notesClash ?? clash(best.shift)),
-                        semitones: best.shift, drumsLock: drumsLock)
+                        semitones: best.shift, drumsLock: drumsLock, lockEvidence: evidence)
     }
 
     /// Lower is better. What a DJ weighs when picking the next record:
@@ -1768,9 +1774,13 @@ enum BeatAlign {
         /// after it, where both full kits prove the two grids sit as one.
         /// With neither, the lock is only assumed.
         var clearlyGrooves: Bool {
-            votesBefore >= 2 ? lockBefore > 0.8 : votesAfter >= 2 && lockAfter > 0.8
+            votesBefore >= 2 ? lockBefore > BeatAlign.clearMargin : votesAfter >= 2 && lockAfter > BeatAlign.clearMargin
         }
     }
+
+    /// The share of windows a lock predicted from the songs' own hits needs
+    /// (see `Result.clearlyGrooves`; passable-render --clear-margin).
+    nonisolated(unsafe) static var clearMargin = 0.8
 
     /// Samples per onset frame: a millisecond. The tempo detector's 10 ms
     /// frames smear where a hit lands inside them, so a steady 8 ms flam
@@ -2876,6 +2886,9 @@ struct AutoMoves: OptionSet, Hashable, Sendable {
 
 /// Plans and renders a set from loaded tracks in a given order.
 enum SetBuilder {
+    /// Prints what each blend's plan said of the two grooves against what
+    /// the audio said (passable-render --lock-log).
+    nonisolated(unsafe) static var logLocks = false
     /// Default solo baseline (used by unit tests and placement helpers).
     static let minimumSoloSeconds = 30.0
 
@@ -3507,6 +3520,13 @@ enum SetBuilder {
                         hats = false
                     }
                 }
+            }
+            if Self.logLocks, !byHand, span > 0, edit.preset != .echoOut {
+                print(String(format: "LOCKLOG\t%d\t%@\t%d\t%d\t%.2f\t%d\t%.2f\t%d\t%d\t%d\t%@ → %@", plan.drumsLock ? 1 : 0,
+                             plan.lockEvidence.map { String(format: "%.2f", $0) }.joined(separator: ","),
+                             align.grooves ? 1 : 0, (align.votesBefore >= 2 && align.lockBefore > 0.8) ? 1 : 0,
+                             align.lockBefore, align.votesBefore, align.lockAfter, align.votesAfter, align.topsSplit ? 1 : 0, heardTogether,
+                             SongTitle.of(a.url), SongTitle.of(tracks[k].url)))
             }
             if !byHand, span > 0, plan.drumsLock, !align.grooves {
                 broken.insert(PairKey(from: a.url, to: tracks[k].url))

@@ -19,10 +19,10 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--upgrade-vox", "--upgrade-bass", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--club", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts", "--hooks", "--hook-first": break
-    case "--dump-vocals", "--models", "--vocal-step", "--breaths-at", "--phone-mix", "--title", "--bitrate": _ = args.removeFirst()
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--upgrade-vox", "--upgrade-bass", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--club", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts", "--hooks", "--hook-first", "--lock-log": break
+    case "--dump-vocals", "--models", "--vocal-step", "--breaths-at", "--phone-mix", "--title", "--bitrate", "--dump-costs": _ = args.removeFirst()
     case "--order": ordered = true
-    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale", "--switch-lead", "--drop-penalty", "--opener-weight", "--warm-up", "--relearn": _ = args.removeFirst()
+    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale", "--switch-lead", "--drop-penalty", "--opener-weight", "--warm-up", "--relearn", "--clear-margin": _ = args.removeFirst()
     case "--list":
         let text = try String(contentsOfFile: args.removeFirst(), encoding: .utf8)
         songs += text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -83,6 +83,8 @@ if let k = CommandLine.arguments.firstIndex(of: "--busy-scale") { AutoPlacement.
 if let k = CommandLine.arguments.firstIndex(of: "--switch-lead") { TransitionBuilder.switchLead = Double(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--drop-penalty") { SetOrdering.dropPenalty = Double(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--opener-weight") { SetOrdering.openerWeight = Double(CommandLine.arguments[k + 1])! }
+if let k = CommandLine.arguments.firstIndex(of: "--clear-margin") { BeatAlign.clearMargin = Double(CommandLine.arguments[k + 1])! }
+if CommandLine.arguments.contains("--lock-log") { SetBuilder.logLocks = true }
 if CommandLine.arguments.contains("--hook-first") { TrackStructure.hookAtFirstBar = true }
 if let k = CommandLine.arguments.firstIndex(of: "--warm-up") { SetOrdering.warmUpShare = Double(CommandLine.arguments[k + 1])! }
 
@@ -321,6 +323,10 @@ if ordered {
     let t1 = Date()
     let costs = SetOrdering.costMatrix(analyses, drums: hits, remembered: true, urls: tracks.map(\.url))
     let t2 = Date()
+    if let k = CommandLine.arguments.firstIndex(of: "--dump-costs") {
+        try? costs.map { $0.map { String($0.bitPattern) }.joined(separator: " ") }.joined(separator: "\n")
+            .write(toFile: CommandLine.arguments[k + 1], atomically: true, encoding: .utf8)
+    }
     let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
     let shakes = CommandLine.arguments.firstIndex(of: "--shakes").map { Int(CommandLine.arguments[$0 + 1])! }
     // --as-listed: price the list's own order instead of searching one.
