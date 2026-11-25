@@ -3,7 +3,12 @@ import SwiftUI
 @main
 struct PassableApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
-    @StateObject private var set = SetSession()
+    // Launched to host the unit tests, the app leaves the user's set alone:
+    // restoring it loaded (and could separate and reorder) every song of it
+    // while the tests ran.
+    @StateObject private var set = SetSession(persists: !PassableApp.hostingTests)
+
+    static let hostingTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     var body: some Scene {
         WindowGroup("Passable") {

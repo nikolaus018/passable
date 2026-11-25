@@ -317,11 +317,13 @@ final class SetSession: ObservableObject {
     }
 
     func remove(_ id: UUID) {
+        relearnRounds = 0
         items.removeAll { $0.id == id }
         invalidate()
     }
 
     func move(from source: IndexSet, to destination: Int) {
+        relearnRounds = 0
         items.move(fromOffsets: source, toOffset: destination)
         invalidate()
     }
@@ -378,6 +380,22 @@ final class SetSession: ObservableObject {
     ///   are fitted in where they go best, and the others stay as they
     ///   are (Auto-Order itself starts from scratch).
     func autoOrder(keepingOrder: Bool = false) {
+        order(keepingOrder: keepingOrder, again: false)
+    }
+
+    /// Times, at the most, a set ordered from scratch is ordered again with
+    /// what its build heard on the audio (beats that don't lock, keys that
+    /// clash, beats that do; see `SetMix.Learned`): a pair priced on its
+    /// analysis alone can cost more or less as it plays, and the order
+    /// should know. Until the order stays, while the music isn't playing.
+    /// (An 86-song set's first order scored 341.2 in defects; ordered again
+    /// until it stayed, four times, 305.8.)
+    static let relearnLimit = 4
+    private var relearnRounds = 0
+    /// How many pairs had been learnt when the set was last ordered.
+    private var learntAtOrder = 0
+
+    private func order(keepingOrder: Bool, again: Bool) {
         needsOrdering = false
         orderTask?.cancel()
         let ready = items.filter { $0.analysis != nil }
@@ -386,6 +404,10 @@ final class SetSession: ObservableObject {
         guard ready.count == items.count, items.count > 1 else { return rebuild() }
         let placed = ready.indices.filter { !new.contains(ready[$0].id) }, added = ready.indices.filter { new.contains(ready[$0].id) }
         let fitIn = !added.isEmpty && placed.count > 1
+        // (A set fitted round its own order keeps it: only one ordered from
+        // scratch is ordered again.)
+        if fitIn { relearnRounds = 0 } else if !again { relearnRounds = Self.relearnLimit }
+        learntAtOrder = SetMix.Learned.load().count
         let analyses = ready.map { $0.analysis! }
         let songs = ready.compactMap(\.loaded)
         let urls = ready.map(\.url)
@@ -409,7 +431,12 @@ final class SetSession: ObservableObject {
             if reordered.map(\.id) != ids {
                 self.items = reordered
                 self.invalidate()
+            } else if again, self.mix != nil {
+                // (Ordered again to the same order: the set as built stands.)
+                self.relearnRounds = 0
+                self.buildStatus = nil
             } else {
+                self.relearnRounds = 0
                 self.rebuild()
             }
         }
@@ -530,12 +557,24 @@ final class SetSession: ObservableObject {
                 self.buildStatus = nil
                 self.refreshSnapshot()
                 self.refreshFocus()
+                self.relearn()
             } catch is CancellationError {
             } catch {
                 self?.buildStatus = nil
                 self?.alert = error.localizedDescription
             }
         }
+    }
+
+    /// A set just ordered from scratch, built: ordered again if the build
+    /// learnt something about its pairs from the audio (see
+    /// `relearnLimit`). Never under the music: a set playing keeps its
+    /// order.
+    private func relearn() {
+        guard relearnRounds > 0 else { return }
+        guard !transport.isPlaying, SetMix.Learned.load().count > learntAtOrder else { relearnRounds = 0; return }
+        relearnRounds -= 1
+        order(keepingOrder: false, again: true)
     }
 
     /// Songs a set too long to build at once plays first (see `rebuild`).

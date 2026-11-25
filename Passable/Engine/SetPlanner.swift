@@ -483,8 +483,10 @@ enum PairCosts {
     /// Bumped whenever planning or pricing changes; the cut price is part
     /// of it (0.1.5 raised it from 3 to 15 under the same version, and
     /// Auto-Order went on reading prices made at 3).
-    static let planner = "44"
-    static var version: String { "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" }
+    static let planner = "45"
+    static var version: String {
+        "\(planner)-cut\(MixMath.cutCost)" + "-clash\(MixMath.clashCost)" + (TrackStructure.hookAtFirstBar ? "-hook0" : "")
+    }
 
     /// One file per version: prices of another planner are dropped with
     /// it, not carried until the file fills up.
@@ -1370,15 +1372,32 @@ struct SetMix: @unchecked Sendable {
         /// time (and the second renditions replaced the first, so it all
         /// happened again next launch): ~50 s for a 66-song set.
         private static var url: URL {
-            StemCache.root.deletingLastPathComponent().appendingPathComponent("learned-pairs-\(PairCosts.planner).json")
+            StemCache.root.deletingLastPathComponent().appendingPathComponent("learned-pairs-\(version).json")
         }
+        /// Bumped when what's heard on the audio changes (the lock and clash
+        /// checks), not with `PairCosts.planner`: what two songs' audio does
+        /// together is the same whatever the planner prices. (Named after
+        /// the planner until 0.1.39, every planner change threw it away: an
+        /// 86-song set ordered without its 56 learnt pairs scored 338.5
+        /// against 288.0 with them.)
+        static let version = "44"
         private static let lock = NSLock()
 
         static func load() -> Learned {
             lock.lock(); defer { lock.unlock() }
-            guard let data = try? Data(contentsOf: url) else { return Learned() }
-            return (try? JSONDecoder().decode(Learned.self, from: data)) ?? Learned()
+            var all = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(Learned.self, from: $0) } ?? Learned()
+            all.unlocked.formUnion(session.unlocked)
+            all.clashed.formUnion(session.clashed)
+            all.locked.formUnion(session.locked)
+            return all
         }
+
+        /// How many pairs it holds.
+        var count: Int { unlocked.count + clashed.count + locked.count }
+
+        /// What this run's builds learnt, kept in memory: a measuring
+        /// tool's builds learn (and plan with it) without writing it down.
+        nonisolated(unsafe) static var session = Learned()
 
         /// A measuring tool's builds leave the app's memory alone: what an
         /// experiment learnt would change the next real set, and the next
@@ -1386,8 +1405,11 @@ struct SetMix: @unchecked Sendable {
         nonisolated(unsafe) static var isReadOnly = false
 
         static func remember(_ new: Learned) {
-            guard !isReadOnly else { return }
             lock.lock(); defer { lock.unlock() }
+            session.unlocked.formUnion(new.unlocked)
+            session.clashed.formUnion(new.clashed)
+            session.locked.formUnion(new.locked)
+            guard !isReadOnly else { return }
             var all = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(Learned.self, from: $0) } ?? Learned()
             let before = (all.unlocked.count, all.clashed.count, all.locked.count)
             all.unlocked.formUnion(new.unlocked)

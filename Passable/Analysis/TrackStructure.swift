@@ -658,6 +658,10 @@ struct TrackStructure: Codable, Equatable {
     /// (`hookStart` is measured eight bars at a time and peaks a bar or
     /// two into the hook as often as on its first; a hook that starts on
     /// the phrase's downbeat was then missed from the phrase's start.)
+    /// Whether a chorus the model hears from the very first bar counts as
+    /// a hook starting there (passable-render --hook-first).
+    nonisolated(unsafe) static var hookAtFirstBar = false
+
     func hook(from bar: Int) -> Float { (bar...(bar + 2)).map { hook($0) }.max() ?? 0 }
 
     /// 0…1: how strongly a hook starts on `bar`.
@@ -667,7 +671,10 @@ struct TrackStructure: Codable, Equatable {
         // (or a drop) begin counts as much as either says, and a "hook" in
         // what it hears as an intro, break or outro counts half.
         guard let cs = chorusScore, bar < cs.count else { return h[bar] }
-        let starts = cs[bar] - (bar > 0 && bar - 1 < cs.count ? cs[bar - 1] : 0)
+        // (Nothing comes before a song's first bar for a chorus to start
+        // after: read as a start, every song the model hears a chorus in
+        // from bar 0 got a full-strength "hook" there, 16 of 86.)
+        let starts = bar > 0 ? cs[bar] - cs[bar - 1] : (Self.hookAtFirstBar ? cs[0] : 0)
         let neural = min(1, max(0, starts) + 0.5 * (neuralBoundary.map { bar < $0.count ? $0[bar] : 0 } ?? 0) * cs[bar])
         let lull = section(at: bar)?.isLull == true
         return min(1, max(h[bar], neural) * (lull ? 0.5 : 1))

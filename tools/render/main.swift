@@ -19,10 +19,10 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--upgrade-vox", "--upgrade-bass", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--club", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--upgrade-vox", "--upgrade-bass", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--club", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts", "--hooks", "--hook-first": break
     case "--dump-vocals", "--models", "--vocal-step", "--breaths-at", "--phone-mix", "--title", "--bitrate": _ = args.removeFirst()
     case "--order": ordered = true
-    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale", "--switch-lead", "--drop-penalty", "--opener-weight", "--warm-up": _ = args.removeFirst()
+    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale", "--switch-lead", "--drop-penalty", "--opener-weight", "--warm-up", "--relearn": _ = args.removeFirst()
     case "--list":
         let text = try String(contentsOfFile: args.removeFirst(), encoding: .utf8)
         songs += text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -83,6 +83,7 @@ if let k = CommandLine.arguments.firstIndex(of: "--busy-scale") { AutoPlacement.
 if let k = CommandLine.arguments.firstIndex(of: "--switch-lead") { TransitionBuilder.switchLead = Double(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--drop-penalty") { SetOrdering.dropPenalty = Double(CommandLine.arguments[k + 1])! }
 if let k = CommandLine.arguments.firstIndex(of: "--opener-weight") { SetOrdering.openerWeight = Double(CommandLine.arguments[k + 1])! }
+if CommandLine.arguments.contains("--hook-first") { TrackStructure.hookAtFirstBar = true }
 if let k = CommandLine.arguments.firstIndex(of: "--warm-up") { SetOrdering.warmUpShare = Double(CommandLine.arguments[k + 1])! }
 
 // Songs not separated yet need the models: the installed app's.
@@ -341,6 +342,24 @@ if ordered {
         }
     }
     tracks = order.map { tracks[$0] }
+    // --relearn N: built, what the build learnt from the audio priced in,
+    // and ordered again, up to N times (until the order stays).
+    if let k = CommandLine.arguments.firstIndex(of: "--relearn") {
+        for round in 0..<Int(CommandLine.arguments[k + 1])! {
+            let before = tracks.map(\.url)
+            let built = try await SetBuilder.build(tracks, moves: ProcessInfo.processInfo.environment["PASSABLE_MOVES"].flatMap(Int.init).map(AutoMoves.init(rawValue:)) ?? .all, processor: processor) { _ in }
+            _ = built
+            let analyses = tracks.map(\.loaded.analysis)
+            let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: tracks.map(\.loaded)), remembered: true, urls: tracks.map(\.url))
+            let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
+            let order = SetOrdering.order(costs, washOuts: washOuts, energies: energies, shakes: shakes)
+            let l = SetMix.Learned.session
+            print(String(format: "relearn %d: learnt %d unlocked, %d clashed, %d locked; order cost %.2f", round + 1, l.unlocked.count, l.clashed.count, l.locked.count,
+                         SetOrdering.total(order, costs, washOuts, energies)))
+            tracks = order.map { tracks[$0] }
+            if tracks.map(\.url) == before { break }
+        }
+    }
     do {
         // The order as a dance floor gets it (see --club; no audio needed):
         // energy drops over 0.2, tempo jumps over 6 % and over 10 %, the
@@ -357,9 +376,9 @@ if ordered {
         print(String(format: "ORDER-CLUB drops %d, jumps >6%% %d, >10%% %d, opener energy %.2f (rank %.0f %%), off the arc %.3f",
                      drops, st.filter { $0 > 0.06 }.count, st.filter { $0 > 0.10 }.count, e[0], rank * 100, off))
     }
-    if CommandLine.arguments.contains("--order-only") { exit(0) }
     try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
     try? tracks.map(\.url.path).joined(separator: "\n").write(to: outDir.appendingPathComponent("order.txt"), atomically: true, encoding: .utf8)
+    if CommandLine.arguments.contains("--order-only") { exit(0) }
     print("ordered in \(seconds(clock))")
 }
 if CommandLine.arguments.contains("--breaths") {
@@ -1186,6 +1205,43 @@ if CommandLine.arguments.contains("--club") {
         }
         for h in lowHoles { print(String(format: "LOW HOLE at %@: kick and bass %.1f dB under the set, %@", String(format: "%d:%02d", Int(Double(h) * window) / 60, Int(Double(h) * window) % 60), median(low) - low[h], at(Double(h) * window))) }
     }
+    // Each song's hooks (its chorus, its drop: what the crowd waits for)
+    // the set plays: from the blend into it to the end of the blend out
+    // of it, not jumped over. A song whose strongest hook never plays was
+    // left before its moment.
+    var missed: [String] = [], hooksHeard = 0, hooksAll = 0
+    for (k, t) in mix.tracks.enumerated() {
+        guard let st = t.loaded.analysis.structure else { continue }
+        let grid = t.loaded.analysis.grid
+        let from = k == 0 ? -1e9 : mix.transitions[k - 1].begins
+        let to = k < mix.transitions.count ? mix.transitions[k].end : 1e9
+        let hooks = (0..<st.loudness.count).map { st.hook($0) }
+        guard let top = hooks.max(), top >= 0.3 else { continue }
+        func plays(_ bar: Int) -> Bool {
+            let songTime = grid.downbeat(bar)
+            if let skip = t.skip, songTime >= skip.from, songTime < skip.to { return false }
+            let at = t.master(songTime)
+            return at >= from && at < to
+        }
+        // (A hook a bar or two from the strongest is the same one.)
+        let strong = hooks.indices.filter { hooks[$0] >= 0.5 * top && ($0 == 0 || hooks[$0 - 1] < 0.5 * top) }
+        hooksAll += strong.count
+        hooksHeard += strong.filter(plays).count
+        let best = hooks.firstIndex(of: top)!
+        if CommandLine.arguments.contains("--hooks") {
+            let bars = (0..<st.loudness.count).filter(plays)
+            print(String(format: "%2d plays bars %d-%d of %d; hooks: %@  %@", k + 1, bars.first ?? -1, bars.last ?? -1, st.loudness.count,
+                         strong.map { String(format: "%d:%.2f", $0, hooks[$0]) }.joined(separator: " "), SongTitle.of(t.url)))
+        }
+        if !plays(best) {
+            let first = strong.first(where: plays)
+            missed.append(String(format: "%2d %@: best hook bar %d (%.2f) not played%@", k + 1, SongTitle.of(t.url), best, top,
+                                 first.map { String(format: ", plays one at bar %d (%.2f)", $0, hooks[$0]) } ?? ", NO hook played"))
+        }
+    }
+    if CommandLine.arguments.contains("-v") { for m in missed { print("HOOK " + m) } }
+    print(String(format: "HOOKS %d of %d strong hooks played; best hook missed in %d songs, no hook at all in %d",
+                 hooksHeard, hooksAll, missed.count, missed.filter { $0.hasSuffix("NO hook played") }.count))
     // (A song's own breakdown before its drop is its moment, not a hole:
     // only holes a transition makes count.)
     let made = lowHoles.filter { h in mix.transitions.contains { $0.begins <= Double(h) * window + window && $0.end >= Double(h) * window } }

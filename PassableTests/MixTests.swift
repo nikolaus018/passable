@@ -1200,3 +1200,19 @@ final class SnapOpeningsTests: XCTestCase {
         XCTAssertFalse(SetBuilder.snapOpenings(&track))
     }
 }
+
+final class HookTests: XCTestCase {
+    /// A chorus the model hears from the first bar on is no hook starting
+    /// there: nothing came before it for the crowd to wait through. One
+    /// that starts later still is.
+    func testNoHookStartsOnTheFirstBar() {
+        var s = TrackStructure(activity: [:], loudness: [Float](repeating: -10, count: 16))
+        s.hookStart = [Float](repeating: 0, count: 16)
+        s.chorusScore = (0..<16).map { $0 < 4 || $0 >= 8 ? 1 : 0 }
+        XCTAssertEqual(s.hook(0), 0)
+        XCTAssertEqual(s.hook(8), 1, accuracy: 1e-6)
+        TrackStructure.hookAtFirstBar = true
+        defer { TrackStructure.hookAtFirstBar = false }
+        XCTAssertEqual(s.hook(0), 1, accuracy: 1e-6)
+    }
+}
