@@ -481,6 +481,99 @@ struct PairPlan: Equatable {
     }
 }
 
+/// What each pair built has measured on its audio (`TransitionMeasure`),
+/// kept between launches, and priced in when the set is ordered: a pair
+/// measures nearly the same in any order, where its price foresaw it
+/// loosely. An 86-song set ordered with the 192 pairs measured so far
+/// scored 261.2 in defects, against 288.0 for the best order without.
+/// What a pair measures is the planner's doing too: named after its
+/// version, and measured again under another.
+enum MeasuredPairs {
+    /// Price per defect point a pair measured above the mean of the pairs
+    /// measured (passable-render --measured-weight; 0.3 ordered no better).
+    nonisolated(unsafe) static var weight = 1.0
+    private static var url: URL {
+        StemCache.root.deletingLastPathComponent().appendingPathComponent("measured-pairs-\(PairCosts.planner).json")
+    }
+    private static let lock = NSLock()
+    /// What this run measured, in memory (a measuring tool's are never
+    /// written: see `SetMix.Learned.isReadOnly`).
+    nonisolated(unsafe) private static var session: [PairKey: Double] = [:]
+    private struct Entry: Codable { let from: URL, to: URL, points: Double }
+
+    static func load() -> [PairKey: Double] {
+        lock.lock(); defer { lock.unlock() }
+        var all: [PairKey: Double] = [:]
+        if let data = try? Data(contentsOf: url), let entries = try? JSONDecoder().decode([Entry].self, from: data) {
+            for e in entries { all[PairKey(from: e.from, to: e.to)] = e.points }
+        }
+        all.merge(session) { _, new in new }
+        return all
+    }
+
+    static func remember(_ new: [PairKey: Double]) {
+        guard !new.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        session.merge(new) { _, new in new }
+        guard !SetMix.Learned.isReadOnly else { return }
+        var all: [PairKey: Double] = [:]
+        if let data = try? Data(contentsOf: url), let entries = try? JSONDecoder().decode([Entry].self, from: data) {
+            for e in entries { all[PairKey(from: e.from, to: e.to)] = e.points }
+        }
+        all.merge(new) { _, new in new }
+        // (Every pair of a few long sets at the most: past that it starts over.)
+        if all.count > 50_000 { all = new }
+        let entries = all.map { Entry(from: $0.key.from, to: $0.key.to, points: $0.value) }
+            .sorted { ($0.from.path, $0.to.path) < ($1.from.path, $1.to.path) }
+        try? JSONEncoder().encode(entries).write(to: url, options: .atomic)
+        let folder = url.deletingLastPathComponent()
+        for old in (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        where old.lastPathComponent.hasPrefix("measured-pairs") && old.lastPathComponent != url.lastPathComponent {
+            try? FileManager.default.removeItem(at: old)
+        }
+    }
+
+    /// Every transition of `mix` not measured yet (nor shaped by hand),
+    /// measured on all cores, remembered; how many were new.
+    @discardableResult
+    static func measure(_ mix: SetMix, cores: Int = ProcessInfo.processInfo.activeProcessorCount) -> Int {
+        let known = load()
+        let todo = mix.transitions.indices.filter { i in
+            let t = mix.transitions[i]
+            return !t.isEdited && known[PairKey(from: mix.tracks[t.from].url, to: mix.tracks[t.to].url)] == nil
+        }
+        guard !todo.isEmpty else { return 0 }
+        var points = [Double](repeating: 0, count: todo.count)
+        let next = Counter()
+        points.withUnsafeMutableBufferPointer { out in
+            let out = out
+            DispatchQueue.concurrentPerform(iterations: max(1, min(cores, todo.count))) { _ in
+                while let k = next.take(below: todo.count) {
+                    out[k] = TransitionMeasure.measure(mix, todo[k]).total
+                }
+            }
+        }
+        var new: [PairKey: Double] = [:]
+        for (k, i) in todo.enumerated() {
+            let t = mix.transitions[i]
+            new[PairKey(from: mix.tracks[t.from].url, to: mix.tracks[t.to].url)] = points[k]
+        }
+        remember(new)
+        return new.count
+    }
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func take(below limit: Int) -> Int? {
+            lock.lock(); defer { lock.unlock() }
+            guard value < limit else { return nil }
+            value += 1
+            return value - 1
+        }
+    }
+}
+
 /// Pair prices for ordering, kept between launches: a pair is planned in
 /// full to be priced (tens of milliseconds), and a set of 58 songs has
 /// 3,306 of them. Keyed by each song's analysis, so a song analysed again
@@ -629,6 +722,20 @@ enum SetOrdering {
             var all = known
             for i in 0..<n { for j in 0..<n where i != j { all[prints[i] + prints[j]] = flat[i * n + j] } }
             PairCosts.save(all)
+        }
+        // What pairs measured once built, on top (see `MeasuredPairs`): a
+        // pair that measured worse than the pairs measured do on the whole
+        // costs more, one that measured better less.
+        if let urls, MeasuredPairs.weight > 0 {
+            let measured = MeasuredPairs.load()
+            if !measured.isEmpty {
+                let mean = measured.values.reduce(0, +) / Double(measured.count)
+                for i in 0..<n { for j in 0..<n where i != j {
+                    if let points = measured[PairKey(from: urls[i], to: urls[j])] {
+                        flat[i * n + j] += MeasuredPairs.weight * (points - mean)
+                    }
+                } }
+            }
         }
         return (0..<n).map { Array(flat[($0 * n)..<($0 * n + n)]) }
     }

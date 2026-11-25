@@ -482,6 +482,7 @@ final class SetSession: ObservableObject {
     /// The song list changed: the old mix no longer applies.
     private func invalidate() {
         orderTask?.cancel()
+        measureTask?.cancel()
         pause()
         isPartial = false
         mix = nil
@@ -557,7 +558,7 @@ final class SetSession: ObservableObject {
                 self.buildStatus = nil
                 self.refreshSnapshot()
                 self.refreshFocus()
-                self.relearn()
+                self.measure(mix)
             } catch is CancellationError {
             } catch {
                 self?.buildStatus = nil
@@ -570,12 +571,28 @@ final class SetSession: ObservableObject {
     /// learnt something about its pairs from the audio (see
     /// `relearnLimit`). Never under the music: a set playing keeps its
     /// order.
-    private func relearn() {
+    private func relearn(measured: Int) {
         guard relearnRounds > 0 else { return }
-        guard !transport.isPlaying, SetMix.Learned.load().count > learntAtOrder else { relearnRounds = 0; return }
+        guard !transport.isPlaying, SetMix.Learned.load().count > learntAtOrder || measured > 0 else { relearnRounds = 0; return }
         relearnRounds -= 1
         order(keepingOrder: false, again: true)
     }
+
+    /// The set as built, its new pairs measured on the audio in the
+    /// background (see `MeasuredPairs`: on two cores while the music
+    /// plays), then ordered again if that taught anything (`relearn`).
+    private func measure(_ mix: SetMix) {
+        measureTask?.cancel()
+        // (A session that keeps nothing, a test's, measures nothing either.)
+        guard persists, MeasuredPairs.weight > 0 else { return relearn(measured: 0) }
+        let cores = transport.isPlaying ? 2 : ProcessInfo.processInfo.activeProcessorCount
+        measureTask = Task { [weak self] in
+            let new = await Task.detached(priority: .background) { MeasuredPairs.measure(mix, cores: cores) }.value
+            guard !Task.isCancelled, let self else { return }
+            self.relearn(measured: new)
+        }
+    }
+    private var measureTask: Task<Void, Never>?
 
     /// Songs a set too long to build at once plays first (see `rebuild`).
     static let quickStartSongs = 3

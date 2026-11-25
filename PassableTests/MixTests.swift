@@ -1216,3 +1216,30 @@ final class HookTests: XCTestCase {
         XCTAssertEqual(s.hook(0), 1, accuracy: 1e-6)
     }
 }
+
+final class MeasuredPairsTests: XCTestCase {
+    /// The points weigh what the score weighs: each defect past its line.
+    func testPointsWeighTheScoresDefects() {
+        var p = TransitionMeasure.Points()
+        p.together = 8
+        XCTAssertEqual(p.total, 0)
+        p.excess = 2.5; p.dip = 4.5; p.busy = 3; p.gap = 5
+        p.aMidSentence = true; p.chopOut = -10; p.chopIn = -3
+        // excess 3, dip 2, busy 1.5, gap 3, mid-sentence 2, cuts 3 and 5
+        let expected: Double = 19.5
+        XCTAssertEqual(p.total, expected, accuracy: 1e-9)
+        p.together = 2; p.step = -5
+        let more: Double = 22.5
+        XCTAssertEqual(p.total, more, accuracy: 1e-9)
+    }
+
+    /// What a measuring run measured is known to it, and never written.
+    func testSessionPairsAreKnownWithoutTouchingTheFile() {
+        let wasReadOnly = SetMix.Learned.isReadOnly
+        SetMix.Learned.isReadOnly = true
+        defer { SetMix.Learned.isReadOnly = wasReadOnly }
+        let key = PairKey(from: URL(fileURLWithPath: "/tmp/passable-test-a.opus"), to: URL(fileURLWithPath: "/tmp/passable-test-b.opus"))
+        MeasuredPairs.remember([key: 4.5])
+        XCTAssertEqual(MeasuredPairs.load()[key], 4.5)
+    }
+}

@@ -19,10 +19,10 @@ while !args.isEmpty {
     switch a {
     case "--out": outDir = URL(fileURLWithPath: args.removeFirst())
     case "--whole": whole = true
-    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--upgrade-vox", "--upgrade-bass", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--club", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts", "--hooks", "--hook-first", "--lock-log": break
+    case "--fidelity", "--exact", "--stretch", "--moves", "--seams", "--report", "--steps", "-v", "--levels", "--renditions", "--stretch-time", "--upgrade-vox", "--upgrade-bass", "--aac-peaks", "--limiter", "--tempos", "--order-only", "--scores", "--measures", "--twins", "--prune-dry", "--prune-now", "--dry", "--as-listed", "--energy", "--club", "--vocals", "--grids", "--shifts", "--word-times", "--breaths", "--clicks", "--parts", "--hooks", "--hook-first", "--lock-log", "--pair-points", "--write-measured": break
     case "--dump-vocals", "--models", "--vocal-step", "--breaths-at", "--phone-mix", "--title", "--bitrate", "--dump-costs": _ = args.removeFirst()
     case "--order": ordered = true
-    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale", "--switch-lead", "--drop-penalty", "--opener-weight", "--warm-up", "--relearn", "--clear-margin", "--learn-from": _ = args.removeFirst()
+    case "--detail", "--shakes", "--cut-cost", "--clash-cost", "--arc", "--kick", "--rot", "--exit-back", "--alone-wait", "--under-cap", "--cut-scale", "--hole-scale", "--busy-scale", "--switch-lead", "--drop-penalty", "--opener-weight", "--warm-up", "--relearn", "--clear-margin", "--learn-from", "--measured", "--measured-weight": _ = args.removeFirst()
     case "--list":
         let text = try String(contentsOfFile: args.removeFirst(), encoding: .utf8)
         songs += text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && !$0.hasPrefix("#") }
@@ -343,6 +343,27 @@ if ordered {
             notes.lock.lock(); notes.lines.append(line); notes.lock.unlock()
         }
     }
+    // --measured FILE (title A, title B, defect points as measured): known
+    // to `MeasuredPairs` for this run, as if the app had measured them;
+    // --measured-weight W prices them.
+    if let k = CommandLine.arguments.firstIndex(of: "--measured-weight") { MeasuredPairs.weight = Double(CommandLine.arguments[k + 1])! }
+    if let k = CommandLine.arguments.firstIndex(of: "--measured") {
+        let index = Dictionary(tracks.map { (SongTitle.of($0.url), $0.url) }, uniquingKeysWith: { a, _ in a })
+        var known: [PairKey: Double] = [:]
+        for line in try String(contentsOfFile: CommandLine.arguments[k + 1], encoding: .utf8).split(separator: "\n") {
+            let f = line.split(separator: "\t").map(String.init)
+            guard f.count == 3, let a = index[f[0]], let b = index[f[1]], let p = Double(f[2]) else { continue }
+            known[PairKey(from: a, to: b)] = p
+        }
+        MeasuredPairs.remember(known)
+        // --write-measured: kept for the app too (its file, as it writes it).
+        if CommandLine.arguments.contains("--write-measured") {
+            SetMix.Learned.isReadOnly = false
+            MeasuredPairs.remember(known)
+            SetMix.Learned.isReadOnly = true
+        }
+        print(String(format: "measured: %d pairs, weight %.2f", known.count, MeasuredPairs.weight))
+    }
     let costs = SetOrdering.costMatrix(analyses, drums: hits, remembered: !CommandLine.arguments.contains("--dump-costs"), urls: tracks.map(\.url))
     if let k = CommandLine.arguments.firstIndex(of: "--dump-costs") {
         try? notes.lines.sorted().joined(separator: "\n").write(toFile: CommandLine.arguments[k + 1] + ".plans", atomically: true, encoding: .utf8)
@@ -381,13 +402,14 @@ if ordered {
         for round in 0..<Int(CommandLine.arguments[k + 1])! {
             let before = tracks.map(\.url)
             let built = try await SetBuilder.build(tracks, moves: ProcessInfo.processInfo.environment["PASSABLE_MOVES"].flatMap(Int.init).map(AutoMoves.init(rawValue:)) ?? .all, processor: processor) { _ in }
-            _ = built
+            // (And measured, as the app measures a set it built.)
+            let measuredNew = MeasuredPairs.weight > 0 ? MeasuredPairs.measure(built) : 0
             let analyses = tracks.map(\.loaded.analysis)
             let costs = SetOrdering.costMatrix(analyses, drums: BeatAlign.attacks(of: tracks.map(\.loaded)), remembered: true, urls: tracks.map(\.url))
             let washOuts = SetOrdering.washOuts(analyses), energies = analyses.map(SetOrdering.energy)
             let order = SetOrdering.order(costs, washOuts: washOuts, energies: energies, shakes: shakes)
             let l = SetMix.Learned.session
-            print(String(format: "relearn %d: learnt %d unlocked, %d clashed, %d locked; order cost %.2f", round + 1, l.unlocked.count, l.clashed.count, l.locked.count,
+            print(String(format: "relearn %d: learnt %d unlocked, %d clashed, %d locked, measured %d more pairs; order cost %.2f", round + 1, l.unlocked.count, l.clashed.count, l.locked.count, measuredNew,
                          SetOrdering.total(order, costs, washOuts, energies)))
             tracks = order.map { tracks[$0] }
             if tracks.map(\.url) == before { break }
@@ -1282,6 +1304,20 @@ if CommandLine.arguments.contains("--club") {
     print(String(format: "CLUB %d songs: energy drops %d, tempo jumps %d, holes %d, low-end holes %d, opener %@ (energy %.2f, rank %.0f %%), off the arc %.3f, songs alone median %.0f s (90th %.0f s) | club score %.1f",
                  energies.count, drops.count, jumps.count, holes.count, lowHoles.count, openerHigh ? "HIGH" : "ok", energies[0], rank * 100,
                  arcRMS, median(alone), alone.sorted()[alone.count * 9 / 10], club))
+    exit(0)
+}
+if CommandLine.arguments.contains("--pair-points") {
+    // Each transition as `TransitionMeasure` measures it, on all cores.
+    let clock = Date()
+    var all = [Double](repeating: 0, count: mix.transitions.count)
+    all.withUnsafeMutableBufferPointer { out in
+        let out = out
+        DispatchQueue.concurrentPerform(iterations: mix.transitions.count) { out[$0] = TransitionMeasure.measure(mix, $0).total }
+    }
+    for (i, t) in mix.transitions.enumerated() {
+        print(String(format: "PP\t%@\t%@\t%.2f", SongTitle.of(mix.tracks[t.from].url), SongTitle.of(mix.tracks[t.to].url), all[i]))
+    }
+    print(String(format: "pair points %.1f over %d transitions in %@", all.reduce(0, +), all.count, seconds(clock)))
     exit(0)
 }
 if CommandLine.arguments.contains("--report") {
